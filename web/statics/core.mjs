@@ -4,25 +4,29 @@
  * Requires network + CSP allowing `esm.sh`.
  */
 import {
-  Input,
-  Output,
-  Conversion,
   ALL_FORMATS,
   BlobSource,
+  Conversion,
+  Input,
   Mp4OutputFormat,
   NullTarget,
-  canEncodeVideo,
+  Output,
   canEncodeAudio,
+  canEncodeVideo,
 } from "https://esm.sh/mediabunny";
 import shaka from "https://esm.sh/shaka-player";
 
 const FAKE_ORIGIN = "https://filstream.invalid";
-const FRAGMENT_SECONDS = 2;
+const FRAGMENT_SECONDS = 5;
 
-/** @see runFilstreamPipeline `segmentReadyTarget` */
+/** @see runFilstreamPipeline event target */
 export const SEGMENT_READY_EVENT = "segmentready";
 /** Fired before a VP9 re-encode attempt after a recoverable hardware failure — drop buffered partials for that variant. */
 export const SEGMENT_FLUSH_EVENT = "segmentflush";
+/** Non-binary artifacts: `init.json`, `*.m3u8`, `meta.json`, etc. */
+export const FILE_EVENT = "fileEvent";
+/** All variants encoded, playlists assembled, Shaka loaded; includes root (local) master text. */
+export const DONE_EVENT = "doneEvent";
 
 /** Max(width,height) must be at least this to include a 1080p-height rung. */
 const MIN_MAJOR_DIM_FOR_1080_RUNG = 1200;
@@ -131,6 +135,33 @@ function scaledWidth(srcW, srcH, targetH) {
   let w = Math.floor((srcW * targetH) / srcH);
   w -= w % 2;
   return Math.max(2, w);
+}
+
+/** Even display height, matching `ladderHeights` source rounding. */
+function evenDisplayH(h) {
+  const x = Math.max(2, h);
+  return x - (x % 2);
+}
+
+/** @param {unknown} vt */
+function inputTrackLooksLikeAvc(vt) {
+  if (vt == null || typeof vt !== "object") return false;
+  if (/** @type {{ codec?: string }} */ (vt).codec === "avc") return true;
+  const id = /** @type {{ internalCodecId?: unknown }} */ (vt).internalCodecId;
+  return typeof id === "string" && id.toLowerCase().startsWith("avc");
+}
+
+/**
+ * Top ABR rung matches source display size (no scale) and input is AVC — Mediabunny can copy
+ * packets if we omit `bitrate` and `keyFrameInterval` (both force transcode).
+ */
+function canFastRemuxAvcTopRung(vt, srcW, srcH, heights, rungIndex, useAvc) {
+  if (!useAvc || !vt || rungIndex !== 0) return false;
+  if (!inputTrackLooksLikeAvc(vt)) return false;
+  const sh = evenDisplayH(srcH);
+  if (heights[0] !== sh) return false;
+  const w = scaledWidth(srcW, srcH, heights[0]);
+  return w === srcW;
 }
 
 function bandwidthBits(videoBps, includeAudio) {
@@ -351,6 +382,7 @@ function isRecoverableVideoHwError(message) {
 
 /**
  * @param {FragmentReadyHooks | null | undefined} hooks
+ * @param {boolean} [tryAvcPacketCopy] H.264 in / H.264 out without `bitrate` or `keyFrameInterval` so Mediabunny may copy samples
  */
 async function convertToFmp4Segments(
   file,
@@ -359,19 +391,17 @@ async function convertToFmp4Segments(
   onProgress,
   videoCodec,
   hooks,
+  tryAvcPacketCopy = false,
 ) {
-  const hwModes =
-    videoCodec === "avc"
-      ? ["prefer-hardware"]
-      : ["prefer-hardware", "no-preference", "prefer-software"];
-  let lastError = null;
-
-  for (let attemptIdx = 0; attemptIdx < hwModes.length; attemptIdx++) {
-    const hwAccel = hwModes[attemptIdx];
-    if (attemptIdx > 0) {
-      hooks?.onEncodeAttemptReset?.();
-    }
-
+  /**
+   * @param {Record<string, unknown>} videoBlock
+   * @returns {Promise<
+   *   | { ok: true, init: Uint8Array, segments: Uint8Array[], fragmentStartsSec: number[], durationSec: number }
+   *   | { ok: false, phase: "invalid", reasons: string }
+   *   | { ok: false, phase: "execute", error: unknown }
+   * >}
+   */
+  async function runOneFmp4Attempt(videoBlock) {
     let ftyp = null;
     let moov = null;
     let pendingMoof = null;
@@ -435,15 +465,7 @@ async function convertToFmp4Segments(
     const conversion = await Conversion.init({
       input,
       output,
-      video: {
-        codec: videoCodec,
-        height: videoOpts.height,
-        width: videoOpts.width,
-        fit: "contain",
-        keyFrameInterval: FRAGMENT_SECONDS,
-        bitrate: videoOpts.bitrate,
-        hardwareAcceleration: hwAccel,
-      },
+      video: videoBlock,
       audio: includeAudio
         ? { codec: "opus", bitrate: 128_000 }
         : { discard: true },
@@ -454,40 +476,33 @@ async function convertToFmp4Segments(
       const reasons = conversion.discardedTracks
         .map((t) => t.reason)
         .join("; ");
-      lastError = new Error(
-        reasons || "Conversion is not valid for this file",
-      );
-      if (
-        videoCodec === "vp9" &&
-        hwAccel !== "prefer-software" &&
-        isRecoverableVideoHwError(reasons)
-      ) {
-        continue;
-      }
-      throw lastError;
+      return {
+        ok: false,
+        phase: "invalid",
+        reasons: reasons || "Conversion is not valid for this file",
+      };
     }
 
     try {
       conversion.onProgress = onProgress;
       await conversion.execute();
-    } catch (e) {
-      lastError = e;
-      const msg = e?.message || String(e);
-      if (
-        videoCodec === "vp9" &&
-        hwAccel !== "prefer-software" &&
-        isRecoverableVideoHwError(msg)
-      ) {
-        continue;
-      }
-      throw e;
+    } catch (error) {
+      return { ok: false, phase: "execute", error };
     }
 
     if (!ftyp || !moov) {
-      throw new Error("Missing ftyp/moov from fragmented output");
+      return {
+        ok: false,
+        phase: "execute",
+        error: new Error("Missing ftyp/moov from fragmented output"),
+      };
     }
     if (pendingMoof) {
-      throw new Error("Incomplete fragment (moof without mdat)");
+      return {
+        ok: false,
+        phase: "execute",
+        error: new Error("Incomplete fragment (moof without mdat)"),
+      };
     }
 
     const init = new Uint8Array(ftyp.byteLength + moov.byteLength);
@@ -496,7 +511,80 @@ async function convertToFmp4Segments(
 
     const durationSec = await input.computeDuration();
 
-    return { init, segments, fragmentStartsSec, durationSec };
+    return { ok: true, init, segments, fragmentStartsSec, durationSec };
+  }
+
+  if (tryAvcPacketCopy && videoCodec === "avc") {
+    const remux = await runOneFmp4Attempt({
+      codec: "avc",
+      fit: "contain",
+      forceTranscode: false,
+      hardwareAcceleration: "no-preference",
+    });
+    if (remux.ok) {
+      return {
+        init: remux.init,
+        segments: remux.segments,
+        fragmentStartsSec: remux.fragmentStartsSec,
+        durationSec: remux.durationSec,
+      };
+    }
+    hooks?.onEncodeAttemptReset?.();
+  }
+
+  const hwModes =
+    videoCodec === "avc"
+      ? ["prefer-hardware"]
+      : ["prefer-hardware", "no-preference", "prefer-software"];
+  let lastError = null;
+
+  for (let attemptIdx = 0; attemptIdx < hwModes.length; attemptIdx++) {
+    const hwAccel = hwModes[attemptIdx];
+    if (attemptIdx > 0) {
+      hooks?.onEncodeAttemptReset?.();
+    }
+
+    const r = await runOneFmp4Attempt({
+      codec: videoCodec,
+      height: videoOpts.height,
+      width: videoOpts.width,
+      fit: "contain",
+      keyFrameInterval: FRAGMENT_SECONDS,
+      bitrate: videoOpts.bitrate,
+      hardwareAcceleration: hwAccel,
+    });
+
+    if (!r.ok && r.phase === "invalid") {
+      lastError = new Error(r.reasons);
+      if (
+        videoCodec === "vp9" &&
+        hwAccel !== "prefer-software" &&
+        isRecoverableVideoHwError(r.reasons)
+      ) {
+        continue;
+      }
+      throw lastError;
+    }
+
+    if (!r.ok && r.phase === "execute") {
+      lastError = r.error;
+      const msg = r.error?.message || String(r.error);
+      if (
+        videoCodec === "vp9" &&
+        hwAccel !== "prefer-software" &&
+        isRecoverableVideoHwError(msg)
+      ) {
+        continue;
+      }
+      throw r.error;
+    }
+
+    return {
+      init: r.init,
+      segments: r.segments,
+      fragmentStartsSec: r.fragmentStartsSec,
+      durationSec: r.durationSec,
+    };
   }
 
   throw (
@@ -523,10 +611,67 @@ async function convertToFmp4Segments(
  */
 
 /**
+ * @typedef {object} FileEventDetail
+ * @property {string} path relative path (e.g. `v0/init.json`, `master-local.m3u8`)
+ * @property {string} mimeType e.g. `application/json`, `application/vnd.apple.mpegurl`
+ * @property {Uint8Array} data UTF-8 for text artifacts
+ */
+
+/**
+ * @typedef {object} DoneEventDetail
+ * @property {string} rootM3U8Text `master-local.m3u8` contents (relative `v{n}/playlist.m3u8` lines)
+ * @property {string} rootM3U8Path always `master-local.m3u8`
+ * @property {string} masterAppM3U8Text in-app master (fake-origin URLs) for parity with Shaka
+ * @property {number} nVar number of variants
+ * @property {string} segmentCounts human summary from ladder
+ * @property {string} stackHint codec / stack blurb
+ * @property {string} metaJsonText same JSON as the `meta.json` file event (pretty-printed)
+ * @property {string} metaPath always `meta.json`
+ */
+
+/**
+ * Prefer `filstreamEventTarget` for every pipeline event; otherwise `segmentReadyTarget`.
+ * @param {{ segmentReadyTarget?: EventTarget, filstreamEventTarget?: EventTarget }} ui
+ * @returns {EventTarget | null}
+ */
+function filstreamEventBus(ui) {
+  return ui.filstreamEventTarget ?? ui.segmentReadyTarget ?? null;
+}
+
+/**
+ * @param {{ onFileEvent?: (d: FileEventDetail) => void, filstreamEventTarget?: EventTarget, segmentReadyTarget?: EventTarget }} ui
+ * @param {FileEventDetail} detail
+ */
+function dispatchFileEvent(ui, detail) {
+  if (!ui.onFileEvent && !filstreamEventBus(ui)) return;
+  try {
+    void ui.onFileEvent?.(detail);
+    filstreamEventBus(ui)?.dispatchEvent(new CustomEvent(FILE_EVENT, { detail }));
+  } catch (e) {
+    console.error("[FilStream] onFileEvent / fileEvent failed:", e);
+  }
+}
+
+/**
+ * @param {{ onDoneEvent?: (d: DoneEventDetail) => void, filstreamEventTarget?: EventTarget, segmentReadyTarget?: EventTarget }} ui
+ * @param {DoneEventDetail} detail
+ */
+function dispatchDoneEvent(ui, detail) {
+  if (!ui.onDoneEvent && !filstreamEventBus(ui)) return;
+  try {
+    void ui.onDoneEvent?.(detail);
+    filstreamEventBus(ui)?.dispatchEvent(new CustomEvent(DONE_EVENT, { detail }));
+  } catch (e) {
+    console.error("[FilStream] onDoneEvent / doneEvent failed:", e);
+  }
+}
+
+/**
  * @param {{
  *   onSegmentReady?: (d: SegmentReadyDetail) => void | Promise<void>,
  *   onSegmentFlush?: (d: SegmentFlushDetail) => void | Promise<void>,
  *   segmentReadyTarget?: EventTarget,
+ *   filstreamEventTarget?: EventTarget,
  * }} ui
  * @param {number} variantIndex
  * @param {number} width
@@ -534,7 +679,7 @@ async function convertToFmp4Segments(
  * @returns {FragmentReadyHooks | null}
  */
 function buildVariantSegmentHooks(ui, variantIndex, width, height) {
-  if (!ui.segmentReadyTarget && !ui.onSegmentReady && !ui.onSegmentFlush) {
+  if (!filstreamEventBus(ui) && !ui.onSegmentReady && !ui.onSegmentFlush) {
     return null;
   }
   return {
@@ -550,8 +695,8 @@ function buildVariantSegmentHooks(ui, variantIndex, width, height) {
       };
       try {
         void ui.onSegmentReady?.(detail);
-        ui.segmentReadyTarget?.dispatchEvent(
-          new CustomEvent("segmentready", { detail }),
+        filstreamEventBus(ui)?.dispatchEvent(
+          new CustomEvent(SEGMENT_READY_EVENT, { detail }),
         );
       } catch (e) {
         console.error("[FilStream] onSegmentReady / segmentready handler failed:", e);
@@ -567,8 +712,8 @@ function buildVariantSegmentHooks(ui, variantIndex, width, height) {
       };
       try {
         void ui.onSegmentFlush?.(detail);
-        ui.segmentReadyTarget?.dispatchEvent(
-          new CustomEvent("segmentflush", { detail }),
+        filstreamEventBus(ui)?.dispatchEvent(
+          new CustomEvent(SEGMENT_FLUSH_EVENT, { detail }),
         );
       } catch (e) {
         console.error("[FilStream] onSegmentFlush / segmentflush handler failed:", e);
@@ -750,12 +895,17 @@ export async function uploadDebugHlsToServer(baseUrl = "") {
  *   }) => void,
  *   onSegmentReady?: (d: SegmentReadyDetail) => void | Promise<void>,
  *   onSegmentFlush?: (d: SegmentFlushDetail) => void | Promise<void>,
+ *   onFileEvent?: (d: FileEventDetail) => void | Promise<void>,
+ *   onDoneEvent?: (d: DoneEventDetail) => void | Promise<void>,
  *   segmentReadyTarget?: EventTarget,
+ *   filstreamEventTarget?: EventTarget,
  * }} ui
  *
- * Incremental output: set `segmentReadyTarget` (e.g. `new EventTarget()`) and/or `onSegmentReady`.
- * Listen with `segmentReadyTarget.addEventListener(SEGMENT_READY_EVENT, (e) => { e.detail … })` (`CustomEvent`).
- * On VP9 hardware fallback, `SEGMENT_FLUSH_EVENT` / `onSegmentFlush` runs first so you can discard partial uploads for that variant.
+ * **Events** (all `CustomEvent` on `filstreamEventTarget ?? segmentReadyTarget` when set):
+ * - `SEGMENT_READY_EVENT` / `onSegmentReady` — binary init + media segments as they encode.
+ * - `SEGMENT_FLUSH_EVENT` / `onSegmentFlush` — before a VP9 re-attempt; drop partials for that variant.
+ * - `FILE_EVENT` / `onFileEvent` — text artifacts: per variant `v{n}/init.json`, `v{n}/playlist.m3u8` (local paths), `v{n}/playlist-app.m3u8` (fake-origin media playlist); then `master-local.m3u8`, `master-app.m3u8`, `meta.json`.
+ * - `DONE_EVENT` / `onDoneEvent` — after Shaka `load` succeeds; includes `rootM3U8Text`, `metaJsonText` (same as `meta.json` file event), etc.
  */
 export async function runFilstreamPipeline(file, ui) {
   const { setStatus, setProgress, getVideoElement, onPlaybackReady } = ui;
@@ -818,10 +968,21 @@ export async function runFilstreamPipeline(file, ui) {
       ? buildAvcCodecString(maxW, maxH, maxBr)
       : "vp09.00.41.08";
 
+    const mayRemuxTop =
+      useAvc && canFastRemuxAvcTopRung(vt, srcW, srcH, heights, 0, useAvc);
+    const remuxOnly = mayRemuxTop && nVar === 1;
     setStatus(
-      includeAudio
-        ? `Transcoding ${nVar} ${videoLabel} + Opus rung(s) for HLS ABR…`
-        : `Transcoding ${nVar} ${videoLabel} rung(s) for HLS ABR…`,
+      remuxOnly
+        ? includeAudio
+          ? `HLS: remuxing H.264 + Opus (no video re-encode)…`
+          : `HLS: remuxing H.264 (no video re-encode)…`
+        : mayRemuxTop
+          ? includeAudio
+            ? `HLS ABR: H.264 remux at source resolution + Opus + transcoded lower rung(s)…`
+            : `HLS ABR: H.264 remux at source resolution + transcoded lower rung(s)…`
+          : includeAudio
+            ? `Transcoding ${nVar} ${videoLabel} + Opus rung(s) for HLS ABR…`
+            : `Transcoding ${nVar} ${videoLabel} rung(s) for HLS ABR…`,
       "",
     );
     setProgress(0);
@@ -831,12 +992,21 @@ export async function runFilstreamPipeline(file, ui) {
       const sum = globalProgress.reduce((a, p) => a + p, 0);
       setProgress(Math.round(Math.min(100, (sum / nVar) * 100)));
     };
+    const textEnc = new TextEncoder();
 
     async function encodeRung(i) {
       const h = heights[i];
       const w = scaledWidth(srcW, srcH, h);
       const br = vp9BitrateForHeight(h);
       const segmentHooks = buildVariantSegmentHooks(ui, i, w, h);
+      const tryAvcPacketCopy = canFastRemuxAvcTopRung(
+        vt,
+        srcW,
+        srcH,
+        heights,
+        i,
+        useAvc,
+      );
       const { init, segments, fragmentStartsSec, durationSec } =
         await convertToFmp4Segments(
           file,
@@ -848,9 +1018,38 @@ export async function runFilstreamPipeline(file, ui) {
           },
           videoCodec,
           segmentHooks,
+          tryAvcPacketCopy,
         );
       globalProgress[i] = 1;
       reportProgress();
+
+      const dursSec = segmentDurationsSec(fragmentStartsSec, durationSec);
+      const initJson = {
+        variantIndex: i,
+        width: w,
+        height: h,
+        bandwidth: bandwidthBits(br, includeAudio),
+        segmentCount: segments.length,
+        durationSec,
+        videoCodec,
+        includeAudio,
+        fragmentDurationSec: FRAGMENT_SECONDS,
+      };
+      dispatchFileEvent(ui, {
+        path: `v${i}/init.json`,
+        mimeType: "application/json",
+        data: textEnc.encode(JSON.stringify(initJson, null, 2)),
+      });
+      dispatchFileEvent(ui, {
+        path: `v${i}/playlist.m3u8`,
+        mimeType: "application/vnd.apple.mpegurl",
+        data: textEnc.encode(buildMediaPlaylistLocal(dursSec)),
+      });
+      dispatchFileEvent(ui, {
+        path: `v${i}/playlist-app.m3u8`,
+        mimeType: "application/vnd.apple.mpegurl",
+        data: textEnc.encode(buildMediaPlaylist(i, dursSec)),
+      });
 
       const initURL = pushBlobURL(new Blob([init], { type: "video/mp4" }));
       const segmentURLs = segments.map((seg) =>
@@ -862,7 +1061,7 @@ export async function runFilstreamPipeline(file, ui) {
         initURL,
         segmentURLs,
         durationSec,
-        dursSec: segmentDurationsSec(fragmentStartsSec, durationSec),
+        dursSec,
         width: w,
         height: h,
         bandwidth: bandwidthBits(br, includeAudio),
@@ -938,10 +1137,24 @@ export async function runFilstreamPipeline(file, ui) {
       includeAudio,
       masterVideoCodecParam,
     );
+    const masterTextLocal = buildMasterPlaylistLocal(
+      encoded,
+      includeAudio,
+      masterVideoCodecParam,
+    );
     const masterURL = pushBlobURL(
       new Blob([masterText], { type: "application/vnd.apple.mpegurl" }),
     );
 
+    const metaPayload = {
+      assembledAt: new Date().toISOString(),
+      sourceName: file.name,
+      nVar,
+      videoCodec,
+      includeAudio,
+      fragmentDurationSec: FRAGMENT_SECONDS,
+    };
+    const metaJsonText = JSON.stringify(metaPayload, null, 2);
     player = new shaka.Player();
     await player.attach(video, true);
     // Blob/object URLs complete instantly; Shaka's default throughput guess + Network
@@ -980,17 +1193,23 @@ export async function runFilstreamPipeline(file, ui) {
       });
       debugHlsSnapshot = {
         masterTextApp: masterText,
-        masterTextLocal: buildMasterPlaylistLocal(
-          encoded,
-          includeAudio,
-          masterVideoCodecParam,
-        ),
+        masterTextLocal,
         variants: encoded.map((v, i) => ({
           playlistTextLocal: buildMediaPlaylistLocal(v.dursSec),
           initURL: v.initURL,
           segmentURLs: v.segmentURLs.slice(),
         })),
       };
+      dispatchDoneEvent(ui, {
+        rootM3U8Text: masterTextLocal,
+        rootM3U8Path: "master-local.m3u8",
+        masterAppM3U8Text: masterText,
+        nVar,
+        segmentCounts: segSummary,
+        stackHint,
+        metaJsonText,
+        metaPath: "meta.json",
+      });
       setStatus(
         `Ready — ${nVar} HLS levels (${segSummary}). Local ABR favors high quality. ${stackHint}`,
         "ok",

@@ -228,7 +228,7 @@ function renderWizard() {
                   <p id="step1-title" class="hint">
                     Pick a video, such as
                     <a
-                      href="https://download.blender.org/peach/bigbuckbunny_movies/big_buck_bunny_1080p_stereo.avi"
+                      href="https://download.blender.org/peach/bigbuckbunny_movies/big_buck_bunny_1080p_h264.mov"
                       >Big Buck Bunny</a
                     >. Output uses <strong>H.264 or VP9</strong>, plus <strong>Opus</strong>. Bitrate
                     rungs include 1080 / 720 / 360 / 144. After you choose a file, encoding and playback
