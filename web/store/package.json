@@ -1,0 +1,16 @@
+{
+  "name": "filstream-store",
+  "private": true,
+  "type": "module",
+  "version": "0.1.0",
+  "description": "FilStream Synapse store service",
+  "scripts": {
+    "start": "node src/server.mjs"
+  },
+  "dependencies": {
+    "@filoz/synapse-core": "^0.3.1",
+    "@filoz/synapse-sdk": "latest",
+    "dotenv": "^16.4.5",
+    "viem": "^2.30.0"
+  }
+}

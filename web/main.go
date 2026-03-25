@@ -23,6 +23,11 @@ func main() {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/debug-hls", handleDebugHls)
+	if storeProxy, err := newStoreProxyHandler(storeBaseURLFromEnv()); err != nil {
+		log.Printf("store proxy disabled: %v", err)
+	} else {
+		mux.Handle("/api/store/", storeProxy)
+	}
 	mux.Handle("/", http.FileServer(http.Dir(staticRoot)))
 
 	addr := ":8080"

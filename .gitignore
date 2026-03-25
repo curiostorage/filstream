@@ -30,11 +30,16 @@ go.work.sum
 # HLS transcode job output (web server)
 web/jobs/
 
+.idea
+
 # Browser "debug save locally" HLS dumps (POST /api/debug-hls)
 web/debug-hls/
 
 # Stray fMP4 segments (not used by static in-browser app)
 web/seg_*.m4s
+
+# Store service dependencies
+web/store/node_modules/
 
 # Editor/IDE
 # .idea/

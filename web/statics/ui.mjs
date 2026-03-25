@@ -6,10 +6,15 @@ import { html, render } from "https://cdn.jsdelivr.net/npm/lit-html@3.2.1/+esm";
 import { applyStreamMode, convertProgressPanel } from "./convert-progress.mjs";
 import {
   emitListingDetailsEvent,
+  FILE_EVENT,
   hasDebugHlsSnapshot,
+  LISTING_DETAILS_EVENT,
   probeVideoEncoderHardwareAcceleration,
   resetFilstreamPlayback,
   runFilstreamPipeline,
+  SEGMENT_FLUSH_EVENT,
+  SEGMENT_READY_EVENT,
+  TRANSCODE_COMPLETE_EVENT,
   uploadDebugHlsToServer,
 } from "./core.mjs";
 import {
@@ -27,9 +32,298 @@ import { uploadConfigurePanel } from "./upload-configure.mjs";
 import { publishMetadataForm } from "./publish-metadata.mjs";
 
 const WIZARD_MAX_STEP = 5;
+const STORE_API_BASE = "/api/store";
+
+/**
+ * @typedef {{ [permissionHash: string]: string | number | bigint }} StoreSessionExpirations
+ * @typedef {{
+ *   sessionPrivateKey: string,
+ *   sessionExpirations: StoreSessionExpirations,
+ * }} StoreSessionAuth
+ * @typedef {{
+ *   assetId: string,
+ *   clientAddress: string,
+ *   sessionPrivateKey: string,
+ *   sessionExpirations: StoreSessionExpirations,
+ * }} StoreInitRequest
+ * @typedef {{
+ *   uploadId: string,
+ *   dataSetId: number,
+ *   providerId: number,
+ *   filstreamId: string,
+ *   createdDataSet: boolean,
+ * }} StoreInitResponse
+ * @typedef {{
+ *   finalized: boolean,
+ *   committedCount: number,
+ *   transactionHash: string | null,
+ *   masterAppUrl: string | null,
+ *   manifestUrl: string | null,
+ *   dataSetId: number,
+ * }} StoreFinalizeResponse
+ */
 
 /** Shared with {@link runFilstreamPipeline} and {@link emitListingDetailsEvent} for FilStream custom events. */
 const filstreamEvents = { filstreamEventTarget: new EventTarget() };
+
+const storeRuntime = {
+  uploadId: "",
+  assetId: "",
+  initPromise: null,
+  queue: Promise.resolve(),
+  disabled: false,
+  finalized: false,
+  finalizeResult: null,
+};
+
+// TODO(asset-id-policy): Replace random fallback with the canonical app-level asset id strategy.
+function randomAssetId() {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return `asset_${crypto.randomUUID()}`;
+  }
+  return `asset_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+}
+
+/**
+ * @param {unknown} value
+ * @returns {value is StoreSessionExpirations}
+ */
+function isStoreSessionExpirations(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  for (const expiration of Object.values(/** @type {Record<string, unknown>} */ (value))) {
+    if (
+      typeof expiration !== "string" &&
+      typeof expiration !== "number" &&
+      typeof expiration !== "bigint"
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * @param {Uint8Array} bytes
+ * @returns {string}
+ */
+function bytesToBase64(bytes) {
+  let bin = "";
+  const CHUNK = 0x8000;
+  for (let i = 0; i < bytes.length; i += CHUNK) {
+    const slice = bytes.subarray(i, i + CHUNK);
+    bin += String.fromCharCode(...slice);
+  }
+  return btoa(bin);
+}
+
+/**
+ * @param {string} eventType
+ * @param {unknown} detail
+ * @returns {Record<string, unknown>}
+ */
+function toStoreEventDetail(eventType, detail) {
+  if (!detail || typeof detail !== "object") return {};
+  const src = /** @type {Record<string, unknown>} */ (detail);
+  if (eventType === SEGMENT_READY_EVENT || eventType === FILE_EVENT) {
+    const out = { ...src };
+    const data = src.data;
+    if (data instanceof Uint8Array) {
+      out.dataBase64 = bytesToBase64(data);
+    }
+    delete out.data;
+    return out;
+  }
+  if (eventType === TRANSCODE_COMPLETE_EVENT) {
+    return {
+      masterAppM3U8Text:
+        typeof src.masterAppM3U8Text === "string" ? src.masterAppM3U8Text : "",
+      rootM3U8Text: typeof src.rootM3U8Text === "string" ? src.rootM3U8Text : "",
+    };
+  }
+  if (eventType === LISTING_DETAILS_EVENT) {
+    return {
+      metaPath: typeof src.metaPath === "string" ? src.metaPath : "meta.json",
+      metaJsonText:
+        typeof src.metaJsonText === "string" ? src.metaJsonText : "",
+    };
+  }
+  return { ...src };
+}
+
+/**
+ * POST JSON payload to store API and return parsed JSON response.
+ *
+ * @template T
+ * @param {string} path
+ * @param {Record<string, unknown>} payload
+ * @returns {Promise<T>}
+ */
+async function postStoreJson(path, payload) {
+  const res = await fetch(`${STORE_API_BASE}${path}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  const bodyText = await res.text();
+  let parsed = null;
+  try {
+    parsed = bodyText ? JSON.parse(bodyText) : null;
+  } catch {
+    parsed = null;
+  }
+  if (!res.ok) {
+    const msg =
+      (parsed && typeof parsed.error === "string" && parsed.error) ||
+      bodyText ||
+      res.statusText ||
+      String(res.status);
+    throw new Error(msg);
+  }
+  return /** @type {T} */ (parsed);
+}
+
+/**
+ * Resolve session auth inputs for store init from frontend session state.
+ *
+ * TODO(session-bootstrap): Wire this to the real session bootstrap output.
+ * Required values:
+ * - `sessionPrivateKey` (hex string)
+ * - `sessionExpirations` map containing required FWSS permission expirations
+ *
+ * @returns {StoreSessionAuth | null}
+ */
+function readStoreSessionAuth() {
+  const sessionPrivateKey =
+    typeof wizardState.sessionPrivateKey === "string"
+      ? wizardState.sessionPrivateKey.trim()
+      : "";
+  const sessionExpirations = wizardState.sessionExpirations;
+  if (!sessionPrivateKey || !isStoreSessionExpirations(sessionExpirations)) {
+    return null;
+  }
+  return {
+    sessionPrivateKey,
+    sessionExpirations,
+  };
+}
+
+async function ensureStoreUploadSession() {
+  if (storeRuntime.disabled) return;
+  if (storeRuntime.uploadId) return;
+  if (storeRuntime.initPromise) {
+    await storeRuntime.initPromise;
+    return;
+  }
+  storeRuntime.initPromise = (async () => {
+    const assetId = storeRuntime.assetId || randomAssetId();
+    storeRuntime.assetId = assetId;
+    const clientAddress = wizardState.walletAddress;
+    if (!clientAddress) {
+      throw new Error(
+        "Missing client wallet address. Connect wallet before starting upload.",
+      );
+    }
+    const auth = readStoreSessionAuth();
+    if (!auth) {
+      throw new Error(
+        "Session auth is not ready. Complete frontend session bootstrap before upload init.",
+      );
+    }
+    const payload = /** @type {StoreInitRequest} */ ({
+      assetId,
+      clientAddress,
+      sessionPrivateKey: auth.sessionPrivateKey,
+      sessionExpirations: auth.sessionExpirations,
+    });
+    const initRes = /** @type {StoreInitResponse} */ (
+      await postStoreJson("/uploads/init", payload)
+    );
+    storeRuntime.uploadId =
+      typeof initRes?.uploadId === "string" ? initRes.uploadId : "";
+    if (!storeRuntime.uploadId) {
+      throw new Error("store init response missing uploadId");
+    }
+  })();
+  try {
+    await storeRuntime.initPromise;
+  } finally {
+    storeRuntime.initPromise = null;
+  }
+}
+
+function queueStoreEvent(eventType, detail) {
+  const payloadDetail = toStoreEventDetail(eventType, detail);
+  storeRuntime.queue = storeRuntime.queue
+    .then(async () => {
+      if (storeRuntime.disabled || storeRuntime.finalized) return;
+      await ensureStoreUploadSession();
+      if (!storeRuntime.uploadId) return;
+      await postStoreJson(`/uploads/${storeRuntime.uploadId}/events`, {
+        type: eventType,
+        detail: payloadDetail,
+      });
+    })
+    .catch((error) => {
+      storeRuntime.disabled = true;
+      setWizardStatus(
+        `[Store] ${error instanceof Error ? error.message : String(error)}`,
+        "err",
+      );
+    });
+}
+
+async function finalizeStoreUpload() {
+  if (storeRuntime.disabled || storeRuntime.finalized) {
+    return storeRuntime.finalizeResult;
+  }
+  await storeRuntime.queue;
+  await ensureStoreUploadSession();
+  if (!storeRuntime.uploadId) {
+    throw new Error("Store upload session not initialized");
+  }
+  const result = /** @type {StoreFinalizeResponse} */ (
+    await postStoreJson(`/uploads/${storeRuntime.uploadId}/finalize`, {})
+  );
+  storeRuntime.finalized = true;
+  storeRuntime.finalizeResult = result;
+  return result;
+}
+
+async function resetStoreRuntime(abortRemote) {
+  const previousUploadId = storeRuntime.uploadId;
+  storeRuntime.uploadId = "";
+  storeRuntime.assetId = "";
+  storeRuntime.initPromise = null;
+  storeRuntime.queue = Promise.resolve();
+  storeRuntime.disabled = false;
+  storeRuntime.finalized = false;
+  storeRuntime.finalizeResult = null;
+  if (abortRemote && previousUploadId) {
+    try {
+      await postStoreJson(`/uploads/${previousUploadId}/abort`, {});
+    } catch {
+      /* ignore abort errors during reset */
+    }
+  }
+}
+
+function installStoreEventBridge() {
+  const onEvent = (ev) => {
+    const ce = /** @type {CustomEvent<unknown>} */ (ev);
+    queueStoreEvent(ev.type, ce.detail ?? {});
+  };
+  filstreamEvents.filstreamEventTarget.addEventListener(SEGMENT_READY_EVENT, onEvent);
+  filstreamEvents.filstreamEventTarget.addEventListener(SEGMENT_FLUSH_EVENT, onEvent);
+  filstreamEvents.filstreamEventTarget.addEventListener(FILE_EVENT, onEvent);
+  filstreamEvents.filstreamEventTarget.addEventListener(
+    TRANSCODE_COMPLETE_EVENT,
+    onEvent,
+  );
+  filstreamEvents.filstreamEventTarget.addEventListener(
+    LISTING_DETAILS_EVENT,
+    onEvent,
+  );
+}
 
 const wizardState = {
   step: 1,
@@ -47,6 +341,20 @@ const wizardState = {
   walletAddress: null,
   /** @type {string | null} */
   connectedWalletName: null,
+  /**
+   * TODO(session-bootstrap): Set from frontend session bootstrap flow.
+   * TODO(session-bootstrap): Must be the user-scoped session key private key.
+   * Must be provided before calling store init.
+   */
+  sessionPrivateKey: "",
+  /**
+   * TODO(session-bootstrap): Set from frontend session bootstrap flow.
+   * TODO(session-bootstrap): Must include required FWSS permission hashes -> expiration values.
+   * Must include required FWSS permission expirations.
+   *
+   * @type {StoreSessionExpirations | null}
+   */
+  sessionExpirations: null,
   walletBusy: false,
   /** @type {string | null} */
   walletError: null,
@@ -396,6 +704,19 @@ async function handleDefineNext() {
 
   wizardState.step = 4;
   renderWizard();
+  try {
+    setWizardStatus("Uploading to storage…", "");
+    const finalized = await finalizeStoreUpload();
+    const masterUrl =
+      typeof finalized?.masterAppUrl === "string" ? finalized.masterAppUrl : "";
+    if (masterUrl) {
+      setWizardStatus(`Stored. Master playback URL: ${masterUrl}`, "ok");
+    } else {
+      setWizardStatus("Stored and committed.", "ok");
+    }
+  } catch (e) {
+    setWizardStatus(e instanceof Error ? e.message : String(e), "err");
+  }
 }
 
 /** @type {(() => void) | null} */
@@ -558,7 +879,7 @@ function renderWizard() {
                       e.stopPropagation();
                       e.currentTarget.classList.remove("dragover");
                       const f = e.dataTransfer?.files?.[0];
-                      onWizardFileChosen(f);
+                      void onWizardFileChosen(f);
                     }}
                     @keydown=${(e) => {
                       if (e.key === "Enter" || e.key === " ") {
@@ -584,7 +905,7 @@ function renderWizard() {
                           @change=${(e) => {
                             const input = e.target;
                             const f = input.files?.[0];
-                            onWizardFileChosen(f);
+                            void onWizardFileChosen(f);
                             input.value = "";
                           }}
                         />
@@ -731,6 +1052,7 @@ function renderWizard() {
 
 async function wizardGoBackToChoose() {
   await resetFilstreamPlayback();
+  await resetStoreRuntime(true);
   if (variantListenerTeardown) {
     variantListenerTeardown();
     variantListenerTeardown = null;
@@ -787,7 +1109,7 @@ async function wizardStartOver() {
   await wizardGoBackToChoose();
 }
 
-function onWizardFileChosen(file) {
+async function onWizardFileChosen(file) {
   if (!file) return;
   if (!file.type.startsWith("video/")) {
     wizardState.statusMsg = "Please choose a video file.";
@@ -796,6 +1118,8 @@ function onWizardFileChosen(file) {
     renderWizard();
     return;
   }
+  await resetStoreRuntime(true);
+  storeRuntime.assetId = randomAssetId();
   wizardState.fileName = file.name;
   wizardState.sourceFile = file;
   wizardState.step = 2;
@@ -833,5 +1157,6 @@ function onWizardFileChosen(file) {
 }
 
 ensureInjectedWalletSubscription();
+installStoreEventBridge();
 renderWizard();
 void probeVideoEncoderHardwareAcceleration();

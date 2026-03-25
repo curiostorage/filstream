@@ -1,6 +1,11 @@
-# FilStream web (static + in-browser pipeline)
+# FilStream web (static + store proxy)
 
-The Go binary is a **static file server only** — it serves whatever is in `statics/`. There is no API, transcoding, or upload handling on the server (suitable for later static / serverless hosting).
+The Go binary serves `statics/` and proxies `/api/store/*` to the Node store service (default `http://127.0.0.1:8090` via `STORE_BASE_URL`).
+
+Related docs:
+
+- [`../README.md`](../README.md) for repo overview and navigation.
+- [`store/README.md`](store/README.md) for backend store architecture and API details.
 
 Video pick → transcode → HLS (fMP4) → playback runs **entirely in the browser**. **Mediabunny** and **Shaka Player** are loaded from **public CDNs** (always the current npm `latest` for those URLs) inside `statics/core.mjs` — no bundling step. The **UI** is unbundled `statics/ui.mjs` and `statics/upload-configure.mjs` (lit-html from jsDelivr). Edit any `.mjs` / `style.css` and refresh.
 
@@ -17,14 +22,20 @@ go run .
 
 Open http://localhost:8080
 
-No `npm install` is required for the app.
+Store service (separate process):
 
-## Deploy
+```bash
+cd web/store
+npm install
+npm start
+```
 
-Upload the **entire** contents of `statics/` — `index.html`, `style.css`, `core.mjs`, `ui.mjs`, `upload-configure.mjs`. No server-side logic is required in production.
+The store service reads configuration from `.env` (repo root or `web/.env`). It ingests encoder events and finalizes uploads internally (`/events` + `/finalize`), and auto-generates `STORE_FILSTREAM_ID` in `.env` when blank.
 
-## Environment (optional)
+## Environment
 
 | Variable | Purpose |
 |----------|---------|
-| `PORT` | Listen port (default `:8080`) — only used by the temporary Go static server |
+| `PORT` | Go server listen port (default `:8080`) |
+| `STORE_BASE_URL` | Store service base URL for Go proxy (default `http://127.0.0.1:8090`) |
+| `.env` values for store | See `web/store/README.md` (`STORE_RPC_URL`, `STORE_PROVIDER_ID`, etc.) |
