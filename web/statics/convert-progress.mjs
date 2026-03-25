@@ -45,6 +45,11 @@ export function applyStreamMode(player, mode, rungs) {
  *   showDebugSave?: boolean,
  *   debugSaveBusy?: boolean,
  *   onDebugSave?: () => void,
+ *   awaitListingLayout?: boolean,
+ *   awaitListingTitle?: string,
+ *   awaitListingDescription?: string,
+ *   awaitPosterUrl?: string | null,
+ *   awaitUploadBannerText?: string,
  * }} props
  */
 export function convertProgressPanel(props) {
@@ -66,6 +71,11 @@ export function convertProgressPanel(props) {
     showDebugSave,
     debugSaveBusy,
     onDebugSave,
+    awaitListingLayout = false,
+    awaitListingTitle = "",
+    awaitListingDescription = "",
+    awaitPosterUrl = null,
+    awaitUploadBannerText = "Upload in progress",
   } = props;
 
   const isPlaybackMedia = phase === "playback";
@@ -90,33 +100,41 @@ export function convertProgressPanel(props) {
           ? "Waiting for playback stream"
           : "Playback preview";
 
-  return html`
-    <section class="convert-progress ${sectionTone}" aria-label=${ariaPanel}>
-      <header class="convert-head">
-        <h2 class="convert-title">${panelTitle}</h2>
-        <p class="convert-file">${fileName}</p>
-      </header>
-
-      <div
-        class="convert-media ${phase === "awaiting"
-          ? "convert-media--awaiting"
-          : isPlaybackMedia
-            ? "convert-media--playback"
-            : "convert-media--encoding"}"
-      >
-        <div class="convert-player-wrap">${videoEl}</div>
-        ${phase === "awaiting"
-          ? html`
-              <div class="convert-awaiting-overlay" aria-live="polite">
-                <div class="convert-awaiting-spinner" aria-hidden="true"></div>
-                <p class="convert-awaiting-title">Waiting for stream</p>
-                <p class="convert-awaiting-sub">
-                  ${statusMsg ||
-                  "Playback is still attaching. This step stays here until the player is ready."}
-                </p>
-              </div>
-            `
-          : phase === "encoding"
+  const mediaBlock = html`
+    <div
+      class="convert-media ${phase === "awaiting"
+        ? "convert-media--awaiting"
+        : isPlaybackMedia
+          ? "convert-media--playback"
+          : "convert-media--encoding"} ${awaitListingLayout && phase === "awaiting"
+        ? "convert-media--await-yt-wait"
+        : ""}"
+    >
+      ${phase === "awaiting" && awaitListingLayout && awaitPosterUrl
+        ? html`
+            <img
+              class="await-poster-frame-img"
+              src=${awaitPosterUrl}
+              alt=""
+              width="1280"
+              height="720"
+              decoding="async"
+            />
+          `
+        : null}
+      <div class="convert-player-wrap">${videoEl}</div>
+      ${phase === "awaiting"
+        ? html`
+            <div class="convert-awaiting-overlay" aria-live="polite">
+              <div class="convert-awaiting-spinner" aria-hidden="true"></div>
+              <p class="convert-awaiting-title">Waiting for stream</p>
+              <p class="convert-awaiting-sub">
+                ${statusMsg ||
+                "Playback is still attaching. This step stays here until the player is ready."}
+              </p>
+            </div>
+          `
+        : phase === "encoding"
             ? html`
                 <div class="convert-encode-skinny" aria-hidden="false">
                   <span class="convert-encode-label">Encoding</span>
@@ -132,7 +150,39 @@ export function convertProgressPanel(props) {
                   </div>
                 `
               : null}
-      </div>
+    </div>
+  `;
+
+  return html`
+    <section class="convert-progress ${sectionTone}" aria-label=${ariaPanel}>
+      ${awaitListingLayout
+        ? html`
+            <p
+              class="await-upload-banner"
+              role="status"
+              aria-live="polite"
+            >
+              ${awaitUploadBannerText}
+            </p>
+            <div class="await-yt-layout">
+              <div class="await-yt-primary">${mediaBlock}</div>
+              <div class="await-yt-meta">
+                <h1 class="await-yt-title">${awaitListingTitle.trim() || "Untitled"}</h1>
+                <div class="await-yt-description">
+                  ${awaitListingDescription.trim()
+                    ? html`<p class="await-yt-desc-copy">${awaitListingDescription}</p>`
+                    : html`<p class="await-yt-desc-empty">No description</p>`}
+                </div>
+              </div>
+            </div>
+          `
+        : html`
+            <header class="convert-head">
+              <h2 class="convert-title">${panelTitle}</h2>
+              <p class="convert-file">${fileName}</p>
+            </header>
+            ${mediaBlock}
+          `}
 
       ${phase === "playback" && rungs?.length
         ? html`

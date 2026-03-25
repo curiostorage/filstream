@@ -23,10 +23,12 @@ const FRAGMENT_SECONDS = 5;
 export const SEGMENT_READY_EVENT = "segmentready";
 /** Fired before a VP9 re-encode attempt after a recoverable hardware failure — drop buffered partials for that variant. */
 export const SEGMENT_FLUSH_EVENT = "segmentflush";
-/** Non-binary artifacts: `init.json`, `*.m3u8`, `meta.json`, etc. */
+/** Non-binary artifacts: `init.json`, `*.m3u8`, etc. (`meta.json` is emitted with {@link LISTING_DETAILS_EVENT}). */
 export const FILE_EVENT = "fileEvent";
-/** Encodes finished and HLS master + variant playlists + `meta.json` text are ready (before Shaka attach/load). */
+/** Encodes finished; HLS master + variant playlists are ready (before Shaka attach/load). Transcode meta is finalized in {@link LISTING_DETAILS_EVENT}. */
 export const TRANSCODE_COMPLETE_EVENT = "transcodeComplete";
+/** After Listing Details **Next**: full `meta.json` document (text + poster blob) with transcode fields + listing form. */
+export const LISTING_DETAILS_EVENT = "listingDetails";
 
 /** Max(width,height) must be at least this to include a 1080p-height rung. */
 const MIN_MAJOR_DIM_FOR_1080_RUNG = 1200;
@@ -626,7 +628,16 @@ async function convertToFmp4Segments(
  * @property {number} nVar number of variants
  * @property {string} segmentCounts human summary from ladder
  * @property {string} stackHint codec / stack blurb
- * @property {string} metaJsonText same JSON as the `meta.json` file event (pretty-printed)
+ */
+
+/**
+ * Payload for {@link LISTING_DETAILS_EVENT} / {@link emitListingDetailsEvent} (full logical `meta.json`).
+ * @typedef {object} ListingDetailsDetail
+ * @property {object} transcodeMeta shallow copy of transcode fields (assembledAt, sourceName, nVar, …)
+ * @property {{ title: string, description: string, showDonateButton: boolean, useSeekPosition: boolean }} listing
+ * @property {{ fileName: string, mimeType: string, size: number }} poster metadata (matches `poster` in `metaJsonText`)
+ * @property {File} poster image file (upload or seek capture)
+ * @property {string} metaJsonText pretty-printed JSON: transcodeMeta spread + `listing` + `poster` info + `listingCompletedAt` (no raw image-bytes)
  * @property {string} metaPath always `meta.json`
  */
 
@@ -667,6 +678,91 @@ function dispatchTranscodeCompleteEvent(ui, detail) {
   } catch (e) {
     console.error("[FilStream] onTranscodeComplete / transcodeComplete failed:", e);
   }
+}
+
+/**
+ * @param {{
+ *   onListingDetails?: (d: ListingDetailsDetail) => void,
+ *   filstreamEventTarget?: EventTarget,
+ *   segmentReadyTarget?: EventTarget,
+ * }} ui
+ * @param {ListingDetailsDetail} detail
+ */
+function dispatchListingDetailsEvent(ui, detail) {
+  try {
+    void ui.onListingDetails?.(detail);
+    filstreamEventBus(ui)?.dispatchEvent(
+      new CustomEvent(LISTING_DETAILS_EVENT, { detail }),
+    );
+  } catch (e) {
+    console.error("[FilStream] onListingDetails / listingDetails failed:", e);
+  }
+}
+
+/**
+ * Emit {@link LISTING_DETAILS_EVENT} after the user submits Listing Details (**Next**).
+ * Merges pending transcode meta with the listing form and poster. Clears pending transcode meta on success.
+ *
+ * @param {{
+ *   onListingDetails?: (d: ListingDetailsDetail) => void | Promise<void>,
+ *   filstreamEventTarget?: EventTarget,
+ *   segmentReadyTarget?: EventTarget,
+ * }} ui
+ * @param {{
+ *   title: string,
+ *   description: string,
+ *   showDonateButton: boolean,
+ *   useSeekPosition: boolean,
+ *   poster: File | Blob,
+ * }} listing
+ * @returns {ListingDetailsDetail | null} `null` if transcoding has not finished (nothing pending).
+ */
+export function emitListingDetailsEvent(ui, listing) {
+  if (!pendingTranscodeMetaForListing) {
+    return null;
+  }
+
+  const posterFile =
+    listing.poster instanceof File
+      ? listing.poster
+      : new File([listing.poster], "poster", {
+          type: listing.poster.type || "application/octet-stream",
+        });
+
+  const listingBlock = {
+    title: listing.title,
+    description: listing.description,
+    showDonateButton: listing.showDonateButton,
+    useSeekPosition: listing.useSeekPosition,
+  };
+
+  const posterInfo = {
+    fileName: posterFile.name,
+    mimeType: posterFile.type || "application/octet-stream",
+    size: posterFile.size,
+  };
+
+  const doc = {
+    ...pendingTranscodeMetaForListing,
+    listing: listingBlock,
+    poster: posterInfo,
+    listingCompletedAt: new Date().toISOString(),
+  };
+  const metaJsonText = JSON.stringify(doc, null, 2);
+
+  /** @type {ListingDetailsDetail} */
+  const detail = {
+    transcodeMeta: { ...pendingTranscodeMetaForListing },
+    listing: listingBlock,
+    posterInfo,
+    poster: posterFile,
+    metaJsonText,
+    metaPath: "meta.json",
+  };
+
+  dispatchListingDetailsEvent(ui, detail);
+  pendingTranscodeMetaForListing = null;
+  return detail;
 }
 
 /**
@@ -786,6 +882,19 @@ let debugHlsSnapshot = null;
 /** @type {File | null} */
 let debugSourceFile = null;
 
+/**
+ * Transcode-only `meta.json` fields; cleared when listing completes or pipeline resets.
+ * @type {{
+ *   assembledAt: string,
+ *   sourceName: string,
+ *   nVar: number,
+ *   videoCodec: string,
+ *   includeAudio: boolean,
+ *   fragmentDurationSec: number,
+ * } | null}
+ */
+let pendingTranscodeMetaForListing = null;
+
 function revokeAll() {
   for (const r of revokeList) {
     try {
@@ -814,6 +923,7 @@ export async function resetFilstreamPlayback() {
   revokeAll();
   debugHlsSnapshot = null;
   debugSourceFile = null;
+  pendingTranscodeMetaForListing = null;
 }
 
 /**
@@ -907,13 +1017,15 @@ export async function uploadDebugHlsToServer(baseUrl = "") {
  * **Events** (all `CustomEvent` on `filstreamEventTarget ?? segmentReadyTarget` when set):
  * - `SEGMENT_READY_EVENT` / `onSegmentReady` — binary init + media segments as they encode.
  * - `SEGMENT_FLUSH_EVENT` / `onSegmentFlush` — before a VP9 re-attempt; drop partials for that variant.
- * - `FILE_EVENT` / `onFileEvent` — text artifacts: per variant `v{n}/init.json`, `v{n}/playlist.m3u8` (local paths), `v{n}/playlist-app.m3u8` (fake-origin media playlist); then `master-local.m3u8`, `master-app.m3u8`, `meta.json`.
- * - `TRANSCODE_COMPLETE_EVENT` / `onTranscodeComplete` — when encodes finish and master + variant M3U8 + `meta.json` text are assembled (before Shaka); see {@link TranscodeCompleteDetail}.
+ * - `FILE_EVENT` / `onFileEvent` — text artifacts: per variant `v{n}/init.json`, `v{n}/playlist.m3u8` (local paths), `v{n}/playlist-app.m3u8` (fake-origin media playlist); then `master-local.m3u8`, `master-app.m3u8`.
+ * - `TRANSCODE_COMPLETE_EVENT` / `onTranscodeComplete` — when encodes finish and master + variant M3U8 are assembled (before Shaka); see {@link TranscodeCompleteDetail}. Transcode meta is held until {@link emitListingDetailsEvent}.
+ * - `LISTING_DETAILS_EVENT` — fired when the UI calls {@link emitListingDetailsEvent} after Listing Details **Next**; listen on the same `filstreamEventTarget` (or pass `onListingDetails` there). Includes full `meta.json` text + poster {@link File}.
  */
 export async function runFilstreamPipeline(file, ui) {
   const { setStatus, setProgress, getVideoElement, onPlaybackReady } = ui;
   debugSourceFile = file;
   debugHlsSnapshot = null;
+  pendingTranscodeMetaForListing = null;
 
   const probeInput = new Input({
     source: new BlobSource(file),
@@ -1144,7 +1256,7 @@ export async function runFilstreamPipeline(file, ui) {
       includeAudio,
       fragmentDurationSec: FRAGMENT_SECONDS,
     };
-    const metaJsonText = JSON.stringify(metaPayload, null, 2);
+    pendingTranscodeMetaForListing = { ...metaPayload };
 
     const segSummary = segmentCountSummary(encoded);
     const stackHint = useAvc
@@ -1164,8 +1276,6 @@ export async function runFilstreamPipeline(file, ui) {
       nVar,
       segmentCounts: segSummary,
       stackHint,
-      metaJsonText,
-      metaPath: "meta.json",
     });
 
     const variantPlaylistURLs = encoded.map((v, i) =>

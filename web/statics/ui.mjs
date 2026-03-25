@@ -5,6 +5,7 @@
 import { html, render } from "https://cdn.jsdelivr.net/npm/lit-html@3.2.1/+esm";
 import { applyStreamMode, convertProgressPanel } from "./convert-progress.mjs";
 import {
+  emitListingDetailsEvent,
   hasDebugHlsSnapshot,
   probeVideoEncoderHardwareAcceleration,
   resetFilstreamPlayback,
@@ -20,6 +21,9 @@ import { uploadConfigurePanel } from "./upload-configure.mjs";
 import { publishMetadataForm } from "./publish-metadata.mjs";
 
 const WIZARD_MAX_STEP = 5;
+
+/** Shared with {@link runFilstreamPipeline} and {@link emitListingDetailsEvent} for FilStream custom events. */
+const filstreamEvents = { filstreamEventTarget: new EventTarget() };
 
 const wizardState = {
   step: 1,
@@ -223,6 +227,9 @@ async function handleDefineNext() {
   if (wizardState.defineNextBusy) return;
   wizardState.defineNextError = "";
 
+  /** @type {File | null} */
+  let posterFile = null;
+
   if (!wizardState.useSeekPosition) {
     if (!wizardState.posterImageFile) {
       wizardState.defineNextError =
@@ -230,56 +237,76 @@ async function handleDefineNext() {
       renderWizard();
       return;
     }
-    wizardState.step = 4;
-    renderWizard();
-    return;
-  }
-
-  const video = ensureSourcePreviewVideoEl();
-  if (!wizardState.sourceFile) {
-    wizardState.defineNextError = "No source file available.";
-    renderWizard();
-    return;
-  }
-  const w = video.videoWidth;
-  const h = video.videoHeight;
-  if (!w || !h || video.readyState < 2) {
-    wizardState.defineNextError =
-      "Play the source preview briefly so a frame loads at full resolution, then try Next again.";
-    renderWizard();
-    return;
-  }
-
-  wizardState.defineNextBusy = true;
-  renderWizard();
-  try {
-    const canvas = document.createElement("canvas");
-    canvas.width = w;
-    canvas.height = h;
-    const ctx = canvas.getContext("2d");
-    if (!ctx) throw new Error("Could not get canvas context.");
-    ctx.drawImage(video, 0, 0, w, h);
-    const blob = await new Promise((resolve, reject) => {
-      canvas.toBlob(
-        (b) =>
-          b ? resolve(b) : reject(new Error("Could not encode poster image.")),
-        "image/png",
-      );
-    });
-    if (wizardState.posterObjectUrl) {
-      URL.revokeObjectURL(wizardState.posterObjectUrl);
+    posterFile = wizardState.posterImageFile;
+  } else {
+    const video = ensureSourcePreviewVideoEl();
+    if (!wizardState.sourceFile) {
+      wizardState.defineNextError = "No source file available.";
+      renderWizard();
+      return;
     }
-    wizardState.posterObjectUrl = URL.createObjectURL(blob);
-    wizardState.posterImageFile = new File([blob], "poster-seek.png", {
-      type: "image/png",
-    });
-    wizardState.step = 4;
-  } catch (e) {
-    wizardState.defineNextError = e instanceof Error ? e.message : String(e);
-  } finally {
-    wizardState.defineNextBusy = false;
+    const w = video.videoWidth;
+    const h = video.videoHeight;
+    if (!w || !h || video.readyState < 2) {
+      wizardState.defineNextError =
+        "Play the source preview briefly so a frame loads at full resolution, then try Next again.";
+      renderWizard();
+      return;
+    }
+
+    wizardState.defineNextBusy = true;
     renderWizard();
+    try {
+      const canvas = document.createElement("canvas");
+      canvas.width = w;
+      canvas.height = h;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) throw new Error("Could not get canvas context.");
+      ctx.drawImage(video, 0, 0, w, h);
+      const blob = await new Promise((resolve, reject) => {
+        canvas.toBlob(
+          (b) =>
+            b ? resolve(b) : reject(new Error("Could not encode poster image.")),
+          "image/png",
+        );
+      });
+      if (wizardState.posterObjectUrl) {
+        URL.revokeObjectURL(wizardState.posterObjectUrl);
+      }
+      wizardState.posterObjectUrl = URL.createObjectURL(blob);
+      posterFile = new File([blob], "poster-seek.png", {
+        type: "image/png",
+      });
+      wizardState.posterImageFile = posterFile;
+    } catch (e) {
+      wizardState.defineNextError = e instanceof Error ? e.message : String(e);
+    } finally {
+      wizardState.defineNextBusy = false;
+    }
+
+    if (!posterFile) {
+      renderWizard();
+      return;
+    }
   }
+
+  const detail = emitListingDetailsEvent(filstreamEvents, {
+    title: wizardState.publishTitle,
+    description: wizardState.publishDescription,
+    showDonateButton: wizardState.showDonateButton,
+    useSeekPosition: wizardState.useSeekPosition,
+    poster: posterFile,
+  });
+
+  if (!detail) {
+    wizardState.defineNextError =
+      "Transcode metadata is not ready yet. Wait until encoding finishes, then try Next again.";
+    renderWizard();
+    return;
+  }
+
+  wizardState.step = 4;
+  renderWizard();
 }
 
 /** @type {(() => void) | null} */
@@ -553,6 +580,12 @@ function renderWizard() {
                     wizardState.step === 4 || wizardState.step === 5,
                   debugSaveBusy: wizardState.debugSaveBusy,
                   onDebugSave: handleDebugSave,
+                  awaitListingLayout:
+                    wizardState.step === 4 && wizardState.progress >= 100,
+                  awaitListingTitle: wizardState.publishTitle,
+                  awaitListingDescription: wizardState.publishDescription,
+                  awaitPosterUrl: wizardState.posterObjectUrl,
+                  awaitUploadBannerText: "Upload in progress",
                 })}
               </div>
             `
@@ -563,6 +596,16 @@ function renderWizard() {
   );
   queueMicrotask(() => {
     syncSourcePreviewSrc();
+    const vid = ensureVideoEl();
+    if (
+      wizardState.step === 4 &&
+      wizardState.progress >= 100 &&
+      wizardState.posterObjectUrl
+    ) {
+      vid.poster = wizardState.posterObjectUrl;
+    } else if (wizardState.step !== 4 && wizardState.step !== 5) {
+      vid.removeAttribute("poster");
+    }
   });
 }
 
@@ -574,6 +617,7 @@ async function wizardGoBackToChoose() {
   }
   const el = ensureVideoEl();
   el.removeAttribute("src");
+  el.removeAttribute("poster");
   el.load();
   wizardState.step = 1;
   wizardState.fileName = "";
@@ -646,6 +690,7 @@ function onWizardFileChosen(file) {
     setStatus: setWizardStatus,
     setProgress: setWizardProgress,
     getVideoElement: ensureVideoEl,
+    filstreamEventTarget: filstreamEvents.filstreamEventTarget,
     onPlaybackReady: (p, info) => {
       wizardState.player = p;
       wizardState.rungs = info.rungs.map((r) => ({
