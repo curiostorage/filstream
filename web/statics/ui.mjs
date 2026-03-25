@@ -17,10 +17,17 @@ import {
   subscribeInjectedWallets,
 } from "./eip6963.mjs";
 import { uploadConfigurePanel } from "./upload-configure.mjs";
+import { publishMetadataForm } from "./publish-metadata.mjs";
+
+const WIZARD_MAX_STEP = 5;
 
 const wizardState = {
   step: 1,
   fileName: "",
+  /** @type {File | null} original upload — used for “seek position” preview */
+  sourceFile: null,
+  /** @type {string | null} */
+  sourcePreviewObjectUrl: null,
   statusMsg: "",
   statusKind: "",
   progress: 0,
@@ -44,10 +51,25 @@ const wizardState = {
   /** @type {"auto" | number} */
   streamMode: "auto",
   debugSaveBusy: false,
+  /** Step 5 — listing */
+  publishTitle: "",
+  publishDescription: "",
+  showDonateButton: false,
+  /** @type {string | null} */
+  posterObjectUrl: null,
+  /** @type {File | null} chosen poster file or capture from seek */
+  posterImageFile: null,
+  useSeekPosition: false,
+  defineNextBusy: false,
+  defineNextError: "",
 };
 
 /** @type {HTMLVideoElement | null} */
 let videoEl = null;
+/** @type {HTMLVideoElement | null} */
+let sourcePreviewVideoEl = null;
+/** @type {string | null} */
+let sourcePreviewBoundKey = null;
 /** @type {null | (() => void)} */
 let variantListenerTeardown = null;
 
@@ -58,6 +80,47 @@ function ensureVideoEl() {
     videoEl.setAttribute("playsinline", "");
   }
   return videoEl;
+}
+
+function ensureSourcePreviewVideoEl() {
+  if (!sourcePreviewVideoEl) {
+    sourcePreviewVideoEl = document.createElement("video");
+    sourcePreviewVideoEl.setAttribute("controls", "");
+    sourcePreviewVideoEl.setAttribute("playsinline", "");
+    sourcePreviewVideoEl.setAttribute("preload", "metadata");
+  }
+  return sourcePreviewVideoEl;
+}
+
+/**
+ * Point the seek-preview player at the original file (object URL). Shaka keeps using `videoEl`.
+ */
+function syncSourcePreviewSrc() {
+  const el = ensureSourcePreviewVideoEl();
+  const want =
+    wizardState.sourceFile &&
+    wizardState.useSeekPosition &&
+    wizardState.step === 3;
+  const key = want
+    ? `${wizardState.sourceFile.name}:${wizardState.sourceFile.size}:${wizardState.sourceFile.lastModified}`
+    : null;
+
+  if (key === sourcePreviewBoundKey && el.src) return;
+
+  if (wizardState.sourcePreviewObjectUrl) {
+    URL.revokeObjectURL(wizardState.sourcePreviewObjectUrl);
+    wizardState.sourcePreviewObjectUrl = null;
+  }
+  sourcePreviewBoundKey = null;
+
+  if (key && wizardState.sourceFile) {
+    wizardState.sourcePreviewObjectUrl = URL.createObjectURL(wizardState.sourceFile);
+    el.src = wizardState.sourcePreviewObjectUrl;
+    sourcePreviewBoundKey = key;
+  } else {
+    el.removeAttribute("src");
+    el.load();
+  }
 }
 
 function getVariantResolutionLabel(p) {
@@ -109,6 +172,114 @@ function handleStreamMode(mode) {
   wizardState.streamMode = mode;
   applyStreamMode(wizardState.player, mode, wizardState.rungs);
   renderWizard();
+}
+
+function debugMarkStepDone() {
+  wizardState.step = Math.min(wizardState.step + 1, WIZARD_MAX_STEP);
+  renderWizard();
+}
+
+function handlePublishTitle(v) {
+  wizardState.publishTitle = v;
+  renderWizard();
+}
+
+function handlePublishDescription(v) {
+  wizardState.publishDescription = v;
+  renderWizard();
+}
+
+function handleShowDonate(v) {
+  wizardState.showDonateButton = v;
+  renderWizard();
+}
+
+function handleUseSeekPosition(v) {
+  wizardState.useSeekPosition = v;
+  renderWizard();
+}
+
+/** @param {Event} e */
+function handlePosterInput(e) {
+  const input = /** @type {HTMLInputElement} */ (e.target);
+  const f = input.files?.[0];
+  if (wizardState.posterObjectUrl) {
+    URL.revokeObjectURL(wizardState.posterObjectUrl);
+    wizardState.posterObjectUrl = null;
+  }
+  wizardState.posterImageFile = f ?? null;
+  wizardState.posterObjectUrl = f ? URL.createObjectURL(f) : null;
+  input.value = "";
+  renderWizard();
+}
+
+function handleContinueFromFund() {
+  if (wizardState.step !== 2) return;
+  wizardState.step = 3;
+  renderWizard();
+}
+
+async function handleDefineNext() {
+  if (wizardState.defineNextBusy) return;
+  wizardState.defineNextError = "";
+
+  if (!wizardState.useSeekPosition) {
+    if (!wizardState.posterImageFile) {
+      wizardState.defineNextError =
+        "Upload a poster image, or enable “Use seek position” to capture a frame.";
+      renderWizard();
+      return;
+    }
+    wizardState.step = 4;
+    renderWizard();
+    return;
+  }
+
+  const video = ensureSourcePreviewVideoEl();
+  if (!wizardState.sourceFile) {
+    wizardState.defineNextError = "No source file available.";
+    renderWizard();
+    return;
+  }
+  const w = video.videoWidth;
+  const h = video.videoHeight;
+  if (!w || !h || video.readyState < 2) {
+    wizardState.defineNextError =
+      "Play the source preview briefly so a frame loads at full resolution, then try Next again.";
+    renderWizard();
+    return;
+  }
+
+  wizardState.defineNextBusy = true;
+  renderWizard();
+  try {
+    const canvas = document.createElement("canvas");
+    canvas.width = w;
+    canvas.height = h;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) throw new Error("Could not get canvas context.");
+    ctx.drawImage(video, 0, 0, w, h);
+    const blob = await new Promise((resolve, reject) => {
+      canvas.toBlob(
+        (b) =>
+          b ? resolve(b) : reject(new Error("Could not encode poster image.")),
+        "image/png",
+      );
+    });
+    if (wizardState.posterObjectUrl) {
+      URL.revokeObjectURL(wizardState.posterObjectUrl);
+    }
+    wizardState.posterObjectUrl = URL.createObjectURL(blob);
+    wizardState.posterImageFile = new File([blob], "poster-seek.png", {
+      type: "image/png",
+    });
+    wizardState.step = 4;
+  } catch (e) {
+    wizardState.defineNextError = e instanceof Error ? e.message : String(e);
+  } finally {
+    wizardState.defineNextBusy = false;
+    renderWizard();
+  }
 }
 
 /** @type {(() => void) | null} */
@@ -180,6 +351,7 @@ function renderWizard() {
   const root = document.getElementById("wizard-root");
   if (!root) return;
   const v = ensureVideoEl();
+  const srcSeek = ensureSourcePreviewVideoEl();
 
   const stepClass = (n) => {
     if (wizardState.step === n) return "active";
@@ -213,10 +385,21 @@ function renderWizard() {
           <ol class="wizard-steps" aria-label="Progress">
             <li class=${stepClass(1)}>1 · Choose</li>
             <span class="sep" aria-hidden="true">→</span>
-            <li class=${stepClass(2)}>2 · Prepare</li>
+            <li class=${stepClass(2)}>2 · Fund</li>
             <span class="sep" aria-hidden="true">→</span>
-            <li class=${stepClass(3)}>3 · Watch</li>
+            <li class=${stepClass(3)}>3 · Define</li>
+            <span class="sep" aria-hidden="true">→</span>
+            <li class=${stepClass(4)}>4 · Await</li>
+            <span class="sep" aria-hidden="true">→</span>
+            <li class=${stepClass(5)}>5 · Publish</li>
           </ol>
+          <button
+            type="button"
+            class="btn btn-debug-mark-step"
+            @click=${debugMarkStepDone}
+          >
+            DEBUG: Mark step done
+          </button>
         </div>
 
         <div class="hero-stage">
@@ -304,11 +487,33 @@ function renderWizard() {
               `}
         </div>
 
-        ${wizardState.step >= 2
+        ${wizardState.step >= 2 && wizardState.step <= WIZARD_MAX_STEP
           ? html`
               <div class="step2-stack">
+                ${wizardState.step === 3
+                  ? publishMetadataForm({
+                      title: wizardState.publishTitle,
+                      description: wizardState.publishDescription,
+                      showDonateButton: wizardState.showDonateButton,
+                      posterPreviewUrl: wizardState.posterObjectUrl,
+                      useSeekPosition: wizardState.useSeekPosition,
+                      sourceSeekVideoEl:
+                        wizardState.useSeekPosition && wizardState.sourceFile
+                          ? srcSeek
+                          : null,
+                      seekUsesSource: wizardState.sourceFile != null,
+                      onTitle: handlePublishTitle,
+                      onDescription: handlePublishDescription,
+                      onShowDonate: handleShowDonate,
+                      onPosterInput: handlePosterInput,
+                      onUseSeekPosition: handleUseSeekPosition,
+                      onNext: handleDefineNext,
+                      nextBusy: wizardState.defineNextBusy,
+                      nextError: wizardState.defineNextError,
+                    })
+                  : null}
                 ${uploadConfigurePanel({
-                  show: true,
+                  show: wizardState.step === 2,
                   fileName: wizardState.fileName,
                   injectedWallets: wizardState.injectedWallets,
                   walletAddress: wizardState.walletAddress,
@@ -319,10 +524,20 @@ function renderWizard() {
                   onConnectInjected: handleConnectInjected,
                   onDisconnectWallet: handleDisconnectWallet,
                   onRefreshWallets: handleRefreshWallets,
+                  fundStepActive: wizardState.step === 2,
+                  onContinueFromFund: handleContinueFromFund,
                 })}
                 ${convertProgressPanel({
-                  show: true,
-                  phase: wizardState.step === 2 ? "encoding" : "playback",
+                  show: wizardState.step < 5 || wizardState.player != null,
+                  phase:
+                    wizardState.step === 4 && !wizardState.player
+                      ? "awaiting"
+                      : wizardState.step === 4 ||
+                          wizardState.step === 5
+                        ? "playback"
+                        : wizardState.progress < 100
+                          ? "encoding"
+                          : "define",
                   fileName: wizardState.fileName,
                   progress: wizardState.progress,
                   statusMsg: wizardState.statusMsg,
@@ -334,7 +549,8 @@ function renderWizard() {
                   playingLabel: wizardState.playingResolution,
                   onCancel: () => wizardGoBackToChoose(),
                   onStartOver: () => wizardStartOver(),
-                  showDebugSave: wizardState.step === 3,
+                  showDebugSave:
+                    wizardState.step === 4 || wizardState.step === 5,
                   debugSaveBusy: wizardState.debugSaveBusy,
                   onDebugSave: handleDebugSave,
                 })}
@@ -345,6 +561,9 @@ function renderWizard() {
     `,
     root,
   );
+  queueMicrotask(() => {
+    syncSourcePreviewSrc();
+  });
 }
 
 async function wizardGoBackToChoose() {
@@ -358,6 +577,16 @@ async function wizardGoBackToChoose() {
   el.load();
   wizardState.step = 1;
   wizardState.fileName = "";
+  wizardState.sourceFile = null;
+  sourcePreviewBoundKey = null;
+  if (wizardState.sourcePreviewObjectUrl) {
+    URL.revokeObjectURL(wizardState.sourcePreviewObjectUrl);
+    wizardState.sourcePreviewObjectUrl = null;
+  }
+  if (sourcePreviewVideoEl) {
+    sourcePreviewVideoEl.removeAttribute("src");
+    sourcePreviewVideoEl.load();
+  }
   wizardState.statusMsg = "";
   wizardState.statusKind = "";
   wizardState.progress = 0;
@@ -371,6 +600,17 @@ async function wizardGoBackToChoose() {
   wizardState.walletBusy = false;
   wizardState.connectingUuid = null;
   wizardState.debugSaveBusy = false;
+  wizardState.publishTitle = "";
+  wizardState.publishDescription = "";
+  wizardState.showDonateButton = false;
+  if (wizardState.posterObjectUrl) {
+    URL.revokeObjectURL(wizardState.posterObjectUrl);
+    wizardState.posterObjectUrl = null;
+  }
+  wizardState.posterImageFile = null;
+  wizardState.defineNextBusy = false;
+  wizardState.defineNextError = "";
+  wizardState.useSeekPosition = false;
   renderWizard();
 }
 
@@ -388,6 +628,7 @@ function onWizardFileChosen(file) {
     return;
   }
   wizardState.fileName = file.name;
+  wizardState.sourceFile = file;
   wizardState.step = 2;
   wizardState.statusMsg = "Reading media…";
   wizardState.statusKind = "";
@@ -413,7 +654,6 @@ function onWizardFileChosen(file) {
         bandwidth: r.bandwidth,
       }));
       wizardState.streamMode = "auto";
-      wizardState.step = 3;
       attachVariantResolutionListener(p);
       renderWizard();
     },

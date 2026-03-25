@@ -21,6 +21,8 @@ function shortAddress(addr) {
  *   onConnectInjected: (provider: import("./eip6963.mjs").Eip1193Provider, info: { uuid: string, name: string }) => void | Promise<void>,
  *   onDisconnectWallet: () => void,
  *   onRefreshWallets: () => void,
+ *   fundStepActive?: boolean,
+ *   onContinueFromFund?: () => void,
  * }} props
  */
 export function uploadConfigurePanel(props) {
@@ -37,9 +39,13 @@ export function uploadConfigurePanel(props) {
     onConnectInjected,
     onDisconnectWallet,
     onRefreshWallets,
+    fundStepActive = false,
+    onContinueFromFund,
   } = props;
 
   const connected = Boolean(walletAddress);
+  const showFundContinue =
+    connected && fundStepActive && typeof onContinueFromFund === "function";
 
   return html`
     <section class="upload-configure" aria-label="Wallet and upload settings">
@@ -83,6 +89,24 @@ export function uploadConfigurePanel(props) {
                   Disconnect
                 </button>
               </div>
+              ${showFundContinue
+                ? html`
+                    <div class="fund-continue-wrap">
+                      <button
+                        type="button"
+                        class="btn btn-primary fund-continue-btn"
+                        ?disabled=${walletBusy}
+                        @click=${onContinueFromFund}
+                      >
+                        DEBUG-UNTIL-WIRED: Continue to Define
+                      </button>
+                      <p class="fund-continue-hint">
+                        Move to the next step when you are ready. Transcoding can still run in the
+                        panel below.
+                      </p>
+                    </div>
+                  `
+                : null}
             `
           : null}
 

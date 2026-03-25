@@ -25,8 +25,8 @@ export const SEGMENT_READY_EVENT = "segmentready";
 export const SEGMENT_FLUSH_EVENT = "segmentflush";
 /** Non-binary artifacts: `init.json`, `*.m3u8`, `meta.json`, etc. */
 export const FILE_EVENT = "fileEvent";
-/** All variants encoded, playlists assembled, Shaka loaded; includes root (local) master text. */
-export const DONE_EVENT = "doneEvent";
+/** Encodes finished and HLS master + variant playlists + `meta.json` text are ready (before Shaka attach/load). */
+export const TRANSCODE_COMPLETE_EVENT = "transcodeComplete";
 
 /** Max(width,height) must be at least this to include a 1080p-height rung. */
 const MIN_MAJOR_DIM_FOR_1080_RUNG = 1200;
@@ -618,10 +618,11 @@ async function convertToFmp4Segments(
  */
 
 /**
- * @typedef {object} DoneEventDetail
+ * @typedef {object} TranscodeCompleteDetail
  * @property {string} rootM3U8Text `master-local.m3u8` contents (relative `v{n}/playlist.m3u8` lines)
  * @property {string} rootM3U8Path always `master-local.m3u8`
- * @property {string} masterAppM3U8Text in-app master (fake-origin URLs) for parity with Shaka
+ * @property {string} masterAppM3U8Text multivariant master using fake-origin segment URLs (same text Shaka loads)
+ * @property {string[]} mediaPlaylistTextsLocal per-variant `v{n}/playlist.m3u8` text (relative `init.mp4` / `seg-*.m4s`)
  * @property {number} nVar number of variants
  * @property {string} segmentCounts human summary from ladder
  * @property {string} stackHint codec / stack blurb
@@ -653,16 +654,18 @@ function dispatchFileEvent(ui, detail) {
 }
 
 /**
- * @param {{ onDoneEvent?: (d: DoneEventDetail) => void, filstreamEventTarget?: EventTarget, segmentReadyTarget?: EventTarget }} ui
- * @param {DoneEventDetail} detail
+ * @param {{ onTranscodeComplete?: (d: TranscodeCompleteDetail) => void, filstreamEventTarget?: EventTarget, segmentReadyTarget?: EventTarget }} ui
+ * @param {TranscodeCompleteDetail} detail
  */
-function dispatchDoneEvent(ui, detail) {
-  if (!ui.onDoneEvent && !filstreamEventBus(ui)) return;
+function dispatchTranscodeCompleteEvent(ui, detail) {
+  if (!ui.onTranscodeComplete && !filstreamEventBus(ui)) return;
   try {
-    void ui.onDoneEvent?.(detail);
-    filstreamEventBus(ui)?.dispatchEvent(new CustomEvent(DONE_EVENT, { detail }));
+    void ui.onTranscodeComplete?.(detail);
+    filstreamEventBus(ui)?.dispatchEvent(
+      new CustomEvent(TRANSCODE_COMPLETE_EVENT, { detail }),
+    );
   } catch (e) {
-    console.error("[FilStream] onDoneEvent / doneEvent failed:", e);
+    console.error("[FilStream] onTranscodeComplete / transcodeComplete failed:", e);
   }
 }
 
@@ -893,10 +896,10 @@ export async function uploadDebugHlsToServer(baseUrl = "") {
  *     stackHint: string,
  *     rungs: { variantIndex: number, width: number, height: number, bandwidth: number }[],
  *   }) => void,
+ *   onTranscodeComplete?: (d: TranscodeCompleteDetail) => void | Promise<void>,
  *   onSegmentReady?: (d: SegmentReadyDetail) => void | Promise<void>,
  *   onSegmentFlush?: (d: SegmentFlushDetail) => void | Promise<void>,
  *   onFileEvent?: (d: FileEventDetail) => void | Promise<void>,
- *   onDoneEvent?: (d: DoneEventDetail) => void | Promise<void>,
  *   segmentReadyTarget?: EventTarget,
  *   filstreamEventTarget?: EventTarget,
  * }} ui
@@ -905,7 +908,7 @@ export async function uploadDebugHlsToServer(baseUrl = "") {
  * - `SEGMENT_READY_EVENT` / `onSegmentReady` — binary init + media segments as they encode.
  * - `SEGMENT_FLUSH_EVENT` / `onSegmentFlush` — before a VP9 re-attempt; drop partials for that variant.
  * - `FILE_EVENT` / `onFileEvent` — text artifacts: per variant `v{n}/init.json`, `v{n}/playlist.m3u8` (local paths), `v{n}/playlist-app.m3u8` (fake-origin media playlist); then `master-local.m3u8`, `master-app.m3u8`, `meta.json`.
- * - `DONE_EVENT` / `onDoneEvent` — after Shaka `load` succeeds; includes `rootM3U8Text`, `metaJsonText` (same as `meta.json` file event), etc.
+ * - `TRANSCODE_COMPLETE_EVENT` / `onTranscodeComplete` — when encodes finish and master + variant M3U8 + `meta.json` text are assembled (before Shaka); see {@link TranscodeCompleteDetail}.
  */
 export async function runFilstreamPipeline(file, ui) {
   const { setStatus, setProgress, getVideoElement, onPlaybackReady } = ui;
@@ -1122,16 +1125,6 @@ export async function runFilstreamPipeline(file, ui) {
       }),
     );
 
-    setProgress(100);
-
-    const variantPlaylistURLs = encoded.map((v, i) =>
-      pushBlobURL(
-        new Blob([buildMediaPlaylist(i, v.dursSec)], {
-          type: "application/vnd.apple.mpegurl",
-        }),
-      ),
-    );
-
     const masterText = buildMasterPlaylist(
       encoded,
       includeAudio,
@@ -1141,9 +1134,6 @@ export async function runFilstreamPipeline(file, ui) {
       encoded,
       includeAudio,
       masterVideoCodecParam,
-    );
-    const masterURL = pushBlobURL(
-      new Blob([masterText], { type: "application/vnd.apple.mpegurl" }),
     );
 
     const metaPayload = {
@@ -1155,6 +1145,41 @@ export async function runFilstreamPipeline(file, ui) {
       fragmentDurationSec: FRAGMENT_SECONDS,
     };
     const metaJsonText = JSON.stringify(metaPayload, null, 2);
+
+    const segSummary = segmentCountSummary(encoded);
+    const stackHint = useAvc
+      ? "H.264 + Opus in fMP4 (hardware encoder when available)."
+      : "VP9 + Opus in fMP4.";
+    const mediaPlaylistTextsLocal = encoded.map((v) =>
+      buildMediaPlaylistLocal(v.dursSec),
+    );
+
+    setProgress(100);
+
+    dispatchTranscodeCompleteEvent(ui, {
+      rootM3U8Text: masterTextLocal,
+      rootM3U8Path: "master-local.m3u8",
+      masterAppM3U8Text: masterText,
+      mediaPlaylistTextsLocal,
+      nVar,
+      segmentCounts: segSummary,
+      stackHint,
+      metaJsonText,
+      metaPath: "meta.json",
+    });
+
+    const variantPlaylistURLs = encoded.map((v, i) =>
+      pushBlobURL(
+        new Blob([buildMediaPlaylist(i, v.dursSec)], {
+          type: "application/vnd.apple.mpegurl",
+        }),
+      ),
+    );
+
+    const masterURL = pushBlobURL(
+      new Blob([masterText], { type: "application/vnd.apple.mpegurl" }),
+    );
+
     player = new shaka.Player();
     await player.attach(video, true);
     // Blob/object URLs complete instantly; Shaka's default throughput guess + Network
@@ -1176,10 +1201,6 @@ export async function runFilstreamPipeline(file, ui) {
 
     try {
       await player.load(`${FAKE_ORIGIN}/master.m3u8`);
-      const segSummary = segmentCountSummary(encoded);
-      const stackHint = useAvc
-        ? "H.264 + Opus in fMP4 (hardware encoder when available)."
-        : "VP9 + Opus in fMP4.";
       onPlaybackReady(player, {
         nVar,
         segmentCounts: segSummary,
@@ -1195,21 +1216,11 @@ export async function runFilstreamPipeline(file, ui) {
         masterTextApp: masterText,
         masterTextLocal,
         variants: encoded.map((v, i) => ({
-          playlistTextLocal: buildMediaPlaylistLocal(v.dursSec),
+          playlistTextLocal: mediaPlaylistTextsLocal[i],
           initURL: v.initURL,
           segmentURLs: v.segmentURLs.slice(),
         })),
       };
-      dispatchDoneEvent(ui, {
-        rootM3U8Text: masterTextLocal,
-        rootM3U8Path: "master-local.m3u8",
-        masterAppM3U8Text: masterText,
-        nVar,
-        segmentCounts: segSummary,
-        stackHint,
-        metaJsonText,
-        metaPath: "meta.json",
-      });
       setStatus(
         `Ready — ${nVar} HLS levels (${segSummary}). Local ABR favors high quality. ${stackHint}`,
         "ok",

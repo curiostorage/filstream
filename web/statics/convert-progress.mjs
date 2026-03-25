@@ -30,7 +30,7 @@ export function applyStreamMode(player, mode, rungs) {
 /**
  * @param {{
  *   show: boolean,
- *   phase: "encoding" | "playback",
+ *   phase: "encoding" | "define" | "awaiting" | "playback",
  *   fileName: string,
  *   progress: number,
  *   statusMsg: string,
@@ -68,33 +68,70 @@ export function convertProgressPanel(props) {
     onDebugSave,
   } = props;
 
+  const isPlaybackMedia = phase === "playback";
+  const sectionTone =
+    phase === "awaiting"
+      ? "convert-progress--awaiting"
+      : isPlaybackMedia
+        ? "convert-progress--playback"
+        : "convert-progress--encoding";
+  const panelTitle =
+    phase === "encoding"
+      ? "Transcode"
+      : phase === "define"
+        ? "Define"
+        : "Await";
+  const ariaPanel =
+    phase === "encoding"
+      ? "Transcoding progress"
+      : phase === "define"
+        ? "Preparing stream"
+        : phase === "awaiting"
+          ? "Waiting for playback stream"
+          : "Playback preview";
+
   return html`
-    <section
-      class="convert-progress ${phase === "encoding"
-        ? "convert-progress--encoding"
-        : "convert-progress--playback"}"
-      aria-label=${phase === "encoding" ? "Transcoding progress" : "Playback preview"}
-    >
+    <section class="convert-progress ${sectionTone}" aria-label=${ariaPanel}>
       <header class="convert-head">
-        <h2 class="convert-title">${phase === "encoding" ? "Transcode" : "Preview"}</h2>
+        <h2 class="convert-title">${panelTitle}</h2>
         <p class="convert-file">${fileName}</p>
       </header>
 
       <div
-        class="convert-media ${phase === "encoding"
-          ? "convert-media--encoding"
-          : "convert-media--playback"}"
+        class="convert-media ${phase === "awaiting"
+          ? "convert-media--awaiting"
+          : isPlaybackMedia
+            ? "convert-media--playback"
+            : "convert-media--encoding"}"
       >
         <div class="convert-player-wrap">${videoEl}</div>
-        ${phase === "encoding"
+        ${phase === "awaiting"
           ? html`
-              <div class="convert-encode-skinny" aria-hidden="false">
-                <span class="convert-encode-label">Encoding</span>
-                <progress class="progress convert-progress-bar" max="100" .value=${progress}></progress>
-                <span class="convert-encode-pct">${progress}%</span>
+              <div class="convert-awaiting-overlay" aria-live="polite">
+                <div class="convert-awaiting-spinner" aria-hidden="true"></div>
+                <p class="convert-awaiting-title">Waiting for stream</p>
+                <p class="convert-awaiting-sub">
+                  ${statusMsg ||
+                  "Playback is still attaching. This step stays here until the player is ready."}
+                </p>
               </div>
             `
-          : null}
+          : phase === "encoding"
+            ? html`
+                <div class="convert-encode-skinny" aria-hidden="false">
+                  <span class="convert-encode-label">Encoding</span>
+                  <progress class="progress convert-progress-bar" max="100" .value=${progress}></progress>
+                  <span class="convert-encode-pct">${progress}%</span>
+                </div>
+              `
+            : phase === "define"
+              ? html`
+                  <div class="convert-encode-skinny" aria-hidden="false">
+                    <span class="convert-encode-label">Preparing</span>
+                    <progress class="progress convert-progress-bar" max="100" .value=${100}></progress>
+                  </div>
+                `
+              : null}
       </div>
 
       ${phase === "playback" && rungs?.length
@@ -136,7 +173,7 @@ export function convertProgressPanel(props) {
       <p class="status ${statusKind} convert-status" aria-live="polite">${statusMsg}</p>
 
       <div class="convert-actions">
-        ${phase === "encoding"
+        ${phase === "encoding" || phase === "define" || phase === "awaiting"
           ? html`<button type="button" class="btn" @click=${onCancel}>Cancel transcode</button>`
           : html`
               <div class="convert-actions-row">
