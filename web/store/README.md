@@ -46,8 +46,10 @@ Optional:
 - `STORE_HOST` default `127.0.0.1`
 - `STORE_PORT` default `8090`
 - `STORE_REQUEST_BODY_LIMIT_BYTES` default `41943040`
-- `STORE_MAX_PIECE_BYTES` default `266338304` (254 MiB)
+- `STORE_MAX_PIECE_BYTES` default `209715200` (200 MiB, Synapse SDK max)
 - `STORE_FILSTREAM_ID`
+
+Synapse `store()` enforces piece payload sizes in the `[127 bytes, 200 MiB]` range.
 
 `STORE_FILSTREAM_ID` behavior:
 
@@ -119,6 +121,9 @@ Response:
   "createdDataSet": false
 }
 ```
+
+`dataSetId` can be `null` for first-time users before the first on-chain `commit()`.
+`createdDataSet` is only `true` when an on-chain dataset already resolves at init time.
 
 ### 2) Stream events
 
@@ -232,6 +237,8 @@ Response:
   "dataSetId": 123
 }
 ```
+
+`dataSetId` is populated after `commit()`; if no pieces were committed, it may stay `null`.
 
 The intended player input is `masterAppUrl`.
 `manifestUrl` is returned by finalize response for convenience, but is not embedded inside `manifest.json.playback`.

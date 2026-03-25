@@ -4,7 +4,6 @@ import { HttpError } from "./errors.mjs";
 import {
   createSynapseForSession,
   deletePiece,
-  extractPieceCid,
   getPieceRetrievalUrl,
   resolveOrCreateDataSet,
   terminateDataSet,
@@ -12,6 +11,7 @@ import {
 
 /**
  * @typedef {import("@filoz/synapse-sdk").Synapse} SynapseClient
+ * @typedef {import("@filoz/synapse-sdk").PieceCID} PieceCID
  * @typedef {import("@filoz/synapse-sdk/storage").StorageContext} StorageContext
  */
 
@@ -30,6 +30,7 @@ import {
 
 /**
  * @typedef {object} PieceRecord
+ * @property {PieceCID} pieceRef
  * @property {string} pieceCid
  * @property {string | null} retrievalUrl
  * @property {number} byteLength
@@ -65,7 +66,7 @@ import {
  * @property {string} clientAddress
  * @property {string} filstreamId
  * @property {number} providerId
- * @property {number} dataSetId
+ * @property {number | null} dataSetId
  * @property {SynapseClient} synapse
  * @property {StorageContext} context
  * @property {EventEmitter} events
@@ -86,6 +87,21 @@ import {
  * @property {string} createdAt
  * @property {string} lastEventAt
  */
+
+/**
+ * Parse an integer-like value into a non-negative safe integer.
+ *
+ * @param {unknown} value
+ * @returns {number | null}
+ */
+function parseSafeNonNegativeInt(value) {
+  const n = Number(value);
+  if (!Number.isSafeInteger(n) || n < 0) return null;
+  return n;
+}
+
+const SYNAPSE_MIN_PIECE_BYTES = 127;
+const SYNAPSE_MAX_PIECE_BYTES = 200 * 1024 * 1024;
 
 /**
  * Build a valid piece metadata object and enforce on-chain limits.
@@ -477,7 +493,7 @@ export class StoreService {
    * }} input
    * @returns {Promise<{
    *   uploadId: string,
-   *   dataSetId: number,
+   *   dataSetId: number | null,
    *   providerId: number,
    *   filstreamId: string,
    *   createdDataSet: boolean,
@@ -669,19 +685,33 @@ export class StoreService {
     if (!session.context || typeof session.context.store !== "function") {
       throw new HttpError(500, "Storage context.store is unavailable");
     }
+    if (input.bytes.byteLength < SYNAPSE_MIN_PIECE_BYTES) {
+      throw new HttpError(
+        400,
+        `Piece payload too small for Synapse store() (${input.bytes.byteLength} bytes, min ${SYNAPSE_MIN_PIECE_BYTES})`,
+      );
+    }
+    if (input.bytes.byteLength > SYNAPSE_MAX_PIECE_BYTES) {
+      throw new HttpError(
+        400,
+        `Piece payload too large for Synapse store() (${input.bytes.byteLength} bytes, max ${SYNAPSE_MAX_PIECE_BYTES})`,
+      );
+    }
     const storeResult = await session.context.store(input.bytes);
-    const pieceCid = extractPieceCid(storeResult);
-    if (!pieceCid) {
+    const pieceRef = storeResult?.pieceCid;
+    if (!pieceRef) {
       throw new HttpError(500, "store() response is missing pieceCid");
     }
+    const pieceCid = String(pieceRef);
     const retrievalUrl =
       (typeof storeResult?.retrievalUrl === "string" &&
       storeResult.retrievalUrl.trim() !== ""
         ? storeResult.retrievalUrl
-        : null) || (await getPieceRetrievalUrl(session.context, pieceCid));
+        : null) || (await getPieceRetrievalUrl(session.context, pieceRef));
 
     /** @type {PieceRecord} */
     const record = {
+      pieceRef,
       pieceCid,
       retrievalUrl,
       byteLength: input.bytes.byteLength,
@@ -1013,7 +1043,11 @@ export class StoreService {
    * Commit all non-abandoned parked pieces.
    *
    * @param {UploadSession} session
-   * @returns {Promise<{ committedCount: number, transactionHash: string | null }>}
+   * @returns {Promise<{
+   *   committedCount: number,
+   *   transactionHash: string | null,
+   *   dataSetId: number | null,
+   * }>}
    */
   async commitPendingPieces(session) {
     if (!session.context || typeof session.context.commit !== "function") {
@@ -1023,11 +1057,15 @@ export class StoreService {
       (p) => !p.committed && !p.abandoned,
     );
     if (pending.length === 0) {
-      return { committedCount: 0, transactionHash: null };
+      return {
+        committedCount: 0,
+        transactionHash: null,
+        dataSetId: session.dataSetId,
+      };
     }
     const result = await session.context.commit({
       pieces: pending.map((p) => ({
-        pieceCid: p.pieceCid,
+        pieceCid: p.pieceRef,
         pieceMetadata: p.pieceMetadata,
       })),
     });
@@ -1035,7 +1073,18 @@ export class StoreService {
       p.committed = true;
     }
     const txHash = typeof result?.txHash === "string" ? result.txHash : null;
-    return { committedCount: pending.length, transactionHash: txHash };
+    const committedDataSetId = parseSafeNonNegativeInt(result?.dataSetId);
+    if (result?.dataSetId != null && committedDataSetId == null) {
+      throw new HttpError(500, "commit() returned invalid dataSetId");
+    }
+    if (committedDataSetId != null) {
+      session.dataSetId = committedDataSetId;
+    }
+    return {
+      committedCount: pending.length,
+      transactionHash: txHash,
+      dataSetId: session.dataSetId,
+    };
   }
 
   /**
@@ -1049,7 +1098,7 @@ export class StoreService {
    *   transactionHash: string | null,
    *   masterAppUrl: string | null,
    *   manifestUrl: string | null,
-   *   dataSetId: number,
+   *   dataSetId: number | null,
    * }>}
    */
   async finalizeUpload(uploadId) {
@@ -1113,7 +1162,7 @@ export class StoreService {
     const committed = [...session.piecesByCid.values()].filter((p) => p.committed);
     let deleted = 0;
     for (const piece of committed) {
-      await deletePiece(session.context, piece.pieceCid);
+      await deletePiece(session.context, piece.pieceRef);
       session.piecesByCid.delete(piece.pieceCid);
       deleted += 1;
     }
@@ -1158,7 +1207,7 @@ export class StoreService {
    *   clientAddress: string,
    *   filstreamId: string,
    *   providerId: number,
-   *   dataSetId: number,
+   *   dataSetId: number | null,
    *   finalized: boolean,
    *   eventCounts: UploadSession["eventCounts"],
    *   pieces: {

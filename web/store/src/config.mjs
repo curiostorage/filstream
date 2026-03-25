@@ -141,6 +141,8 @@ function ensureFilstreamId(envPath) {
  * }}
  */
 export function loadConfig() {
+  const SYNAPSE_STORE_MAX_BYTES = 200 * 1024 * 1024;
+
   const envPath = resolveEnvPath();
   if (envPath) {
     dotenv.config({ path: envPath });
@@ -166,8 +168,13 @@ export function loadConfig() {
   );
   const maxPieceBytes = parseOptionalPositiveInt(
     process.env.STORE_MAX_PIECE_BYTES,
-    254 * 1024 * 1024,
+    SYNAPSE_STORE_MAX_BYTES,
   );
+  if (maxPieceBytes > SYNAPSE_STORE_MAX_BYTES) {
+    throw new Error(
+      `STORE_MAX_PIECE_BYTES exceeds Synapse max upload size (${SYNAPSE_STORE_MAX_BYTES} bytes)`,
+    );
+  }
 
   const filstreamId = ensureFilstreamId(envPath);
 

@@ -48,7 +48,7 @@ const STORE_API_BASE = "/api/store";
  * }} StoreInitRequest
  * @typedef {{
  *   uploadId: string,
- *   dataSetId: number,
+ *   dataSetId: number | null,
  *   providerId: number,
  *   filstreamId: string,
  *   createdDataSet: boolean,
@@ -59,7 +59,7 @@ const STORE_API_BASE = "/api/store";
  *   transactionHash: string | null,
  *   masterAppUrl: string | null,
  *   manifestUrl: string | null,
- *   dataSetId: number,
+ *   dataSetId: number | null,
  * }} StoreFinalizeResponse
  */
 

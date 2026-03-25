@@ -10,7 +10,7 @@ import { HttpError } from "./errors.mjs";
  * @typedef {import("@filoz/synapse-sdk/storage").StorageManager} StorageManager
  * @typedef {import("@filoz/synapse-sdk/storage").StorageContext} StorageContext
  * @typedef {import("@filoz/synapse-sdk").EnhancedDataSetInfo} EnhancedDataSetInfo
- * @typedef {import("@filoz/synapse-sdk").StoreResult} StoreResult
+ * @typedef {import("@filoz/synapse-sdk").PieceCID} PieceCID
  * @typedef {import("@filoz/synapse-core/session-key").Expirations} SessionExpirations
  * @typedef {EnhancedDataSetInfo & { createdAt?: string | number | bigint }} DataSetCandidate
  */
@@ -356,7 +356,7 @@ async function createNewDataSetContext(storage, providerId, filstreamId) {
  *   clientAddress: string,
  *   filstreamId: string,
  * }} input
- * @returns {Promise<{ context: StorageContext, dataSetId: number, created: boolean }>}
+ * @returns {Promise<{ context: StorageContext, dataSetId: number | null, created: boolean }>}
  */
 export async function resolveOrCreateDataSet(input) {
   const { synapse, providerId, clientAddress, filstreamId } = input;
@@ -381,45 +381,25 @@ export async function resolveOrCreateDataSet(input) {
     };
   }
 
-  await createNewDataSetContext(synapse.storage, providerId, filstreamId);
-
-  const postCreate = pickMatchingDataSet(
-    await findDataSetsByAddress(synapse.storage, clientAddress),
-    providerId,
-    filstreamId,
-  );
-  if (!postCreate) {
-    throw new HttpError(
-      500,
-      "Dataset creation succeeded but dataset lookup failed",
-    );
+  const context = await createNewDataSetContext(synapse.storage, providerId, filstreamId);
+  const dataSetIdRaw = context.dataSetId;
+  const dataSetId =
+    dataSetIdRaw != null ? parseSafeNonNegativeInt(dataSetIdRaw) : null;
+  if (dataSetIdRaw != null && dataSetId == null) {
+    throw new HttpError(500, "Received invalid dataSetId from Synapse context");
   }
   return {
-    context: await createExistingDataSetContext(
-      synapse.storage,
-      providerId,
-      postCreate.dataSetId,
-    ),
-    dataSetId: postCreate.dataSetId,
-    created: true,
+    context,
+    dataSetId,
+    created: dataSetId != null,
   };
-}
-
-/**
- * Extract normalized piece CID from a store/commit result.
- *
- * @param {StoreResult} value
- * @returns {string}
- */
-export function extractPieceCid(value) {
-  return String(value.pieceCid);
 }
 
 /**
  * Ask the context for a retrieval URL for a piece CID.
  *
  * @param {StorageContext} context
- * @param {string} pieceCid
+ * @param {PieceCID | string} pieceCid
  * @returns {Promise<string | null>}
  */
 export async function getPieceRetrievalUrl(context, pieceCid) {
@@ -438,7 +418,7 @@ export async function getPieceRetrievalUrl(context, pieceCid) {
  * Delete one committed piece from the current dataset.
  *
  * @param {StorageContext} context
- * @param {string} pieceCid
+ * @param {PieceCID | string} pieceCid
  * @returns {Promise<void>}
  */
 export async function deletePiece(context, pieceCid) {
