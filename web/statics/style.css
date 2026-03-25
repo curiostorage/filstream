@@ -483,6 +483,151 @@ h3 {
   color: #f28b82;
 }
 
+.publish-donate-hint {
+  margin: 0.35rem 0 0.85rem;
+  font-size: 0.82rem;
+  color: #9aa0a6;
+  line-height: 1.45;
+  max-width: 36rem;
+}
+
+.publish-inline-code,
+.publish-metadata code.publish-inline-code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 0.88em;
+  color: #c4c7c5;
+  background: rgb(0 0 0 / 0.35);
+  padding: 0.12em 0.35em;
+  border-radius: 4px;
+}
+
+.publish-broadcast-shell {
+  border: 1px solid #3c4043;
+  border-radius: 12px;
+  padding: 1.25rem 1.35rem 1.5rem;
+  background: #16181d;
+  margin-bottom: 1rem;
+}
+
+.publish-broadcast-head {
+  margin: 0 0 0.5rem;
+  font-size: 1.05rem;
+  font-weight: 600;
+  color: #e8eaed;
+}
+
+.publish-broadcast-lead {
+  margin: 0 0 1.25rem;
+  font-size: 0.88rem;
+  color: #9aa0a6;
+  line-height: 1.45;
+  max-width: 40rem;
+}
+
+.broadcast-view {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.broadcast-video-shell {
+  min-width: 0;
+}
+
+.broadcast-video-frame {
+  border-radius: 10px;
+  overflow: hidden;
+  background: #000;
+  border: 1px solid #3c4043;
+}
+
+.broadcast-video-frame video {
+  display: block;
+  width: 100%;
+  max-height: min(70vh, 640px);
+}
+
+.broadcast-meta {
+  min-width: 0;
+}
+
+.broadcast-title {
+  margin: 0 0 0.65rem;
+  font-size: 1.35rem;
+  font-weight: 600;
+  line-height: 1.25;
+  color: #e8eaed;
+}
+
+.broadcast-desc-body {
+  margin: 0;
+  font-size: 0.95rem;
+  line-height: 1.55;
+  color: #bdc1c6;
+  white-space: pre-wrap;
+}
+
+.broadcast-desc-empty {
+  margin: 0;
+  font-size: 0.92rem;
+  color: #9aa0a6;
+  font-style: italic;
+}
+
+.broadcast-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.75rem 1rem;
+  margin-top: 0.35rem;
+}
+
+.viewer-donate {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.4rem;
+}
+
+.viewer-donate .viewer-donate-btn {
+  margin: 0;
+}
+
+.viewer-donate-hint {
+  margin: 0;
+  font-size: 0.8rem;
+  color: #9aa0a6;
+}
+
+.viewer-donate-err {
+  margin: 0;
+  font-size: 0.85rem;
+  color: #f28b82;
+}
+
+.viewer-donate-tx {
+  margin: 0;
+  font-size: 0.82rem;
+  color: #81c995;
+  word-break: break-all;
+}
+
+.viewer-donate-tx code {
+  font-size: 0.8rem;
+}
+
+.viewer-donate-recipient.subtle {
+  margin: 0;
+  font-size: 0.75rem;
+  color: #6d7175;
+  max-width: 100%;
+  word-break: break-all;
+}
+
+.viewer-donate-recipient .mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
 .site-brand {
   display: flex;
   align-items: center;

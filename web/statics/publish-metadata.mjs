@@ -8,6 +8,7 @@ import { html } from "https://cdn.jsdelivr.net/npm/lit-html@3.2.1/+esm";
  *   title: string,
  *   description: string,
  *   showDonateButton: boolean,
+ *   donateAmountUsdfc: number,
  *   posterPreviewUrl: string | null,
  *   useSeekPosition: boolean,
  *   sourceSeekVideoEl: HTMLVideoElement | null,
@@ -15,6 +16,7 @@ import { html } from "https://cdn.jsdelivr.net/npm/lit-html@3.2.1/+esm";
  *   onTitle: (v: string) => void,
  *   onDescription: (v: string) => void,
  *   onShowDonate: (v: boolean) => void,
+ *   onDonateAmount: (v: number) => void,
  *   onPosterInput: (e: Event) => void,
  *   onUseSeekPosition: (v: boolean) => void,
  *   onNext: () => void | Promise<void>,
@@ -27,6 +29,7 @@ export function publishMetadataForm(props) {
     title,
     description,
     showDonateButton,
+    donateAmountUsdfc,
     posterPreviewUrl,
     useSeekPosition,
     sourceSeekVideoEl,
@@ -34,6 +37,7 @@ export function publishMetadataForm(props) {
     onTitle,
     onDescription,
     onShowDonate,
+    onDonateAmount,
     onPosterInput,
     onUseSeekPosition,
     onNext,
@@ -80,6 +84,35 @@ export function publishMetadataForm(props) {
         />
         <span>Show donate button</span>
       </label>
+
+      ${showDonateButton
+        ? html`
+            <label class="publish-field">
+              <span class="publish-field-label">Donation amount (USDFC)</span>
+              <input
+                type="number"
+                class="publish-input"
+                name="publish-donate-amount"
+                min="0.000001"
+                step="any"
+                placeholder="1"
+                .value=${String(donateAmountUsdfc)}
+                @input=${(e) => {
+                  const v = Number(
+                    /** @type {HTMLInputElement} */ (e.target).value,
+                  );
+                  onDonateAmount(Number.isFinite(v) ? v : 1);
+                }}
+              />
+            </label>
+            <p class="publish-donate-hint">
+              The wallet you connect on <strong>Fund (step 2)</strong> is the only USDFC
+              recipient — it is written to
+              <code class="publish-inline-code">meta.json</code>
+              as <code class="publish-inline-code">listing.fundWalletAddress</code>.
+            </p>
+          `
+        : null}
 
       <div class="publish-poster">
         <span class="publish-field-label">Poster image</span>

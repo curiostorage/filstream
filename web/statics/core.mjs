@@ -15,6 +15,7 @@ import {
   canEncodeVideo,
 } from "https://esm.sh/mediabunny";
 import shaka from "https://esm.sh/shaka-player";
+import { USDFC_DONATE_TOKEN } from "./filstream-chain-config.mjs";
 
 const FAKE_ORIGIN = "https://filstream.invalid";
 const FRAGMENT_SECONDS = 5;
@@ -634,7 +635,8 @@ async function convertToFmp4Segments(
  * Payload for {@link LISTING_DETAILS_EVENT} / {@link emitListingDetailsEvent} (full logical `meta.json`).
  * @typedef {object} ListingDetailsDetail
  * @property {object} transcodeMeta shallow copy of transcode fields (assembledAt, sourceName, nVar, …)
- * @property {{ title: string, description: string, showDonateButton: boolean, useSeekPosition: boolean }} listing
+ * @property {{ title: string, description: string, showDonateButton: boolean, useSeekPosition: boolean, fundWalletAddress?: string | null, donateAmountUsdfc?: number | null }} listing — `fundWalletAddress` is the wallet connected on Fund (step 2); USDFC donate target
+ * @property {{ enabled: boolean, recipient?: string, amountHuman?: string, token?: object, chainId?: number }} [donate] normalized viewer donate block in `metaJsonText`
  * @property {{ fileName: string, mimeType: string, size: number }} poster metadata (matches `poster` in `metaJsonText`)
  * @property {File} poster image file (upload or seek capture)
  * @property {string} metaJsonText pretty-printed JSON: transcodeMeta spread + `listing` + `poster` info + `listingCompletedAt` (no raw image-bytes)
@@ -713,6 +715,8 @@ function dispatchListingDetailsEvent(ui, detail) {
  *   description: string,
  *   showDonateButton: boolean,
  *   useSeekPosition: boolean,
+ *   fundWalletAddress?: string | null,
+ *   donateAmountUsdfc?: number,
  *   poster: File | Blob,
  * }} listing
  * @returns {ListingDetailsDetail | null} `null` if transcoding has not finished (nothing pending).
@@ -729,12 +733,48 @@ export function emitListingDetailsEvent(ui, listing) {
           type: listing.poster.type || "application/octet-stream",
         });
 
+  const donateAmt =
+    listing.showDonateButton && Number.isFinite(Number(listing.donateAmountUsdfc))
+      ? Number(listing.donateAmountUsdfc)
+      : listing.showDonateButton
+        ? 1
+        : null;
+
+  const rawFund =
+    listing.showDonateButton && typeof listing.fundWalletAddress === "string"
+      ? listing.fundWalletAddress.trim()
+      : null;
+  const validRecipient =
+    rawFund && /^0x[a-fA-F0-9]{40}$/.test(rawFund) ? rawFund : null;
+
   const listingBlock = {
     title: listing.title,
     description: listing.description,
     showDonateButton: listing.showDonateButton,
     useSeekPosition: listing.useSeekPosition,
+    fundWalletAddress: listing.showDonateButton ? validRecipient : null,
+    donateAmountUsdfc: listing.showDonateButton ? donateAmt : null,
   };
+
+  const donateEnabled =
+    listing.showDonateButton === true &&
+    validRecipient != null &&
+    donateAmt != null &&
+    donateAmt > 0;
+
+  const donate = donateEnabled
+    ? {
+        enabled: true,
+        recipient: validRecipient,
+        amountHuman: String(donateAmt),
+        token: {
+          symbol: USDFC_DONATE_TOKEN.symbol,
+          address: USDFC_DONATE_TOKEN.address,
+          decimals: USDFC_DONATE_TOKEN.decimals,
+        },
+        chainId: USDFC_DONATE_TOKEN.chainId,
+      }
+    : { enabled: false };
 
   const posterInfo = {
     fileName: posterFile.name,
@@ -746,6 +786,7 @@ export function emitListingDetailsEvent(ui, listing) {
     ...pendingTranscodeMetaForListing,
     listing: listingBlock,
     poster: posterInfo,
+    donate,
     listingCompletedAt: new Date().toISOString(),
   };
   const metaJsonText = JSON.stringify(doc, null, 2);

@@ -17,6 +17,12 @@ import {
   requestInjectedProviders,
   subscribeInjectedWallets,
 } from "./eip6963.mjs";
+import { broadcastViewTemplate } from "./filstream-broadcast-view.mjs";
+import {
+  donateConfigFromMeta,
+  proposeDonateTransfer,
+  resolveViewerProvider,
+} from "./filstream-viewer-donate.mjs";
 import { uploadConfigurePanel } from "./upload-configure.mjs";
 import { publishMetadataForm } from "./publish-metadata.mjs";
 
@@ -59,6 +65,7 @@ const wizardState = {
   publishTitle: "",
   publishDescription: "",
   showDonateButton: false,
+  donateAmountUsdfc: 1,
   /** @type {string | null} */
   posterObjectUrl: null,
   /** @type {File | null} chosen poster file or capture from seek */
@@ -66,6 +73,11 @@ const wizardState = {
   useSeekPosition: false,
   defineNextBusy: false,
   defineNextError: "",
+  /** @type {unknown | null} parsed listing meta.json after Define → Next */
+  publishedMeta: null,
+  viewerDonateBusy: false,
+  viewerDonateError: "",
+  viewerDonateTxHash: "",
 };
 
 /** @type {HTMLVideoElement | null} */
@@ -198,6 +210,51 @@ function handleShowDonate(v) {
   renderWizard();
 }
 
+/** @param {number} v */
+function handleDonateAmount(v) {
+  wizardState.donateAmountUsdfc = v > 0 ? v : 1;
+  renderWizard();
+}
+
+function broadcastPreviewMeta() {
+  if (wizardState.publishedMeta) return wizardState.publishedMeta;
+  return {
+    listing: {
+      title: wizardState.publishTitle,
+      description: wizardState.publishDescription,
+      showDonateButton: wizardState.showDonateButton,
+      useSeekPosition: wizardState.useSeekPosition,
+      fundWalletAddress: wizardState.walletAddress,
+      donateAmountUsdfc: wizardState.donateAmountUsdfc,
+    },
+    donate: { enabled: false },
+  };
+}
+
+async function handleViewerDonateClick() {
+  const meta = broadcastPreviewMeta();
+  const cfg = donateConfigFromMeta(meta);
+  if (!cfg.enabled) return;
+  const provider = resolveViewerProvider(null);
+  if (!provider) {
+    wizardState.viewerDonateError = "No browser wallet found.";
+    renderWizard();
+    return;
+  }
+  wizardState.viewerDonateBusy = true;
+  wizardState.viewerDonateError = "";
+  renderWizard();
+  try {
+    const { txHash } = await proposeDonateTransfer(provider, cfg);
+    wizardState.viewerDonateTxHash = txHash;
+  } catch (e) {
+    wizardState.viewerDonateError = e instanceof Error ? e.message : String(e);
+  } finally {
+    wizardState.viewerDonateBusy = false;
+    renderWizard();
+  }
+}
+
 function handleUseSeekPosition(v) {
   wizardState.useSeekPosition = v;
   renderWizard();
@@ -229,6 +286,26 @@ async function handleDefineNext() {
 
   /** @type {File | null} */
   let posterFile = null;
+
+  if (wizardState.showDonateButton) {
+    if (
+      !wizardState.walletAddress ||
+      !/^0x[a-fA-F0-9]{40}$/.test(wizardState.walletAddress)
+    ) {
+      wizardState.defineNextError =
+        "Connect a wallet on Fund (step 2) — that address is the USDFC donation target in meta.json.";
+      renderWizard();
+      return;
+    }
+    if (
+      !Number.isFinite(wizardState.donateAmountUsdfc) ||
+      wizardState.donateAmountUsdfc <= 0
+    ) {
+      wizardState.defineNextError = "Enter a positive USDFC donation amount.";
+      renderWizard();
+      return;
+    }
+  }
 
   if (!wizardState.useSeekPosition) {
     if (!wizardState.posterImageFile) {
@@ -295,6 +372,12 @@ async function handleDefineNext() {
     description: wizardState.publishDescription,
     showDonateButton: wizardState.showDonateButton,
     useSeekPosition: wizardState.useSeekPosition,
+    fundWalletAddress: wizardState.showDonateButton
+      ? wizardState.walletAddress
+      : null,
+    donateAmountUsdfc: wizardState.showDonateButton
+      ? wizardState.donateAmountUsdfc
+      : undefined,
     poster: posterFile,
   });
 
@@ -303,6 +386,12 @@ async function handleDefineNext() {
       "Transcode metadata is not ready yet. Wait until encoding finishes, then try Next again.";
     renderWizard();
     return;
+  }
+
+  try {
+    wizardState.publishedMeta = JSON.parse(detail.metaJsonText);
+  } catch {
+    wizardState.publishedMeta = null;
   }
 
   wizardState.step = 4;
@@ -517,11 +606,41 @@ function renderWizard() {
         ${wizardState.step >= 2 && wizardState.step <= WIZARD_MAX_STEP
           ? html`
               <div class="step2-stack">
+                ${wizardState.step === 5
+                  ? html`
+                      <section class="publish-broadcast-shell" aria-labelledby="publish-broadcast-title">
+                        <h2 id="publish-broadcast-title" class="publish-broadcast-head">
+                          Publish — broadcast preview
+                        </h2>
+                        <p class="publish-broadcast-lead">
+                          Demo of <code class="publish-inline-code">filstream-broadcast-view.mjs</code>
+                          using your <code class="publish-inline-code">meta.json</code> and stream.
+                        </p>
+                        ${broadcastViewTemplate({
+                          meta: broadcastPreviewMeta(),
+                          videoEl: v,
+                          downloadSourceFile: wizardState.sourceFile,
+                          downloadLabel: wizardState.sourceFile
+                            ? `Download ${wizardState.sourceFile.name}`
+                            : "Download source video",
+                          variant: "embed-demo",
+                          getWalletList: () => wizardState.injectedWallets,
+                          viewerDonate: {
+                            busy: wizardState.viewerDonateBusy,
+                            error: wizardState.viewerDonateError,
+                            txHash: wizardState.viewerDonateTxHash,
+                            onClick: handleViewerDonateClick,
+                          },
+                        })}
+                      </section>
+                    `
+                  : null}
                 ${wizardState.step === 3
                   ? publishMetadataForm({
                       title: wizardState.publishTitle,
                       description: wizardState.publishDescription,
                       showDonateButton: wizardState.showDonateButton,
+                      donateAmountUsdfc: wizardState.donateAmountUsdfc,
                       posterPreviewUrl: wizardState.posterObjectUrl,
                       useSeekPosition: wizardState.useSeekPosition,
                       sourceSeekVideoEl:
@@ -532,6 +651,7 @@ function renderWizard() {
                       onTitle: handlePublishTitle,
                       onDescription: handlePublishDescription,
                       onShowDonate: handleShowDonate,
+                      onDonateAmount: handleDonateAmount,
                       onPosterInput: handlePosterInput,
                       onUseSeekPosition: handleUseSeekPosition,
                       onNext: handleDefineNext,
@@ -598,7 +718,7 @@ function renderWizard() {
     syncSourcePreviewSrc();
     const vid = ensureVideoEl();
     if (
-      wizardState.step === 4 &&
+      (wizardState.step === 4 || wizardState.step === 5) &&
       wizardState.progress >= 100 &&
       wizardState.posterObjectUrl
     ) {
@@ -647,6 +767,11 @@ async function wizardGoBackToChoose() {
   wizardState.publishTitle = "";
   wizardState.publishDescription = "";
   wizardState.showDonateButton = false;
+  wizardState.donateAmountUsdfc = 1;
+  wizardState.publishedMeta = null;
+  wizardState.viewerDonateBusy = false;
+  wizardState.viewerDonateError = "";
+  wizardState.viewerDonateTxHash = "";
   if (wizardState.posterObjectUrl) {
     URL.revokeObjectURL(wizardState.posterObjectUrl);
     wizardState.posterObjectUrl = null;
