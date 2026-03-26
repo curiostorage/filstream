@@ -57,6 +57,8 @@ export function formatUploadDateLabel(meta) {
  *   meta: unknown,
  *   videoEl: HTMLVideoElement,
  *   reviewIframeSrc?: string | null,
+ *   /** Same URL as the iframe; shown as “Open this video” for sharing. */
+ *   reviewViewerPageUrl?: string | null,
  *   uploadDateLabel?: string | null,
  *   downloadSourceFile?: File | null,
  *   downloadLabel?: string,
@@ -75,6 +77,7 @@ export function broadcastViewTemplate(props) {
     meta,
     videoEl,
     reviewIframeSrc = null,
+    reviewViewerPageUrl = null,
     uploadDateLabel = null,
     downloadSourceFile = null,
     downloadLabel = "Download source video",
@@ -103,6 +106,17 @@ export function broadcastViewTemplate(props) {
               ></iframe>`
             : videoEl}
         </div>
+        ${reviewViewerPageUrl
+          ? html`<p class="broadcast-viewer-link">
+              <a
+                href=${reviewViewerPageUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                >Open this video</a
+              >
+              <span class="subtle"> — same player as the preview above</span>
+            </p>`
+          : null}
       </div>
       <div class="broadcast-meta">
         <h1 class="broadcast-title">${title}</h1>

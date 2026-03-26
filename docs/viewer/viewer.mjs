@@ -1,6 +1,7 @@
 /**
- * Standalone embed: `?meta=<absolute URL to meta.json>`.
- * Fetches meta, loads `playback.masterAppUrl` with Shaka.
+ * GitHub Pages entry: `viewer.html?meta=<absolute-https-url-to-meta.json>`.
+ * Playback is driven only by that query string: fetch `meta.json` from the network,
+ * then load `playback.masterAppUrl` with Shaka (segments from the URLs in that manifest).
  */
 import shaka from "https://esm.sh/shaka-player";
 

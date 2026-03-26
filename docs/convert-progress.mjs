@@ -42,9 +42,6 @@ export function applyStreamMode(player, mode, rungs) {
  *   playingLabel: string,
  *   onCancel: () => void,
  *   onStartOver: () => void,
- *   showDebugSave?: boolean,
- *   debugSaveBusy?: boolean,
- *   onDebugSave?: () => void,
  *   awaitListingLayout?: boolean,
  *   awaitListingTitle?: string,
  *   awaitListingDescription?: string,
@@ -78,9 +75,6 @@ export function convertProgressPanel(props) {
     playingLabel,
     onCancel,
     onStartOver,
-    showDebugSave,
-    debugSaveBusy,
-    onDebugSave,
     awaitListingLayout = false,
     awaitListingTitle = "",
     awaitListingDescription = "",
@@ -336,19 +330,6 @@ export function convertProgressPanel(props) {
           : html`
               <div class="convert-actions-row">
                 <button type="button" class="btn btn-primary" @click=${onStartOver}>Start over</button>
-                ${showDebugSave && onDebugSave
-                  ? html`
-                      <button
-                        type="button"
-                        class="btn btn-debug-save"
-                        ?disabled=${debugSaveBusy}
-                        title="POST HLS + source video to this dev server (web/debug-hls/…)"
-                        @click=${onDebugSave}
-                      >
-                        ${debugSaveBusy ? "Saving…" : "Debug save locally"}
-                      </button>
-                    `
-                  : null}
               </div>
             `}
       </div>

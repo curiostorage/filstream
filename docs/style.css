@@ -547,6 +547,15 @@ h3 {
   max-height: min(70vh, 640px);
 }
 
+.broadcast-viewer-link {
+  margin: 0.75rem 0 0;
+  font-size: 0.9375rem;
+}
+
+.broadcast-viewer-link .subtle {
+  font-size: 0.875rem;
+}
+
 .broadcast-review-iframe {
   display: block;
   width: 100%;
@@ -1553,8 +1562,4 @@ h3 {
   flex-wrap: wrap;
   align-items: center;
   gap: 0.5rem 0.75rem;
-}
-
-.btn-debug-save {
-  font-size: 0.85rem;
 }

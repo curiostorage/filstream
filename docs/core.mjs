@@ -206,7 +206,7 @@ function buildMediaPlaylist(variantIndex, durationsSec) {
   return lines.join("\n");
 }
 
-/** Same as `buildMediaPlaylist` but paths relative to `v{n}/` on disk (debug export). */
+/** Same as `buildMediaPlaylist` but paths relative to `v{n}/` on disk. */
 function buildMediaPlaylistLocal(durationsSec) {
   const target = Math.ceil(Math.max(2, ...durationsSec.map((d) => d)));
   const lines = [
@@ -918,11 +918,6 @@ function installFakeOriginRouting({
 let player = null;
 const revokeList = [];
 
-/** Last successful transcode for optional debug upload (see `uploadDebugHlsToServer`). */
-let debugHlsSnapshot = null;
-/** @type {File | null} */
-let debugSourceFile = null;
-
 /**
  * Transcode-only `meta.json` fields; cleared when listing completes or pipeline resets.
  * @type {{
@@ -962,13 +957,11 @@ export async function resetFilstreamPlayback() {
     player = null;
   }
   revokeAll();
-  debugHlsSnapshot = null;
-  debugSourceFile = null;
   pendingTranscodeMetaForListing = null;
 }
 
 /**
- * Destroy only the Shaka Player (does not revoke blob URLs — debug export + listing artifacts stay valid).
+ * Destroy only the Shaka Player (does not revoke blob URLs — listing artifacts stay valid).
  * Call when leaving local preview (e.g. Await); Review attaches a new player to the retrieval URL.
  */
 export async function destroyActivePipelinePlayer() {
@@ -980,74 +973,6 @@ export async function destroyActivePipelinePlayer() {
     }
     player = null;
   }
-}
-
-/**
- * Whether the last run left HLS blobs in memory (before reset / new encode).
- * @returns {boolean}
- */
-export function hasDebugHlsSnapshot() {
-  return debugHlsSnapshot != null;
-}
-
-/**
- * POST one ZIP to the dev server (multipart hits Go's 1000-part limit on large ladders).
- * Playlists use on-disk-relative URIs (`master-local.m3u8`, `v{n}/playlist.m3u8`).
- * @param {string} [baseUrl] e.g. "" for same origin
- * @returns {Promise<{ savedTo: string }>}
- */
-export async function uploadDebugHlsToServer(baseUrl = "") {
-  if (!debugHlsSnapshot) {
-    throw new Error("No HLS in memory — finish transcoding first.");
-  }
-  const snap = debugHlsSnapshot;
-  const { zipSync } = await import("https://cdn.jsdelivr.net/npm/fflate@0.8.2/+esm");
-  const te = new TextEncoder();
-
-  const meta = {
-    exportedAt: new Date().toISOString(),
-    sourceName: debugSourceFile?.name ?? null,
-    variantCount: snap.variants.length,
-    note: "Playlists: master-local.m3u8 and v*/playlist.m3u8 use relative paths for local tools.",
-    archive: "application/zip via fflate (avoids multipart part-count limits).",
-  };
-
-  /** @type {Record<string, Uint8Array>} */
-  const zipEntries = {
-    "meta.json": te.encode(JSON.stringify(meta, null, 2)),
-    "master-local.m3u8": te.encode(snap.masterTextLocal),
-    "master-app.m3u8": te.encode(snap.masterTextApp),
-  };
-
-  for (let i = 0; i < snap.variants.length; i++) {
-    const v = snap.variants[i];
-    zipEntries[`v${i}/playlist.m3u8`] = te.encode(v.playlistTextLocal);
-    const initBuf = await fetch(v.initURL).then((r) => r.arrayBuffer());
-    zipEntries[`v${i}/init.mp4`] = new Uint8Array(initBuf);
-    for (let j = 0; j < v.segmentURLs.length; j++) {
-      const segBuf = await fetch(v.segmentURLs[j]).then((r) => r.arrayBuffer());
-      zipEntries[`v${i}/seg-${j + 1}.m4s`] = new Uint8Array(segBuf);
-    }
-  }
-
-  if (debugSourceFile) {
-    const safe = debugSourceFile.name.replace(/[^a-zA-Z0-9._-]+/g, "_");
-    const srcBuf = await debugSourceFile.arrayBuffer();
-    zipEntries[`source/${safe}`] = new Uint8Array(srcBuf);
-  }
-
-  const zipped = zipSync(zipEntries, { level: 0 });
-
-  const res = await fetch(`${baseUrl}/api/debug-hls`, {
-    method: "POST",
-    headers: { "Content-Type": "application/zip" },
-    body: zipped,
-  });
-  if (!res.ok) {
-    const t = await res.text();
-    throw new Error(t || res.statusText || String(res.status));
-  }
-  return res.json();
 }
 
 /**
@@ -1079,8 +1004,6 @@ export async function uploadDebugHlsToServer(baseUrl = "") {
  */
 export async function runFilstreamPipeline(file, ui) {
   const { setStatus, setProgress, getVideoElement, onPlaybackReady } = ui;
-  debugSourceFile = file;
-  debugHlsSnapshot = null;
   pendingTranscodeMetaForListing = null;
 
   const probeInput = new Input({
@@ -1378,15 +1301,6 @@ export async function runFilstreamPipeline(file, ui) {
           bandwidth: v.bandwidth,
         })),
       });
-      debugHlsSnapshot = {
-        masterTextApp: masterText,
-        masterTextLocal,
-        variants: encoded.map((v, i) => ({
-          playlistTextLocal: mediaPlaylistTextsLocal[i],
-          initURL: v.initURL,
-          segmentURLs: v.segmentURLs.slice(),
-        })),
-      };
       setStatus("", "");
     } catch (e) {
       await player.destroy();

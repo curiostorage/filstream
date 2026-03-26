@@ -1,7 +1,7 @@
 /**
  * Browser-side FilStream upload config (`window.__FILSTREAM_CONFIG__`).
  *
- * Defaults match `statics/env.example` / Filecoin Calibration.
+ * Defaults match `docs/env.example` / Filecoin Calibration.
  * Override any key in an inline script before `ui.mjs` loads.
  *
  * Mapping from legacy `STORE_*` names:
@@ -31,8 +31,8 @@ const DEFAULT_FILSTREAM_PUBLIC_CONFIG = {
   storeSource: "filstream",
   storeFilstreamId: "",
   storeMaxPieceBytes: 133_169_152,
-  /** Base URL for the static viewer (GitHub Pages). Empty = same origin as the wizard (`viewer/index.html`). */
-  viewBaseUrl: "",
+  /** Base URL for the static viewer (GitHub Pages). Empty = same origin as the wizard (`viewer.html`). */
+  viewBaseUrl: "https://curiostorage.github.io/filstream/",
 };
 
 const FILSTREAM_ID_STORAGE_KEY = "filstream_store_filstream_id_v1";
@@ -98,7 +98,7 @@ export function getFilstreamStoreConfig() {
 }
 
 /**
- * Absolute URL of `viewer/index.html` (Review iframe). Uses `viewBaseUrl` when set; otherwise same directory as the current page.
+ * Absolute URL of `viewer.html` (Review iframe + public link). Uses `viewBaseUrl` when set; otherwise same directory as the current page.
  *
  * @returns {string}
  */
@@ -107,12 +107,12 @@ export function resolveViewerIndexPageUrl() {
   const base = cfg.viewBaseUrl.trim();
   if (base) {
     const root = base.endsWith("/") ? base : `${base}/`;
-    return new URL("viewer/index.html", root).href;
+    return new URL("viewer.html", root).href;
   }
   if (typeof globalThis !== "undefined" && globalThis.location?.href) {
-    return new URL("viewer/index.html", globalThis.location.href).href;
+    return new URL("viewer.html", globalThis.location.href).href;
   }
-  return "viewer/index.html";
+  return "viewer.html";
 }
 
 /**

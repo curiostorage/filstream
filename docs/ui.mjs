@@ -13,7 +13,6 @@ import {
   destroyActivePipelinePlayer,
   emitListingDetailsEvent,
   FILE_EVENT,
-  hasDebugHlsSnapshot,
   LISTING_DETAILS_EVENT,
   probeVideoEncoderHardwareAcceleration,
   resetFilstreamPlayback,
@@ -21,7 +20,6 @@ import {
   SEGMENT_FLUSH_EVENT,
   SEGMENT_READY_EVENT,
   TRANSCODE_COMPLETE_EVENT,
-  uploadDebugHlsToServer,
 } from "./core.mjs";
 import {
   connectInjectedProvider,
@@ -996,7 +994,6 @@ const wizardState = {
   rungs: [],
   /** @type {"auto" | number} */
   streamMode: "auto",
-  debugSaveBusy: false,
   /** Step 5 — listing */
   publishTitle: "",
   publishDescription: "",
@@ -1636,24 +1633,6 @@ function handleDisconnectWallet() {
   renderWizard();
 }
 
-async function handleDebugSave() {
-  if (!hasDebugHlsSnapshot()) {
-    setWizardStatus("Nothing to save — finish playback setup first.", "err");
-    return;
-  }
-  wizardState.debugSaveBusy = true;
-  renderWizard();
-  try {
-    const { savedTo } = await uploadDebugHlsToServer("");
-    setWizardStatus(`Debug bundle saved on server: ${savedTo}`, "ok");
-  } catch (e) {
-    setWizardStatus(e instanceof Error ? e.message : String(e), "err");
-  } finally {
-    wizardState.debugSaveBusy = false;
-    renderWizard();
-  }
-}
-
 function renderWizard() {
   const root = document.getElementById("wizard-root");
   if (!root) return;
@@ -1795,15 +1774,18 @@ function renderWizard() {
           ? html`
               <div class="step2-stack">
                 ${wizardState.step === 5
-                  ? html`
+                  ? (() => {
+                      const reviewViewerUrl = wizardState.reviewMetaJsonUrl
+                        ? buildReviewViewerIframeSrc(wizardState.reviewMetaJsonUrl)
+                        : null;
+                      return html`
                       <section class="publish-broadcast-shell" aria-labelledby="publish-broadcast-title">
                         <h2 id="publish-broadcast-title" class="publish-broadcast-head">Review</h2>
                         ${broadcastViewTemplate({
                           meta: broadcastPreviewMeta(),
                           videoEl: v,
-                          reviewIframeSrc: wizardState.reviewMetaJsonUrl
-                            ? buildReviewViewerIframeSrc(wizardState.reviewMetaJsonUrl)
-                            : null,
+                          reviewIframeSrc: reviewViewerUrl,
+                          reviewViewerPageUrl: reviewViewerUrl,
                           uploadDateLabel: (() => {
                             const when = formatUploadDateLabel(broadcastPreviewMeta());
                             return when ? `Uploaded ${when}` : null;
@@ -1819,7 +1801,8 @@ function renderWizard() {
                           },
                         })}
                       </section>
-                    `
+                    `;
+                    })()
                   : null}
                 ${wizardState.step === 3
                   ? publishMetadataForm({
@@ -1893,10 +1876,6 @@ function renderWizard() {
                   playingLabel: wizardState.playingResolution,
                   onCancel: () => wizardGoBackToChoose(),
                   onStartOver: () => wizardStartOver(),
-                  showDebugSave:
-                    wizardState.step === 4 || wizardState.step === 5,
-                  debugSaveBusy: wizardState.debugSaveBusy,
-                  onDebugSave: handleDebugSave,
                   awaitListingLayout:
                     wizardState.step === 4 &&
                     wizardState.progress >= 100 &&
@@ -2031,7 +2010,6 @@ async function wizardGoBackToChoose() {
   wizardState.sessionAuthWaitPhase = "idle";
   wizardState.sessionAuthError = null;
   resetFundingGateState();
-  wizardState.debugSaveBusy = false;
   wizardState.publishTitle = "";
   wizardState.publishDescription = "";
   wizardState.showDonateButton = false;

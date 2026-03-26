@@ -27,19 +27,16 @@ go.work.sum
 # env file
 .env
 
-# HLS transcode job output (web server)
-web/jobs/
+# HLS transcode job output (Go server)
+jobs/
 
 .idea
 
-# Browser "debug save locally" HLS dumps (POST /api/debug-hls)
-web/debug-hls/
-
 # Stray fMP4 segments (not used by static in-browser app)
-web/seg_*.m4s
+seg_*.m4s
 
 # Synapse browser bundle build
-web/bundle-synapse/node_modules/
+bundle-synapse/node_modules/
 
 # Editor/IDE
 # .idea/

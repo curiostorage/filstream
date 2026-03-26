@@ -4,25 +4,20 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"path/filepath"
 	"strings"
 )
 
 func resolveDir(name string) string {
-	candidates := []string{name, filepath.Join("web", name)}
-	for _, c := range candidates {
-		if st, err := os.Stat(c); err == nil && st.IsDir() {
-			return c
-		}
+	if st, err := os.Stat(name); err == nil && st.IsDir() {
+		return name
 	}
 	return name
 }
 
 func main() {
-	staticRoot := resolveDir("statics")
+	staticRoot := resolveDir("docs")
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /api/debug-hls", handleDebugHls)
 	mux.Handle("/", http.FileServer(http.Dir(staticRoot)))
 
 	addr := ":8080"
