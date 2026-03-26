@@ -35,12 +35,13 @@ import { uploadConfigurePanel } from "./upload-configure.mjs";
 import { publishMetadataForm } from "./publish-metadata.mjs";
 import {
   createBrowserUploadSession,
+  resolveOrCreateDataSet,
   StoreError,
 } from "./browser-store.mjs";
-import { getFilstreamStoreConfig } from "./filstream-config.mjs";
+import { ensureFilstreamId, getFilstreamStoreConfig } from "./filstream-config.mjs";
 import {
   authorizeSessionKeyForUpload,
-  minExpirationSummaryUtc,
+  minExpirationSummaryLocal,
 } from "./session-key-bootstrap.mjs";
 import {
   clearSessionKeyFromStorage,
@@ -52,7 +53,12 @@ import {
   saveSessionKeyToStorage,
   saveWalletToStorage,
 } from "./session-key-storage.mjs";
-import { getAddress } from "./vendor/synapse-browser.mjs";
+import {
+  custom,
+  getAddress,
+  getChain,
+  Synapse,
+} from "./vendor/synapse-browser.mjs";
 
 const WIZARD_MAX_STEP = 5;
 
@@ -99,6 +105,9 @@ const storeRuntime = {
   finalized: false,
   finalizeResult: null,
 };
+
+/** Single in-flight funding preflight for step 2 (session + wallet + source file). */
+let fundingPreflightPromise = null;
 
 /** PDP ingest is deferred until Fund wallet + session key exist; backlog preserves segment order (no cap / drops). */
 /** @type {{ eventType: string, detail: unknown }[]} */
@@ -164,11 +173,219 @@ function fundStepSessionAuthReady() {
   return readStoreSessionAuth() != null;
 }
 
+function resetFundingGateState() {
+  wizardState.fundingBusy = false;
+  wizardState.fundingReady = false;
+  wizardState.fundingError = null;
+  wizardState.fundingSummary = "";
+  wizardState.fundingTxHash = "";
+  wizardState.fundingCheckKey = "";
+}
+
+/**
+ * @param {string} reason
+ */
+async function abortUploadSetupFlow(reason) {
+  await wizardGoBackToChoose();
+  setWizardStatus(reason, "err");
+  renderWizard();
+}
+
+/**
+ * @param {string} message
+ * @param {string} declineReason
+ */
+async function confirmSetupActionOrAbort(message, declineReason) {
+  if (typeof window !== "undefined" && !window.confirm(message)) {
+    await abortUploadSetupFlow(declineReason);
+    return false;
+  }
+  return true;
+}
+
+/**
+ * @param {bigint} value
+ * @returns {string}
+ */
+function bigintToDisplay(value) {
+  return value.toString();
+}
+
+const USDFC_DECIMALS = 18n;
+const USDFC_ONE = 10n ** USDFC_DECIMALS;
+const FUNDING_MIN_TOPUP_WEI = 5n * USDFC_ONE;
+const FUNDING_TARGET_NUMERATOR = 120n;
+const FUNDING_TARGET_DENOMINATOR = 100n;
+
+/**
+ * @param {bigint} value
+ * @param {bigint} numerator
+ * @param {bigint} denominator
+ * @returns {bigint}
+ */
+function ceilMulDiv(value, numerator, denominator) {
+  if (value <= 0n) return 0n;
+  return (value * numerator + (denominator - 1n)) / denominator;
+}
+
+/**
+ * Upfront funding amount per upload.
+ * Rule: max(5 USDFC, ceil(120% of prepare().costs.depositNeeded)).
+ *
+ * @param {bigint} expectedDeposit
+ * @returns {bigint}
+ */
+function computeFundingTargetAmount(expectedDeposit) {
+  const scaled = ceilMulDiv(
+    expectedDeposit,
+    FUNDING_TARGET_NUMERATOR,
+    FUNDING_TARGET_DENOMINATOR,
+  );
+  return scaled > FUNDING_MIN_TOPUP_WEI ? scaled : FUNDING_MIN_TOPUP_WEI;
+}
+
+/**
+ * Synapse client for funding/auth txs. Uses injected wallet transport (EIP-1193),
+ * not the public RPC transport used by session-key storage operations.
+ *
+ * @param {string} clientAddress
+ * @returns {import("./vendor/synapse-browser.mjs").Synapse}
+ */
+function createFundingSynapseForWallet(clientAddress) {
+  if (!wizardState.eip1193Provider) {
+    throw new Error("Missing wallet provider for funding transaction");
+  }
+  const cfg = getFilstreamStoreConfig();
+  return Synapse.create({
+    account: getAddress(/** @type {`0x${string}`} */ (clientAddress)),
+    chain: getChain(cfg.storeChainId),
+    transport: custom(wizardState.eip1193Provider),
+    source: cfg.storeSource,
+  });
+}
+
+async function ensureFundingPreparedForCurrentUpload(force = false) {
+  if (wizardState.step !== 2) return;
+  const auth = readStoreSessionAuth();
+  const clientAddress = wizardState.walletAddress;
+  const sourceFile = wizardState.sourceFile;
+  if (!auth || !clientAddress || !sourceFile) return;
+  if (fundingPreflightPromise) {
+    await fundingPreflightPromise;
+    return;
+  }
+
+  const cfgFlat = getFilstreamStoreConfig();
+  const filstreamId = ensureFilstreamId(cfgFlat);
+  const fundingKey = [
+    clientAddress.toLowerCase(),
+    String(cfgFlat.storeChainId),
+    filstreamId,
+    String(sourceFile.size),
+    String(sourceFile.lastModified),
+  ].join("|");
+  if (!force && wizardState.fundingReady && wizardState.fundingCheckKey === fundingKey) {
+    return;
+  }
+
+  fundingPreflightPromise = (async () => {
+    wizardState.fundingBusy = true;
+    wizardState.fundingError = null;
+    wizardState.fundingSummary = "Checking funding and lockup requirements…";
+    wizardState.fundingTxHash = "";
+    renderWizard();
+    try {
+      const synapse = createFundingSynapseForWallet(clientAddress);
+      const resolved = await resolveOrCreateDataSet({
+        synapse,
+        providerId: cfgFlat.storeProviderId,
+        clientAddress,
+        filstreamId,
+      });
+      const dataSize = BigInt(sourceFile.size);
+      const prepared = await synapse.storage.prepare({
+        dataSize,
+        context: resolved.context,
+      });
+      const expectedDeposit = BigInt(prepared.costs?.depositNeeded ?? 0n);
+      const targetDeposit = computeFundingTargetAmount(expectedDeposit);
+      const availableFunds = BigInt(await synapse.payments.balance());
+      const fundingShortfall =
+        targetDeposit > availableFunds ? targetDeposit - availableFunds : 0n;
+      const expected = bigintToDisplay(expectedDeposit);
+      const target = bigintToDisplay(targetDeposit);
+      const available = bigintToDisplay(availableFunds);
+      const shortfall = bigintToDisplay(fundingShortfall);
+      const needsFwssMaxApproval = prepared.costs?.needsFwssMaxApproval === true;
+      const authCopy = needsFwssMaxApproval
+        ? "This includes FilecoinPay operator approval (FWSS)."
+        : "Operator approval is already in place.";
+      const bufferCopy =
+        expectedDeposit === 0n
+          ? "Estimated required deposit is zero, but FilStream still targets a minimum 5 USDFC available balance as safety buffer."
+          : "";
+      if (fundingShortfall === 0n && !needsFwssMaxApproval) {
+        wizardState.fundingSummary =
+          "Funding and approvals are already ready for this upload.";
+        wizardState.fundingReady = true;
+        wizardState.fundingCheckKey = fundingKey;
+        wizardState.fundingError = null;
+        wizardState.fundingTxHash = "";
+        maybeAutoAdvanceFromFund();
+        return;
+      }
+      const ok = await confirmSetupActionOrAbort(
+        `Funding or approval is required before upload can continue.\n\nEstimated required deposit: ${expected}\nTarget available balance (max(5 USDFC, 120% of estimate)): ${target}\nCurrent available balance (FilecoinPay): ${available}\nRequired top-up now: ${shortfall}\n${authCopy}${bufferCopy ? `\n${bufferCopy}` : ""}\n\nIf you decline, upload setup will be canceled.\n\nContinue?`,
+        "Funding authorization declined. Upload canceled.",
+      );
+      if (!ok) {
+        return;
+      }
+      wizardState.fundingSummary =
+        "Upfront funding transaction submitted — waiting for chain confirmation…";
+      renderWizard();
+      await synapse.payments.fundSync({
+        amount: fundingShortfall,
+        needsFwssMaxApproval,
+        onHash: (hash) => {
+          wizardState.fundingTxHash = hash;
+          renderWizard();
+        },
+      });
+      wizardState.fundingSummary =
+        "Upfront funding and approvals are ready for this upload.";
+      wizardState.fundingReady = true;
+      wizardState.fundingCheckKey = fundingKey;
+      wizardState.fundingError = null;
+      maybeAutoAdvanceFromFund();
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      wizardState.fundingReady = false;
+      wizardState.fundingError = msg;
+      wizardState.fundingSummary = "";
+      if (wizardState.step === 2) {
+        setWizardStatus(msg, "err");
+      }
+    } finally {
+      wizardState.fundingBusy = false;
+      renderWizard();
+      fundingPreflightPromise = null;
+    }
+  })();
+
+  await fundingPreflightPromise;
+}
+
 /** When Fund step session is already valid (restored or pre-authorized), advance without a manual Continue. */
 function maybeAutoAdvanceFromFund() {
   if (wizardState.step !== 2) return;
   if (!fundStepSessionAuthReady()) return;
+  if (!wizardState.fundingReady) {
+    void ensureFundingPreparedForCurrentUpload();
+    return;
+  }
   wizardState.sessionAuthError = null;
+  wizardState.fundingError = null;
   wizardState.step = 3;
 }
 
@@ -305,7 +522,7 @@ function sessionExpiresSummary() {
   for (const [k, v] of Object.entries(ex)) {
     o[k] = typeof v === "bigint" ? v.toString() : String(v);
   }
-  return minExpirationSummaryUtc(o);
+  return minExpirationSummaryLocal(o);
 }
 
 /**
@@ -358,6 +575,7 @@ function attemptRestoreWalletFromStorage(list) {
       if (!tryApplyStoredSession(a)) {
         wizardState.sessionPrivateKey = "";
         wizardState.sessionExpirations = null;
+        resetFundingGateState();
       }
       wizardState.walletError = null;
       maybeAutoAdvanceFromFund();
@@ -584,6 +802,9 @@ function appendToStoreIngestQueue(eventType, detail) {
 }
 
 function queueStoreEvent(eventType, detail) {
+  if (wizardState.step === 1 || !wizardState.sourceFile) {
+    return;
+  }
   if (storeRuntime.finalized) {
     return;
   }
@@ -852,6 +1073,13 @@ const wizardState = {
   /** @type {"idle" | "wallet" | "chain" | "session_sync"} */
   sessionAuthWaitPhase: "idle",
   sessionAuthError: null,
+  fundingBusy: false,
+  fundingReady: false,
+  /** @type {string | null} */
+  fundingError: null,
+  fundingSummary: "",
+  fundingTxHash: "",
+  fundingCheckKey: "",
   walletBusy: false,
   /** @type {string | null} */
   walletError: null,
@@ -999,15 +1227,17 @@ function computeStoreUploadProgressFromSession() {
           flushGoalForLargestBytes: 0,
           pendingRungFlushes: 0,
           pdpUploadsInFlight: 0,
+          pdpUploadsQueued: 0,
           unpiecedBlobCount: 0,
         };
   const pieceCount = sum.pieceCount;
   const inFlight = sum.pdpUploadsInFlight ?? 0;
+  const queuedUploads = sum.pdpUploadsQueued ?? 0;
   const pendingSegments = sum.pendingSegments;
   const unpieced = sum.unpiecedBlobCount ?? 0;
   const ps = pieceCount === 1 ? "" : "s";
-  const label = `${pieceCount} PDP piece${ps} finished · ${inFlight} HTTP upload(s) in flight · ${pendingSegments} segment(s) in local buffers`;
-  /** No PDP upload % until transcode is done and every ladder buffer has been flushed into pieces (then pieceCount + in-flight stores is the full set). */
+  const label = `${pieceCount} PDP piece${ps} finished · ${inFlight} HTTP upload(s) in flight · ${queuedUploads} upload(s) queued · ${pendingSegments} segment(s) in local buffers`;
+  /** No PDP upload % until transcode is done and every ladder buffer has been flushed into pieces. */
   const pieceAssemblyDone =
     wizardState.progress >= 100 &&
     s.transcodeCompleteReceived === true &&
@@ -1015,10 +1245,10 @@ function computeStoreUploadProgressFromSession() {
     pendingSegments === 0;
   let pct = 0;
   if (pieceAssemblyDone) {
-    if (pieceCount === 0 && inFlight === 0) {
+    if (pieceCount === 0 && inFlight === 0 && queuedUploads === 0) {
       pct = 100;
     } else {
-      const targetPieces = Math.max(1, pieceCount + inFlight);
+      const targetPieces = Math.max(1, pieceCount + inFlight + queuedUploads);
       pct = Math.min(100, Math.floor((100 * pieceCount) / targetPieces));
     }
   }
@@ -1053,7 +1283,16 @@ async function attachReviewPlayback(manifestUrl) {
   }
   const player = new shaka.Player();
   await player.attach(vid);
-  await player.load(manifestUrl);
+  try {
+    await player.load(manifestUrl, undefined, "application/x-mpegurl");
+  } catch (firstErr) {
+    // Fallback for providers/players that prefer Apple's HLS MIME.
+    try {
+      await player.load(manifestUrl, undefined, "application/vnd.apple.mpegurl");
+    } catch {
+      throw firstErr;
+    }
+  }
   wizardState.player = player;
   wizardState.playingResolution = "";
   wizardState.rungs = [];
@@ -1205,6 +1444,13 @@ function handlePosterInput(e) {
 
 async function handleAuthorizeSession() {
   if (!wizardState.eip1193Provider || !wizardState.walletAddress) return;
+  const confirmed = await confirmSetupActionOrAbort(
+    "Authorize a 1-hour upload session key now? If you decline, this upload will be canceled.",
+    "Session-key authorization declined. Upload canceled.",
+  );
+  if (!confirmed) {
+    return;
+  }
   wizardState.sessionAuthBusy = true;
   wizardState.sessionAuthWaitPhase = "wallet";
   wizardState.sessionAuthError = null;
@@ -1227,6 +1473,7 @@ async function handleAuthorizeSession() {
       );
     wizardState.sessionPrivateKey = sessionPrivateKey;
     wizardState.sessionExpirations = sessionExpirations;
+    resetFundingGateState();
     const cfg = getFilstreamStoreConfig();
     saveSessionKeyToStorage({
       rootAddress: wizardState.walletAddress,
@@ -1241,6 +1488,7 @@ async function handleAuthorizeSession() {
     wizardState.sessionAuthError = e instanceof Error ? e.message : String(e);
     wizardState.sessionPrivateKey = "";
     wizardState.sessionExpirations = null;
+    resetFundingGateState();
   } finally {
     wizardState.sessionAuthBusy = false;
     wizardState.sessionAuthWaitPhase = "idle";
@@ -1355,7 +1603,7 @@ async function handleDefineNext() {
     await releaseLocalEncodePreviewPlayer();
     wizardState.step = 4;
     setWizardStatus(
-      "Transcode still running — segment upload to storage begins as each piece is encoded, once Fund (wallet + session key) is ready; progress is below. Listing metadata and final commit continue after the encode finishes.",
+      "Transcode still running — segment upload starts once Fund step completes (wallet + session key + funding check). Listing metadata and final commit continue after encode finishes.",
       "",
     );
     scheduleListingFlowWhenTranscodeReady();
@@ -1384,6 +1632,11 @@ function handleRefreshWallets() {
   requestInjectedProviders();
 }
 
+async function handleRetryFundingCheck() {
+  if (wizardState.step !== 2) return;
+  await ensureFundingPreparedForCurrentUpload(true);
+}
+
 /**
  * @param {{ request: (a: { method: string, params?: unknown[] }) => Promise<unknown> }} provider
  * @param {{ uuid: string, name: string }} info
@@ -1392,6 +1645,7 @@ async function handleConnectInjected(provider, info) {
   wizardState.walletBusy = true;
   wizardState.connectingUuid = info.uuid;
   wizardState.walletError = null;
+  resetFundingGateState();
   renderWizard();
   try {
     const addr = await connectInjectedProvider(provider);
@@ -1407,6 +1661,7 @@ async function handleConnectInjected(provider, info) {
       if (!tryApplyStoredSession(addr)) {
         wizardState.sessionPrivateKey = "";
         wizardState.sessionExpirations = null;
+        resetFundingGateState();
       }
     } else {
       wizardState.eip1193Provider = null;
@@ -1436,6 +1691,7 @@ function handleDisconnectWallet() {
   wizardState.sessionAuthBusy = false;
   wizardState.sessionAuthWaitPhase = "idle";
   wizardState.sessionAuthError = null;
+  resetFundingGateState();
   clearSessionKeyFromStorage();
   clearWalletFromStorage();
   renderWizard();
@@ -1666,10 +1922,16 @@ function renderWizard() {
                   sessionAuthWaitPhase: wizardState.sessionAuthWaitPhase,
                   sessionAuthError: wizardState.sessionAuthError,
                   sessionExpiresSummary: sessionExpiresSummary(),
+                  fundingReady: wizardState.fundingReady,
+                  fundingBusy: wizardState.fundingBusy,
+                  fundingError: wizardState.fundingError,
+                  fundingSummary: wizardState.fundingSummary,
+                  fundingTxHash: wizardState.fundingTxHash,
                   canAuthorizeSession: Boolean(
                     wizardState.walletAddress && wizardState.eip1193Provider,
                   ),
                   onAuthorizeSession: handleAuthorizeSession,
+                  onRetryFundingCheck: handleRetryFundingCheck,
                 })}
                 ${convertProgressPanel({
                   show: wizardState.step < 5,
@@ -1715,7 +1977,8 @@ function renderWizard() {
                     if (sum) {
                       const pc = sum.pieceCount;
                       const fly = sum.pdpUploadsInFlight ?? 0;
-                      uploadDetail = `${pc} piece(s) finished on PDP · ${fly} upload(s) in progress`;
+                      const queued = sum.pdpUploadsQueued ?? 0;
+                      uploadDetail = `${pc} piece(s) finished on PDP · ${fly} upload(s) in progress · ${queued} queued`;
                     } else {
                       uploadDetail = s
                         ? "Upload counts will appear as pieces complete."
@@ -1779,6 +2042,7 @@ function renderWizard() {
 async function wizardGoBackToChoose() {
   await resetFilstreamPlayback();
   await resetStoreRuntime(true);
+  fundingPreflightPromise = null;
   if (variantListenerTeardown) {
     variantListenerTeardown();
     variantListenerTeardown = null;
@@ -1812,6 +2076,7 @@ async function wizardGoBackToChoose() {
   wizardState.sessionAuthBusy = false;
   wizardState.sessionAuthWaitPhase = "idle";
   wizardState.sessionAuthError = null;
+  resetFundingGateState();
   wizardState.debugSaveBusy = false;
   wizardState.publishTitle = "";
   wizardState.publishDescription = "";
@@ -1853,6 +2118,7 @@ async function onWizardFileChosen(file) {
   }
   await resetStoreRuntime(true);
   storeRuntime.assetId = randomAssetId();
+  resetFundingGateState();
   wizardState.fileName = file.name;
   wizardState.sourceFile = file;
   wizardState.step = 2;

@@ -19,7 +19,7 @@ See [`web/README.md`](web/README.md).
 - Browser does transcode + segment generation.
 - Encoder events feed an in-page upload session (`segmentready`, `segmentflush`, `fileEvent`, `transcodeComplete`, `listingDetails`).
 - Packed media is staged in **IndexedDB**, streamed to Synapse `store()` as a `ReadableStream`; each segment row is removed after it is read.
-- Finalize rewrites playlists, stores manifest-side artifacts, then `commit()` once.
+- Finalize rewrites playlists, stores manifest-side artifacts, then `commit()` in bounded batches.
 - Dataset model: one dataset per client / provider / `FILSTREAM-ID` metadata tuple.
 
 ## Session init (browser)
@@ -32,6 +32,18 @@ Rules:
 - `sessionPrivateKey` is only for session signing, not the root account.
 - `sessionExpirations` must be supplied by the frontend session flow.
 - Frontend owns session login, funding, and expiry; the page must have a valid session before upload.
+
+## Funding Model (browser)
+
+- Funding is handled once in **Fund (step 2)** before any transcode/store processing starts.
+- Frontend runs `synapse.storage.prepare({ dataSize, context })` for the selected file.
+- Funding target is:
+  - `target = max(5 USDFC, ceil(120% of prepare().costs.depositNeeded))`
+- Frontend checks `payments.balance()` and only tops up the shortfall:
+  - `amount = max(0, target - availableFunds)`
+- FWSS approval uses `prepare().costs.needsFwssMaxApproval`.
+- `payments.fundSync(...)` runs only when top-up or approval is required.
+- There is no extra funding prompt during encoding/upload for that same run.
 
 ## Remaining Work
 

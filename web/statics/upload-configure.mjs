@@ -26,8 +26,14 @@ function shortAddress(addr) {
  *   sessionAuthWaitPhase?: "idle" | "wallet" | "chain" | "session_sync",
  *   sessionAuthError?: string | null,
  *   sessionExpiresSummary?: string | null,
+ *   fundingReady?: boolean,
+ *   fundingBusy?: boolean,
+ *   fundingError?: string | null,
+ *   fundingSummary?: string,
+ *   fundingTxHash?: string,
  *   canAuthorizeSession?: boolean,
  *   onAuthorizeSession?: () => void | Promise<void>,
+ *   onRetryFundingCheck?: () => void | Promise<void>,
  * }} props
  */
 export function uploadConfigurePanel(props) {
@@ -49,12 +55,18 @@ export function uploadConfigurePanel(props) {
     sessionAuthWaitPhase = "idle",
     sessionAuthError = null,
     sessionExpiresSummary = null,
+    fundingReady = false,
+    fundingBusy = false,
+    fundingError = null,
+    fundingSummary = "",
+    fundingTxHash = "",
     canAuthorizeSession = false,
     onAuthorizeSession,
+    onRetryFundingCheck,
   } = props;
 
   const connected = Boolean(walletAddress);
-  const sessionBusy = Boolean(sessionAuthBusy || walletBusy);
+  const sessionBusy = Boolean(sessionAuthBusy || fundingBusy || walletBusy);
 
   /** @type {{ title: string, detail: string }} */
   let waitUi = { title: "", detail: "" };
@@ -148,7 +160,7 @@ export function uploadConfigurePanel(props) {
                         Session key is ready for upload.
                         ${sessionExpiresSummary
                           ? html`<span class="session-expiry"
-                              >Earliest permission ends (UTC):
+                              >Earliest permission ends:
                               <strong>${sessionExpiresSummary}</strong></span
                             >`
                           : null}
@@ -203,9 +215,66 @@ export function uploadConfigurePanel(props) {
                   : null}
                 <p class="configure-section-lead configure-hint-subtle">
                   Ensure this wallet is on the same chain as FilStream config (see
-                  <code>storeChainId</code>). You also need adequate Filecoin Pay / warm-storage
-                  balance; deposit if an upload reports insufficient funds.
+                  <code>storeChainId</code>). FilStream runs one upfront warm-storage funding action
+                  before processing and does not prompt for funding during encode/upload.
                 </p>
+              </div>
+              <div class="session-key-block" aria-label="Warm storage funding">
+                <h4 class="configure-section-title">Funding check</h4>
+                ${fundingBusy
+                  ? html`
+                      <div class="session-auth-progress" role="status" aria-live="polite">
+                        <span class="session-auth-spinner" aria-hidden="true"></span>
+                        <div class="session-auth-progress-copy">
+                          <strong class="session-auth-progress-title">Preparing warm storage</strong>
+                          <p class="session-auth-progress-detail">
+                            ${fundingSummary || "Checking account funds, lockup, and approvals…"}
+                          </p>
+                        </div>
+                      </div>
+                    `
+                  : null}
+                ${fundingReady
+                  ? html`
+                      <p class="session-auth-ok">
+                        Funding check passed.
+                        ${fundingSummary
+                          ? html`<span class="session-expiry"
+                              ><strong>${fundingSummary}</strong></span
+                            >`
+                          : null}
+                        ${fundingTxHash
+                          ? html`<span class="session-expiry"
+                              >Tx: <code>${fundingTxHash}</code></span
+                            >`
+                          : null}
+                      </p>
+                    `
+                  : null}
+                ${!fundingReady && !fundingBusy
+                  ? html`
+                      <p class="configure-section-lead">
+                        Before moving to Define, FilStream checks funding/lockup for this file and
+                        may request one upfront transaction using
+                        <code>max(5 USDFC, 120% of estimated required deposit)</code>.
+                      </p>
+                    `
+                  : null}
+                ${fundingError
+                  ? html`<p class="wallet-error" role="alert">${fundingError}</p>`
+                  : null}
+                ${typeof onRetryFundingCheck === "function" && !fundingBusy
+                  ? html`
+                      <button
+                        type="button"
+                        class="btn btn-secondary session-refresh-btn"
+                        ?disabled=${sessionBusy || !connected}
+                        @click=${onRetryFundingCheck}
+                      >
+                        Retry funding check
+                      </button>
+                    `
+                  : null}
               </div>
             `
           : null}

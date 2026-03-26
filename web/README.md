@@ -24,6 +24,17 @@ Open http://localhost:8080
 
 Upload settings default to Filecoin Calibration in `filstream-config.mjs`. Override with `window.__FILSTREAM_CONFIG__` before `ui.mjs` loads (`statics/index.html` or `statics/env.example`).
 
+Funding behavior in the wizard:
+
+- Step 2 (`Fund`) performs a single upfront `storage.prepare(...)`.
+- It computes:
+  - `target = max(5 USDFC, ceil(120% of prepare().costs.depositNeeded))`
+  - `shortfall = max(0, target - payments.balance())`
+- It calls `payments.fundSync(...)` only if needed:
+  - `amount = shortfall`
+  - `needsFwssMaxApproval = prepare().costs.needsFwssMaxApproval ?? false`
+- Encode/store starts only after this completes.
+
 ## Environment
 
 | Variable | Purpose |

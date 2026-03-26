@@ -9,7 +9,7 @@ export const FILSTREAM_SESSION_STORAGE_KEY = "filstream_synapse_session_v1";
 export const FILSTREAM_WALLET_STORAGE_KEY = "filstream_wallet_v1";
 
 /** Stored sessions older than this are not re-applied after reload (must re-authorize). */
-export const SESSION_RECOVER_MAX_AGE_MS = 30 * 60 * 1000;
+export const SESSION_RECOVER_MAX_AGE_MS = 60 * 60 * 1000;
 
 /**
  * @typedef {{
@@ -74,7 +74,7 @@ export function minSessionExpirationEpochSec(expirations) {
 
 /**
  * Whether a payload may be loaded into the wizard after a tab reload. Older sessions are rejected
- * so users re-authorize before uploads (on-chain auth is ~1h; we only reuse the first 30 minutes).
+ * so users re-authorize before uploads (on-chain auth is ~1h; we reuse up to that same window).
  *
  * @param {StoredSessionPayload} stored
  * @param {number} [nowMs]

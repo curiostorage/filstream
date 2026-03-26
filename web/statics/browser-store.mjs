@@ -55,6 +55,8 @@ import { ensureFilstreamId, getFilstreamStoreConfig } from "./filstream-config.m
 
 const SYNAPSE_MIN_PIECE_BYTES = 127;
 const SYNAPSE_MAX_PIECE_BYTES = 200 * 1024 * 1024;
+const MAX_COMMIT_BATCH_PIECES = 32;
+const MAX_PARALLEL_PDP_UPLOADS = 4;
 const VARIANT_PLAYLIST_APP_RE = /^v\d+\/playlist-app\.m3u8$/;
 const FAKE_ORIGIN = "https://filstream.invalid";
 const SEGMENTS_STORE = "segments";
@@ -82,6 +84,18 @@ function parseSafeNonNegativeInt(value) {
   const n = Number(value);
   if (!Number.isSafeInteger(n) || n < 0) return null;
   return n;
+}
+
+/**
+ * @param {unknown} error
+ * @returns {boolean}
+ */
+function isExtraDataTooLargeError(error) {
+  const msg = error instanceof Error ? error.message : String(error);
+  return (
+    msg.includes("extraData size") &&
+    msg.includes("exceeds the maximum allowed limit")
+  );
 }
 
 /**
@@ -626,13 +640,35 @@ function parseEventBytes(detail) {
  */
 
 /**
+ * @typedef {object} VariantPieceUploadJob
+ * @property {string} variant
+ * @property {number} sequence
+ * @property {number} segmentCount
+ * @property {number} byteLength
+ * @property {Record<string, string>} pieceMetadata
+ * @property {Array<{
+ *   path: string,
+ *   mimeType: string,
+ *   offset: number,
+ *   length: number,
+ *   segmentIndex: number | null,
+ * }>} entries
+ */
+
+/**
+ * @typedef {object} UploadIdleWaiter
+ * @property {() => void} resolve
+ * @property {(error: unknown) => void} reject
+ */
+
+/**
  * @param {string} variant
  * @returns {VariantIdbBuffer}
  */
 function newVariantBuffer(variant) {
   return {
     variant,
-    sequence: 1,
+    sequence: 0,
     size: 0,
     segmentStart: null,
     segmentEnd: null,
@@ -1005,6 +1041,15 @@ export class BrowserFilstreamUploadSession {
     this.finalized = false;
     /** Concurrent `context.store()` calls (PDP piece uploads). */
     this._pdpUploadsInFlight = 0;
+    /** @type {Map<string, number>} */
+    this._variantAbandonBeforeSequence = new Map();
+    /** @type {VariantPieceUploadJob[]} */
+    this._variantUploadQueue = [];
+    this._variantUploadsRunning = 0;
+    /** @type {Error | null} */
+    this._variantUploadFatalError = null;
+    /** @type {UploadIdleWaiter[]} */
+    this._variantUploadIdleWaiters = [];
     this.createdAt = new Date().toISOString();
     this.lastEventAt = new Date().toISOString();
     /**
@@ -1024,6 +1069,188 @@ export class BrowserFilstreamUploadSession {
     } catch {
       /* ignore */
     }
+  }
+
+  /**
+   * @param {unknown} error
+   * @returns {Error}
+   */
+  _toError(error) {
+    if (error instanceof Error) return error;
+    return new Error(String(error));
+  }
+
+  /**
+   * @param {unknown} error
+   */
+  _setVariantUploadFatalError(error) {
+    if (this._variantUploadFatalError) return;
+    this._variantUploadFatalError = this._toError(error);
+    this._variantUploadQueue = [];
+    const waiters = this._variantUploadIdleWaiters.splice(0);
+    for (const waiter of waiters) {
+      try {
+        waiter.reject(this._variantUploadFatalError);
+      } catch {
+        /* ignore */
+      }
+    }
+    this._notifyStagingStateChanged();
+  }
+
+  /** Throws if any background variant upload failed. */
+  _throwIfVariantUploadFailed() {
+    if (this._variantUploadFatalError) {
+      throw this._variantUploadFatalError;
+    }
+  }
+
+  /** Resolves finalize waiters when the background variant-upload queue is fully drained. */
+  _resolveVariantUploadIdleWaiters() {
+    if (this._variantUploadQueue.length > 0) return;
+    if (this._variantUploadsRunning > 0) return;
+    const waiters = this._variantUploadIdleWaiters.splice(0);
+    for (const waiter of waiters) {
+      try {
+        waiter.resolve();
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+
+  /**
+   * @param {string} variant
+   * @param {number} sequenceCutoff
+   */
+  _markVariantAbandonBefore(variant, sequenceCutoff) {
+    const prev = this._variantAbandonBeforeSequence.get(variant) ?? 0;
+    if (sequenceCutoff > prev) {
+      this._variantAbandonBeforeSequence.set(variant, sequenceCutoff);
+    }
+  }
+
+  /**
+   * @param {string} variant
+   * @param {number} sequence
+   * @returns {boolean}
+   */
+  _isVariantSequenceAbandoned(variant, sequence) {
+    const cutoff = this._variantAbandonBeforeSequence.get(variant);
+    return typeof cutoff === "number" && sequence < cutoff;
+  }
+
+  /**
+   * @param {VariantPieceUploadJob} job
+   */
+  _queueVariantPieceUpload(job) {
+    this._throwIfVariantUploadFailed();
+    this._variantUploadQueue.push(job);
+    this._notifyStagingStateChanged();
+    this._pumpVariantUploadQueue();
+  }
+
+  /** Starts queued variant uploads up to `MAX_PARALLEL_PDP_UPLOADS` concurrent workers. */
+  _pumpVariantUploadQueue() {
+    while (
+      this._variantUploadsRunning < MAX_PARALLEL_PDP_UPLOADS &&
+      this._variantUploadQueue.length > 0 &&
+      !this._variantUploadFatalError
+    ) {
+      const job = this._variantUploadQueue.shift();
+      if (!job) break;
+      this._variantUploadsRunning += 1;
+      this._notifyStagingStateChanged();
+      void this
+        ._runVariantPieceUploadJob(job)
+        .catch((error) => {
+          this._setVariantUploadFatalError(error);
+        })
+        .finally(() => {
+          this._variantUploadsRunning -= 1;
+          this._resolveVariantUploadIdleWaiters();
+          this._notifyStagingStateChanged();
+          this._pumpVariantUploadQueue();
+        });
+    }
+  }
+
+  /** Waits until no queued or in-flight background variant uploads remain. */
+  async _waitForVariantUploadsIdle() {
+    this._throwIfVariantUploadFailed();
+    if (this._variantUploadQueue.length === 0 && this._variantUploadsRunning === 0) {
+      return;
+    }
+    await new Promise((resolve, reject) => {
+      this._variantUploadIdleWaiters.push({
+        resolve,
+        reject,
+      });
+    });
+    this._throwIfVariantUploadFailed();
+  }
+
+  /**
+   * @param {VariantPieceUploadJob} job
+   */
+  async _runVariantPieceUploadJob(job) {
+    if (!this.context || typeof this.context.store !== "function") {
+      throw new StoreError(500, "Storage context.store is unavailable");
+    }
+    const db = await this._dbReady;
+    if (this._isVariantSequenceAbandoned(job.variant, job.sequence)) {
+      await idbDeletePendingPiece(db, job.variant, job.sequence, job.segmentCount);
+      this._notifyStagingStateChanged();
+      return;
+    }
+    const stream = createIdbPieceReadableStream(db, job.variant, job.sequence, job.segmentCount);
+
+    this._pdpUploadsInFlight += 1;
+    this._notifyStagingStateChanged();
+    let storeResult;
+    try {
+      storeResult = await this.context.store(stream);
+    } finally {
+      this._pdpUploadsInFlight -= 1;
+      this._notifyStagingStateChanged();
+    }
+    const pieceRef = storeResult?.pieceCid;
+    if (!pieceRef) {
+      throw new StoreError(500, "store() response is missing pieceCid");
+    }
+    const pieceCid = String(pieceRef);
+    const retrievalUrl = await getPieceRetrievalUrl(this.context, pieceRef);
+    const byteLength =
+      typeof storeResult?.size === "number" ? storeResult.size : job.byteLength;
+    const abandoned = this._isVariantSequenceAbandoned(job.variant, job.sequence);
+    /** @type {PieceRecord} */
+    const piece = {
+      pieceRef,
+      pieceCid,
+      retrievalUrl,
+      byteLength,
+      pieceMetadata: job.pieceMetadata,
+      committed: false,
+      abandoned,
+      variant: job.variant,
+      sequence: job.sequence,
+      storedAt: new Date().toISOString(),
+    };
+    this.piecesByCid.set(piece.pieceCid, piece);
+    for (const entry of job.entries) {
+      this.fileMappings.push({
+        path: entry.path,
+        mimeType: entry.mimeType,
+        pieceCid: piece.pieceCid,
+        retrievalUrl: piece.retrievalUrl,
+        offset: entry.offset,
+        length: entry.length,
+        variant: job.variant,
+        sequence: job.sequence,
+        segmentIndex: entry.segmentIndex,
+      });
+    }
+    this._notifyStagingStateChanged();
   }
 
   /**
@@ -1052,6 +1279,7 @@ export class BrowserFilstreamUploadSession {
    *   flushGoalForLargestBytes: number,
    *   pendingRungFlushes: number,
    *   pdpUploadsInFlight: number,
+   *   pdpUploadsQueued: number,
    *   unpiecedBlobCount: number,
    * }}
    */
@@ -1070,8 +1298,7 @@ export class BrowserFilstreamUploadSession {
       }
       if (b.size > bufferingBytesMax) {
         bufferingBytesMax = b.size;
-        flushGoalForLargest =
-          b.sequence === 0 ? SYNAPSE_MIN_PIECE_BYTES : this.cfg.maxPieceBytes;
+        flushGoalForLargest = this.cfg.maxPieceBytes;
       }
       if (b.size >= SYNAPSE_MIN_PIECE_BYTES) {
         pendingRungFlushes += 1;
@@ -1092,6 +1319,7 @@ export class BrowserFilstreamUploadSession {
       flushGoalForLargestBytes: flushGoalForLargest,
       pendingRungFlushes,
       pdpUploadsInFlight: this._pdpUploadsInFlight,
+      pdpUploadsQueued: this._variantUploadQueue.length,
       unpiecedBlobCount,
     };
   }
@@ -1116,8 +1344,7 @@ export class BrowserFilstreamUploadSession {
     if (!this.transcodeCompleteReceived) return;
     for (const buffer of [...this.variantBuffers.values()]) {
       if (buffer.size < SYNAPSE_MIN_PIECE_BYTES) continue;
-      const maxBatch =
-        buffer.sequence === 0 ? SYNAPSE_MIN_PIECE_BYTES : this.cfg.maxPieceBytes;
+      const maxBatch = this.cfg.maxPieceBytes;
       if (buffer.size < maxBatch) {
         await this.flushVariantBuffer(buffer);
       }
@@ -1190,18 +1417,8 @@ export class BrowserFilstreamUploadSession {
    * @param {VariantIdbBuffer} buffer
    */
   async flushVariantBuffer(buffer) {
-    const session = this;
+    this._throwIfVariantUploadFailed();
     if (buffer.size === 0) return;
-    const db = await session._dbReady;
-    const segmentCount = buffer.pendingOrd;
-    const pieceSeqForStream = buffer.sequence;
-    const stream = createIdbPieceReadableStream(
-      db,
-      buffer.variant,
-      pieceSeqForStream,
-      segmentCount,
-    );
-
     if (buffer.size < SYNAPSE_MIN_PIECE_BYTES) {
       throw new StoreError(
         400,
@@ -1214,66 +1431,40 @@ export class BrowserFilstreamUploadSession {
         `Piece payload too large for Synapse store() (${buffer.size} bytes, max ${SYNAPSE_MAX_PIECE_BYTES})`,
       );
     }
+    if (buffer.pendingOrd <= 0 || buffer.entries.length === 0) {
+      throw new StoreError(500, "Variant buffer flush requested with no pending entries");
+    }
 
     const metadata = variantPieceMetadata(
-      session.assetId,
+      this.assetId,
       buffer.variant,
       buffer.sequence,
       buffer.segmentStart,
       buffer.segmentEnd,
     );
-
-    session._pdpUploadsInFlight += 1;
-    session._notifyStagingStateChanged();
-    let storeResult;
-    try {
-      storeResult = await session.context.store(stream);
-    } finally {
-      session._pdpUploadsInFlight -= 1;
-      session._notifyStagingStateChanged();
-    }
-    const pieceRef = storeResult?.pieceCid;
-    if (!pieceRef) {
-      throw new StoreError(500, "store() response is missing pieceCid");
-    }
-    const pieceCid = String(pieceRef);
-    const retrievalUrl = await getPieceRetrievalUrl(session.context, pieceRef);
-    const byteLength =
-      typeof storeResult?.size === "number" ? storeResult.size : buffer.size;
-    /** @type {PieceRecord} */
-    const piece = {
-      pieceRef,
-      pieceCid,
-      retrievalUrl,
-      byteLength,
-      pieceMetadata: metadata,
-      committed: false,
-      abandoned: false,
+    /** @type {VariantPieceUploadJob} */
+    const job = {
       variant: buffer.variant,
       sequence: buffer.sequence,
-      storedAt: new Date().toISOString(),
-    };
-    session.piecesByCid.set(piece.pieceCid, piece);
-    for (const entry of buffer.entries) {
-      session.fileMappings.push({
+      segmentCount: buffer.pendingOrd,
+      byteLength: buffer.size,
+      pieceMetadata: metadata,
+      entries: buffer.entries.map((entry) => ({
         path: entry.path,
         mimeType: entry.mimeType,
-        pieceCid: piece.pieceCid,
-        retrievalUrl: piece.retrievalUrl,
         offset: entry.offset,
         length: entry.length,
-        variant: buffer.variant,
-        sequence: buffer.sequence,
         segmentIndex: entry.segmentIndex,
-      });
-    }
+      })),
+    };
     buffer.sequence += 1;
     buffer.pendingOrd = 0;
     buffer.entries = [];
     buffer.size = 0;
     buffer.segmentStart = null;
     buffer.segmentEnd = null;
-    session._notifyStagingStateChanged();
+    this._notifyStagingStateChanged();
+    this._queueVariantPieceUpload(job);
   }
 
   /**
@@ -1292,6 +1483,12 @@ export class BrowserFilstreamUploadSession {
     const path =
       kind === "init" ? `${variant}/init.mp4` : `${variant}/seg-${segmentIndex}.m4s`;
     const buffer = this.getVariantBuffer(variant);
+    if (
+      buffer.size >= SYNAPSE_MIN_PIECE_BYTES &&
+      buffer.size + bytes.byteLength > this.cfg.maxPieceBytes
+    ) {
+      await this.flushVariantBuffer(buffer);
+    }
     const offset = buffer.size;
     const ord = buffer.pendingOrd;
     buffer.pendingOrd += 1;
@@ -1326,12 +1523,7 @@ export class BrowserFilstreamUploadSession {
       );
     }
     this._notifyStagingStateChanged();
-    /** First PDP piece per variant flushes at Synapse min size so upload starts while later segments encode; later pieces batch up to maxPieceBytes. */
-    const flushThreshold =
-      buffer.sequence === 0
-        ? SYNAPSE_MIN_PIECE_BYTES
-        : this.cfg.maxPieceBytes;
-    if (buffer.size >= flushThreshold) {
+    if (buffer.size >= this.cfg.maxPieceBytes) {
       await this.flushVariantBuffer(buffer);
     }
     if (this.transcodeCompleteReceived) {
@@ -1346,6 +1538,7 @@ export class BrowserFilstreamUploadSession {
     const variant = variantKeyFromDetail(detail);
     const buffer = this.getVariantBuffer(variant);
     const db = await this._dbReady;
+    this._markVariantAbandonBefore(variant, buffer.sequence);
     if (buffer.pendingOrd > 0) {
       await idbDeletePendingPiece(db, buffer.variant, buffer.sequence, buffer.pendingOrd);
     }
@@ -1441,6 +1634,7 @@ export class BrowserFilstreamUploadSession {
     if (this.finalized) {
       throw new StoreError(409, "Upload is already finalized");
     }
+    this._throwIfVariantUploadFailed();
     const t = (type || "").trim();
     if (t === "segmentready") {
       await this.handleSegmentReady(detail);
@@ -1567,6 +1761,7 @@ export class BrowserFilstreamUploadSession {
   }
 
   async commitPendingPieces() {
+    this._throwIfVariantUploadFailed();
     if (!this.context || typeof this.context.commit !== "function") {
       throw new StoreError(500, "Storage context.commit is unavailable");
     }
@@ -1580,26 +1775,60 @@ export class BrowserFilstreamUploadSession {
         dataSetId: this.dataSetId,
       };
     }
-    const result = await this.context.commit({
-      pieces: pending.map((p) => ({
-        pieceCid: p.pieceRef,
-        pieceMetadata: p.pieceMetadata,
-      })),
-    });
-    for (const p of pending) {
-      p.committed = true;
+    let idx = 0;
+    let committedCount = 0;
+    /** @type {string | null} */
+    let transactionHash = null;
+    let targetBatchSize =
+      this.dataSetId == null ? 1 : Math.min(MAX_COMMIT_BATCH_PIECES, pending.length);
+
+    while (idx < pending.length) {
+      let currentBatchSize = Math.min(targetBatchSize, pending.length - idx);
+      for (;;) {
+        const batch = pending.slice(idx, idx + currentBatchSize);
+        try {
+          const result = await this.context.commit({
+            pieces: batch.map((p) => ({
+              pieceCid: p.pieceRef,
+              pieceMetadata: p.pieceMetadata,
+            })),
+          });
+          for (const p of batch) {
+            p.committed = true;
+          }
+          committedCount += batch.length;
+          idx += batch.length;
+
+          const txHash = typeof result?.txHash === "string" ? result.txHash : null;
+          if (txHash) {
+            transactionHash = txHash;
+          }
+          const committedDataSetId = parseSafeNonNegativeInt(result?.dataSetId);
+          if (result?.dataSetId != null && committedDataSetId == null) {
+            throw new StoreError(500, "commit() returned invalid dataSetId");
+          }
+          if (committedDataSetId != null) {
+            this.dataSetId = committedDataSetId;
+          }
+          break;
+        } catch (error) {
+          if (isExtraDataTooLargeError(error) && currentBatchSize > 1) {
+            currentBatchSize = Math.max(1, Math.floor(currentBatchSize / 2));
+            continue;
+          }
+          throw error;
+        }
+      }
+
+      targetBatchSize =
+        this.dataSetId == null
+          ? 1
+          : Math.min(MAX_COMMIT_BATCH_PIECES, pending.length - idx);
     }
-    const txHash = typeof result?.txHash === "string" ? result.txHash : null;
-    const committedDataSetId = parseSafeNonNegativeInt(result?.dataSetId);
-    if (result?.dataSetId != null && committedDataSetId == null) {
-      throw new StoreError(500, "commit() returned invalid dataSetId");
-    }
-    if (committedDataSetId != null) {
-      this.dataSetId = committedDataSetId;
-    }
+
     return {
-      committedCount: pending.length,
-      transactionHash: txHash,
+      committedCount,
+      transactionHash,
       dataSetId: this.dataSetId,
     };
   }
@@ -1615,19 +1844,20 @@ export class BrowserFilstreamUploadSession {
    * }>}
    */
   async finalizeUpload() {
+    this._throwIfVariantUploadFailed();
     if (this.finalized) {
       throw new StoreError(409, "Upload is already finalized");
     }
     for (const buffer of this.variantBuffers.values()) {
       await this.flushVariantBuffer(buffer);
     }
+    await this._waitForVariantUploadsIdle();
+    this._throwIfVariantUploadFailed();
     this.rewriteVariantPlaylists();
     const variantPlaylists = [...this.textFiles.values()].filter((f) =>
       VARIANT_PLAYLIST_APP_RE.test(f.path),
     );
-    for (const file of variantPlaylists) {
-      await this.storeStagedFile(file);
-    }
+    await Promise.all(variantPlaylists.map((file) => this.storeStagedFile(file)));
     this.rewriteMasterPlaylistFile();
     const master = this.textFiles.get("master-app.m3u8");
     if (master) {

@@ -26,11 +26,13 @@
 const DEFAULT_FILSTREAM_PUBLIC_CONFIG = {
   storeRpcUrl: "https://api.calibration.node.glif.io/rpc/v1",
   storeChainId: 314159,
-  storeProviderId: 9,
+  storeProviderId: 4,
   storeSource: "filstream",
   storeFilstreamId: "",
   storeMaxPieceBytes: 133_169_152,
 };
+
+const FILSTREAM_ID_STORAGE_KEY = "filstream_store_filstream_id_v1";
 
 /** @type {FilstreamPublicConfig | null} */
 let cached = null;
@@ -101,12 +103,26 @@ export function ensureFilstreamId(cfg) {
     const existing = g.storeFilstreamId;
     if (typeof existing === "string" && existing.trim() !== "") return existing.trim();
   }
+  if (typeof localStorage !== "undefined") {
+    const persisted = localStorage.getItem(FILSTREAM_ID_STORAGE_KEY);
+    if (typeof persisted === "string" && persisted.trim() !== "") {
+      if (g && typeof g === "object") {
+        g.storeFilstreamId = persisted.trim();
+      }
+      cfg.storeFilstreamId = persisted.trim();
+      cached = { ...cfg, storeFilstreamId: persisted.trim() };
+      return persisted.trim();
+    }
+  }
   const gen =
     typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
       ? crypto.randomUUID()
       : `fs_${Date.now()}_${Math.random().toString(16).slice(2)}`;
   if (g && typeof g === "object") {
     g.storeFilstreamId = gen;
+  }
+  if (typeof localStorage !== "undefined") {
+    localStorage.setItem(FILSTREAM_ID_STORAGE_KEY, gen);
   }
   cfg.storeFilstreamId = gen;
   cached = { ...cfg, storeFilstreamId: gen };

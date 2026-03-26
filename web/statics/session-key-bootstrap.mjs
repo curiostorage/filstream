@@ -60,7 +60,7 @@ async function ensureWalletChain(provider, chain) {
  * @param {Record<string, string>} expMap
  * @returns {string | null}
  */
-export function minExpirationSummaryUtc(expMap) {
+export function minExpirationSummaryLocal(expMap) {
   let minSec = Infinity;
   for (const v of Object.values(expMap)) {
     const n = Number(v);
@@ -68,7 +68,16 @@ export function minExpirationSummaryUtc(expMap) {
     minSec = Math.min(minSec, n);
   }
   if (!Number.isFinite(minSec)) return null;
-  return new Date(minSec * 1000).toISOString().replace("T", " ").slice(0, 19) + " UTC";
+  return new Date(minSec * 1000).toLocaleString(undefined, {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+    timeZoneName: "short",
+  });
 }
 
 /**
