@@ -547,6 +547,20 @@ h3 {
   max-height: min(70vh, 640px);
 }
 
+.broadcast-review-iframe {
+  display: block;
+  width: 100%;
+  min-height: min(70vh, 640px);
+  max-height: min(70vh, 640px);
+  border: 0;
+}
+
+.broadcast-upload-date {
+  margin: -0.35rem 0 0.65rem;
+  font-size: 0.82rem;
+  color: #9aa0a6;
+}
+
 .broadcast-meta {
   min-width: 0;
 }
@@ -666,6 +680,12 @@ h3 {
 
 .hero-stage {
   margin-bottom: 1.5rem;
+}
+
+.hero-price-estimate {
+  margin: 0 0 1rem;
+  font-size: 0.92rem;
+  color: #bdc1c6;
 }
 
 .dropzone--hero {
@@ -1008,6 +1028,52 @@ h3 {
   font-size: 0.82rem;
   color: #f28b82;
   line-height: 1.4;
+  user-select: text;
+}
+
+.funding-prompt-inline {
+  margin: 0.65rem 0 0;
+  padding: 0.85rem 0.95rem;
+  border-radius: 8px;
+  background: rgb(255 255 255 / 0.06);
+  border: 1px solid rgb(255 255 255 / 0.12);
+  max-width: 36rem;
+}
+
+.funding-prompt-head {
+  margin: 0 0 0.65rem;
+  font-size: 0.88rem;
+  font-weight: 600;
+  color: #e8eaed;
+  line-height: 1.4;
+}
+
+.funding-prompt-lines {
+  margin: 0;
+  padding-left: 1.15rem;
+  font-size: 0.82rem;
+  color: #bdc1c6;
+  line-height: 1.5;
+  user-select: text;
+}
+
+.funding-prompt-line {
+  margin: 0.2rem 0;
+  word-break: break-word;
+}
+
+.funding-prompt-note {
+  margin: 0.65rem 0 0;
+  font-size: 0.78rem;
+  color: #9aa0a6;
+  line-height: 1.45;
+}
+
+.funding-prompt-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 0.75rem;
+  margin-top: 0.85rem;
 }
 
 .convert-progress {
@@ -1270,6 +1336,23 @@ h3 {
   min-width: 0;
   height: 0.45rem;
   accent-color: #8ab4f8;
+}
+
+.await-commit-highlight {
+  margin: 0 0 1rem;
+  padding: 1rem 1.1rem;
+  border-radius: 10px;
+  background: rgb(0 0 0 / 0.35);
+  border: 1px solid rgb(138 180 248 / 0.35);
+  text-align: center;
+}
+
+.await-commit-highlight-text {
+  margin: 0;
+  font-size: 0.98rem;
+  font-weight: 700;
+  line-height: 1.45;
+  color: #e8eaed;
 }
 
 .await-pipeline-bars {

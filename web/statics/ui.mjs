@@ -3,15 +3,19 @@
  * Wallet/configure: `upload-configure.mjs`. Transcode + preview: `convert-progress.mjs`. Pipeline: `core.mjs`.
  */
 import { html, render } from "https://cdn.jsdelivr.net/npm/lit-html@3.2.1/+esm";
-import shaka from "https://esm.sh/shaka-player";
+import {
+  createBrowserUploadSession,
+  resolveOrCreateDataSet,
+  StoreError,
+} from "./browser-store.mjs";
 import { applyStreamMode, convertProgressPanel } from "./convert-progress.mjs";
 import {
+  destroyActivePipelinePlayer,
   emitListingDetailsEvent,
   FILE_EVENT,
   hasDebugHlsSnapshot,
   LISTING_DETAILS_EVENT,
   probeVideoEncoderHardwareAcceleration,
-  destroyActivePipelinePlayer,
   resetFilstreamPlayback,
   runFilstreamPipeline,
   SEGMENT_FLUSH_EVENT,
@@ -25,20 +29,21 @@ import {
   requestInjectedProviders,
   subscribeInjectedWallets,
 } from "./eip6963.mjs";
-import { broadcastViewTemplate } from "./filstream-broadcast-view.mjs";
+import {
+  broadcastViewTemplate,
+  formatUploadDateLabel,
+} from "./filstream-broadcast-view.mjs";
+import {
+  buildReviewViewerIframeSrc,
+  ensureFilstreamId,
+  getFilstreamStoreConfig,
+} from "./filstream-config.mjs";
 import {
   donateConfigFromMeta,
   proposeDonateTransfer,
   resolveViewerProvider,
 } from "./filstream-viewer-donate.mjs";
-import { uploadConfigurePanel } from "./upload-configure.mjs";
 import { publishMetadataForm } from "./publish-metadata.mjs";
-import {
-  createBrowserUploadSession,
-  resolveOrCreateDataSet,
-  StoreError,
-} from "./browser-store.mjs";
-import { ensureFilstreamId, getFilstreamStoreConfig } from "./filstream-config.mjs";
 import {
   authorizeSessionKeyForUpload,
   minExpirationSummaryLocal,
@@ -53,6 +58,7 @@ import {
   saveSessionKeyToStorage,
   saveWalletToStorage,
 } from "./session-key-storage.mjs";
+import { uploadConfigurePanel } from "./upload-configure.mjs";
 import {
   custom,
   getAddress,
@@ -61,6 +67,10 @@ import {
 } from "./vendor/synapse-browser.mjs";
 
 const WIZARD_MAX_STEP = 5;
+
+/** PDP finalize phase copy; must match {@link finalizeStoreUpload} and convert-progress highlight. */
+const STORE_PHASE_FINALIZE_NOTE =
+  "Finalizing playlists, manifest, and on-chain commit…";
 
 /**
  * @typedef {{ [permissionHash: string]: string | number | bigint }} StoreSessionExpirations
@@ -87,7 +97,10 @@ const WIZARD_MAX_STEP = 5;
  *   transactionHash: string | null,
  *   masterAppUrl: string | null,
  *   manifestUrl: string | null,
+ *   metaJsonUrl: string | null,
  *   dataSetId: number | null,
+ *   catalogVersion: number | null,
+ *   catalogPieceCid: string | null,
  * }} StoreFinalizeResponse
  */
 
@@ -109,11 +122,15 @@ const storeRuntime = {
 /** Single in-flight funding preflight for step 2 (session + wallet + source file). */
 let fundingPreflightPromise = null;
 
+/** Resolves when the user answers the inline funding confirmation (replaces `window.confirm`). */
+let fundingPromptResolve = null;
+
+/** Resolves when the user answers the inline session-setup confirmation (replaces `window.confirm`). */
+let setupConfirmResolve = null;
+
 /** PDP ingest is deferred until Fund wallet + session key exist; backlog preserves segment order (no cap / drops). */
 /** @type {{ eventType: string, detail: unknown }[]} */
 let storeEventBacklog = [];
-/** Dedupe debug log when ingest is skipped after `ensureStoreUploadSession`. */
-let ingestSkippedNoSessionLogged = false;
 
 // TODO(asset-id-policy): Replace random fallback with the canonical app-level asset id strategy.
 function randomAssetId() {
@@ -180,6 +197,22 @@ function resetFundingGateState() {
   wizardState.fundingSummary = "";
   wizardState.fundingTxHash = "";
   wizardState.fundingCheckKey = "";
+  wizardState.fundingPrompt = null;
+  if (fundingPromptResolve) {
+    const r = fundingPromptResolve;
+    fundingPromptResolve = null;
+    r(false);
+  }
+  resetSetupConfirmState();
+}
+
+function resetSetupConfirmState() {
+  wizardState.setupConfirmPrompt = null;
+  if (setupConfirmResolve) {
+    const r = setupConfirmResolve;
+    setupConfirmResolve = null;
+    r(false);
+  }
 }
 
 /**
@@ -191,28 +224,22 @@ async function abortUploadSetupFlow(reason) {
   renderWizard();
 }
 
-/**
- * @param {string} message
- * @param {string} declineReason
- */
-async function confirmSetupActionOrAbort(message, declineReason) {
-  if (typeof window !== "undefined" && !window.confirm(message)) {
-    await abortUploadSetupFlow(declineReason);
-    return false;
-  }
-  return true;
-}
+const USDFC_DECIMALS = 18n;
+const USDFC_ONE = 10n ** USDFC_DECIMALS;
 
 /**
  * @param {bigint} value
  * @returns {string}
  */
-function bigintToDisplay(value) {
-  return value.toString();
+function formatWeiAsUsdfc(value) {
+  if (value <= 0n) return "0 tUSDFC";
+  const whole = value / USDFC_ONE;
+  const frac = value % USDFC_ONE;
+  if (frac === 0n) return `${whole} tUSDFC`;
+  const fracMicro = (frac * 1_000_000n) / USDFC_ONE;
+  const fracStr = fracMicro.toString().padStart(6, "0").replace(/0+$/, "");
+  return fracStr === "" ? `${whole} tUSDFC` : `${whole}.${fracStr} tUSDFC`;
 }
-
-const USDFC_DECIMALS = 18n;
-const USDFC_ONE = 10n ** USDFC_DECIMALS;
 const FUNDING_MIN_TOPUP_WEI = 5n * USDFC_ONE;
 const FUNDING_TARGET_NUMERATOR = 120n;
 const FUNDING_TARGET_DENOMINATOR = 100n;
@@ -312,10 +339,10 @@ async function ensureFundingPreparedForCurrentUpload(force = false) {
       const availableFunds = BigInt(await synapse.payments.balance());
       const fundingShortfall =
         targetDeposit > availableFunds ? targetDeposit - availableFunds : 0n;
-      const expected = bigintToDisplay(expectedDeposit);
-      const target = bigintToDisplay(targetDeposit);
-      const available = bigintToDisplay(availableFunds);
-      const shortfall = bigintToDisplay(fundingShortfall);
+      const expected = formatWeiAsUsdfc(expectedDeposit);
+      const target = formatWeiAsUsdfc(targetDeposit);
+      const available = formatWeiAsUsdfc(availableFunds);
+      const shortfall = formatWeiAsUsdfc(fundingShortfall);
       const needsFwssMaxApproval = prepared.costs?.needsFwssMaxApproval === true;
       const authCopy = needsFwssMaxApproval
         ? "This includes FilecoinPay operator approval (FWSS)."
@@ -334,13 +361,29 @@ async function ensureFundingPreparedForCurrentUpload(force = false) {
         maybeAutoAdvanceFromFund();
         return;
       }
-      const ok = await confirmSetupActionOrAbort(
-        `Funding or approval is required before upload can continue.\n\nEstimated required deposit: ${expected}\nTarget available balance (max(5 USDFC, 120% of estimate)): ${target}\nCurrent available balance (FilecoinPay): ${available}\nRequired top-up now: ${shortfall}\n${authCopy}${bufferCopy ? `\n${bufferCopy}` : ""}\n\nIf you decline, upload setup will be canceled.\n\nContinue?`,
-        "Funding authorization declined. Upload canceled.",
-      );
+      wizardState.fundingPrompt = {
+        headline:
+          "Funding or approval is required before upload can continue. Review the amounts below, then continue or cancel upload setup.",
+        lines: [
+          `Estimated required deposit: ${expected}`,
+          `Target available balance (max(5 USDFC, 120% of estimate)): ${target}`,
+          `Current available balance (FilecoinPay): ${available}`,
+          `Required top-up now: ${shortfall}`,
+          authCopy,
+          ...(bufferCopy ? [bufferCopy] : []),
+        ],
+      };
+      const ok = await new Promise((resolve) => {
+        fundingPromptResolve = resolve;
+        wizardState.fundingBusy = false;
+        renderWizard();
+      });
+      wizardState.fundingPrompt = null;
+      fundingPromptResolve = null;
       if (!ok) {
         return;
       }
+      wizardState.fundingBusy = true;
       wizardState.fundingSummary =
         "Upfront funding transaction submitted — waiting for chain confirmation…";
       renderWizard();
@@ -438,6 +481,7 @@ async function runFinalizeAfterListingDetail(detail) {
   wizardState.storeUploadProgressPct = 0;
   wizardState.storeUploadPhaseNote = "Preparing finalize…";
   wizardState.storeUploadLabel = "";
+  wizardState.reviewMetaJsonUrl = "";
   updateStoreUploadProgressFromSession();
   renderWizard();
   try {
@@ -445,27 +489,18 @@ async function runFinalizeAfterListingDetail(detail) {
     const finalized = await finalizeStoreUpload();
     const masterUrl =
       typeof finalized?.masterAppUrl === "string" ? finalized.masterAppUrl : "";
+    const metaJsonUrl =
+      typeof finalized?.metaJsonUrl === "string" ? finalized.metaJsonUrl : "";
+    wizardState.reviewMetaJsonUrl = metaJsonUrl;
     tryMergePlaybackIntoPublishedMeta(masterUrl);
     wizardState.storeUploadProgressPct = 100;
     wizardState.storeUploadLabel = masterUrl ? "Stored — loading playback…" : "Stored.";
     wizardState.storeUploadPhaseNote = "";
     wizardState.step = 5;
     renderWizard();
-    if (masterUrl) {
-      try {
-        await attachReviewPlayback(masterUrl);
-      } catch (err) {
-        setWizardStatus(
-          `Stored, but playback failed: ${err instanceof Error ? err.message : String(err)}`,
-          "err",
-        );
-        renderWizard();
-        return;
-      }
-    }
     setWizardStatus(
       masterUrl
-        ? "Review your stream below — loaded from the retrieval URL."
+        ? "Review below."
         : "Stored and committed. (No master URL returned.)",
       "ok",
     );
@@ -728,23 +763,6 @@ function flushStoreEventBacklog() {
   if (storeEventBacklog.length === 0) return;
   const batch = storeEventBacklog;
   storeEventBacklog = [];
-  // #region agent log
-  fetch("http://127.0.0.1:7633/ingest/7d7c4be0-eed8-4a57-baec-1bad87d28ccf", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "X-Debug-Session-Id": "57c358",
-    },
-    body: JSON.stringify({
-      sessionId: "57c358",
-      location: "ui.mjs:flushStoreEventBacklog",
-      message: "flush backlog to ingest queue",
-      data: { n: batch.length },
-      timestamp: Date.now(),
-      hypothesisId: "B",
-    }),
-  }).catch(() => {});
-  // #endregion
   let i = 0;
   for (; i < batch.length; i++) {
     if (storeRuntime.finalized || storeRuntime.disabled) {
@@ -764,26 +782,6 @@ function appendToStoreIngestQueue(eventType, detail) {
       if (storeRuntime.disabled || storeRuntime.finalized) return;
       await ensureStoreUploadSession();
       if (!storeRuntime.session) {
-        // #region agent log
-        if (!ingestSkippedNoSessionLogged) {
-          ingestSkippedNoSessionLogged = true;
-          fetch("http://127.0.0.1:7633/ingest/7d7c4be0-eed8-4a57-baec-1bad87d28ccf", {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              "X-Debug-Session-Id": "57c358",
-            },
-            body: JSON.stringify({
-              sessionId: "57c358",
-              location: "ui.mjs:appendToStoreIngestQueue",
-              message: "ingest skipped: no session after ensureStoreUploadSession",
-              data: { eventType },
-              timestamp: Date.now(),
-              hypothesisId: "B",
-            }),
-          }).catch(() => {});
-        }
-        // #endregion
         return;
       }
       await storeRuntime.session.ingestEvent(eventType, payloadDetail);
@@ -823,32 +821,6 @@ function queueStoreEvent(eventType, detail) {
         "err",
       );
     }
-    // #region agent log
-    if (
-      eventType === SEGMENT_READY_EVENT &&
-      storeEventBacklog.length % 200 === 1
-    ) {
-      fetch("http://127.0.0.1:7633/ingest/7d7c4be0-eed8-4a57-baec-1bad87d28ccf", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "X-Debug-Session-Id": "57c358",
-        },
-        body: JSON.stringify({
-          sessionId: "57c358",
-          location: "ui.mjs:queueStoreEvent",
-          message: "store event backlogged",
-          data: {
-            eventType,
-            backlogLen: storeEventBacklog.length,
-            disabled: storeRuntime.disabled,
-          },
-          timestamp: Date.now(),
-          hypothesisId: "B",
-        }),
-      }).catch(() => {});
-    }
-    // #endregion
     return;
   }
   appendToStoreIngestQueue(eventType, detail);
@@ -864,70 +836,12 @@ async function drainStoreIngestQueue(maxPasses = 500) {
   for (let pass = 0; pass < maxPasses; pass++) {
     flushStoreEventBacklog();
     const snapshot = storeRuntime.queue;
-    const t0 = Date.now();
-    // #region agent log
-    fetch("http://127.0.0.1:7633/ingest/7d7c4be0-eed8-4a57-baec-1bad87d28ccf", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-Debug-Session-Id": "57c358",
-      },
-      body: JSON.stringify({
-        sessionId: "57c358",
-        location: "ui.mjs:drainStoreIngestQueue",
-        message: "drain pass start",
-        data: {
-          pass,
-          backlogLen: storeEventBacklog.length,
-          disabled: storeRuntime.disabled,
-          hasSession: !!storeRuntime.session,
-        },
-        timestamp: Date.now(),
-        hypothesisId: "H1",
-      }),
-    }).catch(() => {});
-    // #endregion
     await snapshot;
-    const elapsed = Date.now() - t0;
-    // #region agent log
-    fetch("http://127.0.0.1:7633/ingest/7d7c4be0-eed8-4a57-baec-1bad87d28ccf", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-Debug-Session-Id": "57c358",
-      },
-      body: JSON.stringify({
-        sessionId: "57c358",
-        location: "ui.mjs:drainStoreIngestQueue",
-        message: "drain pass await settled",
-        data: { pass, elapsedMs: elapsed },
-        timestamp: Date.now(),
-        hypothesisId: "H1",
-      }),
-    }).catch(() => {});
-    // #endregion
     flushStoreEventBacklog();
     if (wizardState.storageUploadActive && storeRuntime.session) {
       updateStoreUploadProgressFromSession();
     }
     if (storeRuntime.queue === snapshot) {
-      // #region agent log
-      fetch("http://127.0.0.1:7633/ingest/7d7c4be0-eed8-4a57-baec-1bad87d28ccf", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "X-Debug-Session-Id": "57c358",
-        },
-        body: JSON.stringify({
-          sessionId: "57c358",
-          location: "ui.mjs:drainStoreIngestQueue",
-          message: "drain queue stable",
-          data: { pass },
-          timestamp: Date.now(),
-          hypothesisId: "H2",
-        }),
-      }).catch(() => {});
-      // #endregion
       return;
     }
   }
@@ -946,27 +860,6 @@ async function finalizeStoreUpload() {
   wizardState.storeUploadPhaseNote = "";
   updateStoreUploadProgressFromSession();
   flushStoreEventBacklog();
-  // #region agent log
-  fetch("http://127.0.0.1:7633/ingest/7d7c4be0-eed8-4a57-baec-1bad87d28ccf", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "X-Debug-Session-Id": "57c358",
-    },
-    body: JSON.stringify({
-      sessionId: "57c358",
-      location: "ui.mjs:finalizeStoreUpload",
-      message: "finalize start (before drain)",
-      data: {
-        backlogLen: storeEventBacklog.length,
-        disabled: storeRuntime.disabled,
-        hasSession: !!storeRuntime.session,
-      },
-      timestamp: Date.now(),
-      hypothesisId: "H3",
-    }),
-  }).catch(() => {});
-  // #endregion
   await drainStoreIngestQueue();
   await ensureStoreUploadSession();
   if (!storeRuntime.session) {
@@ -981,8 +874,7 @@ async function finalizeStoreUpload() {
     );
   }
   if (wizardState.storageUploadActive) {
-    wizardState.storeUploadPhaseNote =
-      "Finalizing playlists, manifest, and on-chain commit…";
+    wizardState.storeUploadPhaseNote = STORE_PHASE_FINALIZE_NOTE;
     updateStoreUploadProgressFromSession();
     wizardState.storeUploadProgressPct = Math.max(
       wizardState.storeUploadProgressPct,
@@ -1015,7 +907,6 @@ async function resetStoreRuntime(abortRemote) {
   storeRuntime.finalized = false;
   storeRuntime.finalizeResult = null;
   storeEventBacklog = [];
-  ingestSkippedNoSessionLogged = false;
   if (abortRemote && previousSession && !hadFinalized) {
     try {
       await previousSession.deleteUploadDatabase();
@@ -1080,6 +971,18 @@ const wizardState = {
   fundingSummary: "",
   fundingTxHash: "",
   fundingCheckKey: "",
+  /**
+   * Inline confirmation UI (replaces native confirm). Copy-friendly text lines.
+   *
+   * @type {{ headline: string, lines: string[] } | null}
+   */
+  fundingPrompt: null,
+  /**
+   * Inline confirmation before session authorize (replaces native confirm).
+   *
+   * @type {{ headline: string, lines: string[], declineReason: string } | null}
+   */
+  setupConfirmPrompt: null,
   walletBusy: false,
   /** @type {string | null} */
   walletError: null,
@@ -1120,6 +1023,8 @@ const wizardState = {
   viewerDonateBusy: false,
   viewerDonateError: "",
   viewerDonateTxHash: "",
+  /** PDP `meta.json` retrieval URL for Review iframe */
+  reviewMetaJsonUrl: "",
 };
 
 /** @type {HTMLVideoElement | null} */
@@ -1265,40 +1170,6 @@ function updateStoreUploadProgressFromSession() {
   renderWizard();
 }
 
-/** Load HLS from committed retrieval URL (Review step). */
-async function attachReviewPlayback(manifestUrl) {
-  if (!manifestUrl || typeof manifestUrl !== "string") return;
-  if (variantListenerTeardown) {
-    variantListenerTeardown();
-    variantListenerTeardown = null;
-  }
-  const vid = ensureVideoEl();
-  if (wizardState.player) {
-    try {
-      await wizardState.player.destroy();
-    } catch {
-      /* ignore */
-    }
-    wizardState.player = null;
-  }
-  const player = new shaka.Player();
-  await player.attach(vid);
-  try {
-    await player.load(manifestUrl, undefined, "application/x-mpegurl");
-  } catch (firstErr) {
-    // Fallback for providers/players that prefer Apple's HLS MIME.
-    try {
-      await player.load(manifestUrl, undefined, "application/vnd.apple.mpegurl");
-    } catch {
-      throw firstErr;
-    }
-  }
-  wizardState.player = player;
-  wizardState.playingResolution = "";
-  wizardState.rungs = [];
-  attachVariantResolutionListener(player);
-}
-
 function tryMergePlaybackIntoPublishedMeta(masterUrl) {
   if (!masterUrl || !wizardState.publishedMeta || typeof wizardState.publishedMeta !== "object") {
     return;
@@ -1440,6 +1311,46 @@ function handlePosterInput(e) {
   wizardState.posterObjectUrl = f ? URL.createObjectURL(f) : null;
   input.value = "";
   renderWizard();
+}
+
+/**
+ * Shows inline copy-friendly confirm UI; on cancel, aborts setup with `declineReason`.
+ *
+ * @param {string} message
+ * @param {string} declineReason
+ * @returns {Promise<boolean>}
+ */
+function confirmSetupActionOrAbort(message, declineReason) {
+  return new Promise((resolve) => {
+    wizardState.setupConfirmPrompt = {
+      headline: message,
+      lines: [],
+      declineReason,
+    };
+    setupConfirmResolve = resolve;
+    renderWizard();
+  });
+}
+
+function handleSetupConfirmContinue() {
+  if (!setupConfirmResolve) return;
+  const r = setupConfirmResolve;
+  setupConfirmResolve = null;
+  wizardState.setupConfirmPrompt = null;
+  renderWizard();
+  r(true);
+}
+
+async function handleSetupConfirmCancel() {
+  if (!setupConfirmResolve) return;
+  const r = setupConfirmResolve;
+  const declineReason =
+    wizardState.setupConfirmPrompt?.declineReason ??
+    "Session-key authorization declined. Upload canceled.";
+  setupConfirmResolve = null;
+  wizardState.setupConfirmPrompt = null;
+  r(false);
+  await abortUploadSetupFlow(declineReason);
 }
 
 async function handleAuthorizeSession() {
@@ -1634,7 +1545,35 @@ function handleRefreshWallets() {
 
 async function handleRetryFundingCheck() {
   if (wizardState.step !== 2) return;
+  if (wizardState.fundingPrompt && fundingPromptResolve) {
+    const r = fundingPromptResolve;
+    fundingPromptResolve = null;
+    wizardState.fundingPrompt = null;
+    r(false);
+    if (fundingPreflightPromise) {
+      await fundingPreflightPromise;
+    }
+  }
   await ensureFundingPreparedForCurrentUpload(true);
+}
+
+function handleFundingPromptContinue() {
+  if (!fundingPromptResolve) return;
+  const r = fundingPromptResolve;
+  fundingPromptResolve = null;
+  wizardState.fundingPrompt = null;
+  wizardState.fundingBusy = true;
+  renderWizard();
+  r(true);
+}
+
+async function handleFundingPromptCancel() {
+  if (!fundingPromptResolve) return;
+  const r = fundingPromptResolve;
+  fundingPromptResolve = null;
+  wizardState.fundingPrompt = null;
+  r(false);
+  await abortUploadSetupFlow("Funding authorization declined. Upload canceled.");
 }
 
 /**
@@ -1734,7 +1673,7 @@ function renderWizard() {
           <header
             class="site-brand"
             role="banner"
-            aria-label="FilStream — in-browser HLS"
+            aria-label="FilStream — CalibrationNet edition"
           >
             <img
               class="site-brand-mark"
@@ -1746,7 +1685,7 @@ function renderWizard() {
             />
             <div class="site-brand-text">
               <span class="site-brand-name">FilStream</span>
-              <span class="site-brand-tagline">In-browser HLS</span>
+              <span class="site-brand-tagline">CalibrationNet edition</span>
             </div>
           </header>
 
@@ -1767,6 +1706,10 @@ function renderWizard() {
           ${wizardState.step === 1
             ? html`
                 <h1>Store your video as streamable on the Filecoin chain.</h1>
+                <p class="hero-price-estimate">
+                  Estimated price: $0.15 per 10 minutes of 1080p video.
+                  Estimated time: 1/3 of the movie run length, plus 1 minute.
+                </p>
                 <section class="wizard-step hero-dropzone-wrap" aria-labelledby="step1-title">
                   <p>Recommended browsers: Chromium-class browsers (Chrome, Edge) with MetaMask or Wallet-Class browsers (Brave, Opera)</p>
                   <p id="step1-title" class="hint">
@@ -1854,21 +1797,18 @@ function renderWizard() {
                 ${wizardState.step === 5
                   ? html`
                       <section class="publish-broadcast-shell" aria-labelledby="publish-broadcast-title">
-                        <h2 id="publish-broadcast-title" class="publish-broadcast-head">
-                          Review — stream from PDP
-                        </h2>
-                        <p class="publish-broadcast-lead">
-                          Playback uses your committed <code class="publish-inline-code">meta.json</code> and
-                          the master manifest retrieval URL (same embed as
-                          <code class="publish-inline-code">filstream-broadcast-view.mjs</code>).
-                        </p>
+                        <h2 id="publish-broadcast-title" class="publish-broadcast-head">Review</h2>
                         ${broadcastViewTemplate({
                           meta: broadcastPreviewMeta(),
                           videoEl: v,
-                          downloadSourceFile: wizardState.sourceFile,
-                          downloadLabel: wizardState.sourceFile
-                            ? `Download ${wizardState.sourceFile.name}`
-                            : "Download source video",
+                          reviewIframeSrc: wizardState.reviewMetaJsonUrl
+                            ? buildReviewViewerIframeSrc(wizardState.reviewMetaJsonUrl)
+                            : null,
+                          uploadDateLabel: (() => {
+                            const when = formatUploadDateLabel(broadcastPreviewMeta());
+                            return when ? `Uploaded ${when}` : null;
+                          })(),
+                          downloadSourceFile: null,
                           variant: "embed-demo",
                           getWalletList: () => wizardState.injectedWallets,
                           viewerDonate: {
@@ -1907,7 +1847,6 @@ function renderWizard() {
                   : null}
                 ${uploadConfigurePanel({
                   show: wizardState.step === 2,
-                  fileName: wizardState.fileName,
                   injectedWallets: wizardState.injectedWallets,
                   walletAddress: wizardState.walletAddress,
                   connectedWalletName: wizardState.connectedWalletName,
@@ -1932,11 +1871,18 @@ function renderWizard() {
                   ),
                   onAuthorizeSession: handleAuthorizeSession,
                   onRetryFundingCheck: handleRetryFundingCheck,
+                  fundingPrompt: wizardState.fundingPrompt,
+                  onFundingPromptContinue: handleFundingPromptContinue,
+                  onFundingPromptCancel: handleFundingPromptCancel,
+                  setupConfirmPrompt: wizardState.setupConfirmPrompt,
+                  onSetupConfirmContinue: handleSetupConfirmContinue,
+                  onSetupConfirmCancel: handleSetupConfirmCancel,
                 })}
                 ${convertProgressPanel({
                   show: wizardState.step < 5,
                   phase: computeWizardConvertPhase(),
-                  fileName: wizardState.fileName,
+                  fileName:
+                    wizardState.step === 2 ? "" : wizardState.fileName,
                   progress: wizardState.progress,
                   statusMsg: wizardState.statusMsg,
                   statusKind: wizardState.statusKind,
@@ -1959,14 +1905,24 @@ function renderWizard() {
                   awaitListingDescription: wizardState.publishDescription,
                   awaitPosterUrl: wizardState.posterObjectUrl,
                   awaitUploadBannerText: "Upload in progress",
+                  awaitCommitHighlight: (() => {
+                    if (wizardState.step !== 4) return null;
+                    if (!wizardState.storageUploadActive) return null;
+                    const n = wizardState.storeUploadPhaseNote?.trim() ?? "";
+                    return n === STORE_PHASE_FINALIZE_NOTE ? n : null;
+                  })(),
                   awaitPipelineBars: (() => {
                     if (wizardState.step !== 4) return null;
+                    if (wizardState.storageUploadActive) {
+                      const n = wizardState.storeUploadPhaseNote?.trim() ?? "";
+                      if (n === STORE_PHASE_FINALIZE_NOTE) return null;
+                    }
                     const s = storeRuntime.session;
                     const rungN = wizardState.rungs?.length ?? 0;
                     const transcodeDetail =
                       rungN > 0
-                        ? `All ${rungN} resolution rung(s) in the HLS ladder share this bar.`
-                        : "Encoder progress for the full ladder (rungs appear when preview is ready).";
+                        ? ""
+                        : "";
 
                     const sum =
                       s && typeof s.getStagingSummary === "function"
@@ -1978,11 +1934,9 @@ function renderWizard() {
                       const pc = sum.pieceCount;
                       const fly = sum.pdpUploadsInFlight ?? 0;
                       const queued = sum.pdpUploadsQueued ?? 0;
-                      uploadDetail = `${pc} piece(s) finished on PDP · ${fly} upload(s) in progress · ${queued} queued`;
+                      uploadDetail = `${pc} pieces · ${fly} in flight · ${queued} queued`;
                     } else {
-                      uploadDetail = s
-                        ? "Upload counts will appear as pieces complete."
-                        : "Authorize wallet + session on Fund to start PDP upload.";
+                      uploadDetail = s ? "" : "";
                     }
 
                     const computed = computeStoreUploadProgressFromSession();
@@ -2090,6 +2044,7 @@ async function wizardGoBackToChoose() {
   wizardState.viewerDonateBusy = false;
   wizardState.viewerDonateError = "";
   wizardState.viewerDonateTxHash = "";
+  wizardState.reviewMetaJsonUrl = "";
   if (wizardState.posterObjectUrl) {
     URL.revokeObjectURL(wizardState.posterObjectUrl);
     wizardState.posterObjectUrl = null;

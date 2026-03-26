@@ -47,7 +47,7 @@ export function publishMetadataForm(props) {
 
   return html`
     <section class="publish-metadata" aria-labelledby="publish-metadata-title">
-      <h2 id="publish-metadata-title" class="publish-metadata-head">Listing details</h2>
+      <h2 id="publish-metadata-title" class="publish-metadata-head">Define</h2>
 
       <label class="publish-field">
         <span class="publish-field-label">Title</span>
@@ -105,11 +105,11 @@ export function publishMetadataForm(props) {
                 }}
               />
             </label>
-            <p class="publish-donate-hint">
-              The wallet you connect on <strong>Fund (step 2)</strong> is the only USDFC
-              recipient — it is written to
-              <code class="publish-inline-code">meta.json</code>
-              as <code class="publish-inline-code">listing.fundWalletAddress</code>.
+            <p
+              class="publish-donate-hint"
+              title="Fund-step wallet is written to meta.json as listing.fundWalletAddress."
+            >
+              Recipient = Fund wallet.
             </p>
           `
         : null}
@@ -155,17 +155,17 @@ export function publishMetadataForm(props) {
             <div class="publish-seek-block">
               <span class="publish-field-label">Poster frame from source video</span>
               <div class="publish-source-seek">${sourceSeekVideoEl}</div>
-              <p class="publish-seek-help">
-                Use the player’s timeline to pick the frame; press <strong>Next</strong>
-                to save a full-resolution PNG of the current frame.
+              <p class="publish-seek-help" title="Next saves a full-resolution PNG of the current frame.">
+                Scrub, then Next for poster PNG.
               </p>
             </div>
           `
         : html`
-            <p class="publish-seek-hint">
-              Enable <strong>Use seek position</strong> to pick a poster frame from the
-              source video. Otherwise upload a poster image — one is required when seek is
-              off.
+            <p
+              class="publish-seek-hint"
+              title="Or upload a poster image when seek is off (required if no seek)."
+            >
+              Turn on seek to grab a frame, or upload a poster.
             </p>
           `}
 
@@ -182,9 +182,8 @@ export function publishMetadataForm(props) {
         >
           ${nextBusy ? "Saving…" : "Next"}
         </button>
-        <p class="publish-define-next-hint">
-          Saves the poster (uploaded image, or a PNG of the current seek frame) then
-          continues to Await.
+        <p class="publish-define-next-hint" title="Poster required; then pipeline upload continues.">
+          Saves poster → Await.
         </p>
       </div>
     </section>

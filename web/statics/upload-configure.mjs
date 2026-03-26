@@ -11,7 +11,6 @@ function shortAddress(addr) {
 /**
  * @param {{
  *   show: boolean,
- *   fileName: string,
  *   injectedWallets: { info: { uuid: string, name: string, icon: string, rdns: string }, provider: import("./eip6963.mjs").Eip1193Provider }[],
  *   walletAddress: string | null,
  *   connectedWalletName: string | null,
@@ -34,13 +33,18 @@ function shortAddress(addr) {
  *   canAuthorizeSession?: boolean,
  *   onAuthorizeSession?: () => void | Promise<void>,
  *   onRetryFundingCheck?: () => void | Promise<void>,
+ *   fundingPrompt?: { headline: string, lines: string[] } | null,
+ *   onFundingPromptContinue?: () => void | Promise<void>,
+ *   onFundingPromptCancel?: () => void | Promise<void>,
+ *   setupConfirmPrompt?: { headline: string, lines: string[], declineReason: string } | null,
+ *   onSetupConfirmContinue?: () => void | Promise<void>,
+ *   onSetupConfirmCancel?: () => void | Promise<void>,
  * }} props
  */
 export function uploadConfigurePanel(props) {
   if (!props.show) return null;
 
   const {
-    fileName,
     injectedWallets,
     walletAddress,
     connectedWalletName,
@@ -63,10 +67,24 @@ export function uploadConfigurePanel(props) {
     canAuthorizeSession = false,
     onAuthorizeSession,
     onRetryFundingCheck,
+    fundingPrompt = null,
+    onFundingPromptContinue,
+    onFundingPromptCancel,
+    setupConfirmPrompt = null,
+    onSetupConfirmContinue,
+    onSetupConfirmCancel,
   } = props;
 
   const connected = Boolean(walletAddress);
-  const sessionBusy = Boolean(sessionAuthBusy || fundingBusy || walletBusy);
+  const fundingAwaitingConfirm = Boolean(fundingPrompt);
+  const setupAwaitingConfirm = Boolean(setupConfirmPrompt);
+  const sessionBusy = Boolean(
+    sessionAuthBusy ||
+      fundingBusy ||
+      walletBusy ||
+      fundingAwaitingConfirm ||
+      setupAwaitingConfirm,
+  );
 
   /** @type {{ title: string, detail: string }} */
   let waitUi = { title: "", detail: "" };
@@ -92,27 +110,28 @@ export function uploadConfigurePanel(props) {
 
   return html`
     <section class="upload-configure" aria-label="Wallet and upload settings">
-      ${fileName
-          ? html`<p class="configure-file">Selected: ${fileName}</p>`
-          : null}
-
       <div class="wallet-injected-block">
-        <div class="wallet-injected-head">
-          <h3 class="configure-section-title">Select your wallet.</h3>
-          <button
-            type="button"
-            class="btn btn-text btn-refresh-wallets"
-            ?disabled=${walletBusy}
-            @click=${onRefreshWallets}
-          >
-            Refresh list
-          </button>
-        </div>
-        <p class="configure-section-lead">
-          Choose a browser extension or injected provider. Wallets that support
-          <a href="https://eips.ethereum.org/EIPS/eip-6963">EIP-6963</a> appear automatically;
-          otherwise use the legacy <code>window.ethereum</code> entry if present.
-        </p>
+        ${!connected
+          ? html`
+              <div class="wallet-injected-head">
+                <h3 class="configure-section-title">Select your wallet.</h3>
+                <button
+                  type="button"
+                  class="btn btn-text btn-refresh-wallets"
+                  ?disabled=${walletBusy}
+                  @click=${onRefreshWallets}
+                >
+                  Refresh list
+                </button>
+              </div>
+              <p
+                class="configure-section-lead"
+                title="EIP-6963 wallets are listed automatically; legacy window.ethereum when present."
+              >
+                Pick a wallet (EIP-6963 or legacy).
+              </p>
+            `
+          : null}
 
         ${connected
           ? html`
@@ -141,7 +160,7 @@ export function uploadConfigurePanel(props) {
                     rel="noopener noreferrer"
                     >Session keys</a
                   >
-                  let FilStream sign PDP storage actions after you approve once in your wallet.
+                  — one approval, then PDP signing.
                 </p>
                 ${sessionAuthBusy
                   ? html`
@@ -154,69 +173,108 @@ export function uploadConfigurePanel(props) {
                       </div>
                     `
                   : null}
-                ${sessionAuthReady
+                ${!sessionAuthBusy && setupAwaitingConfirm && setupConfirmPrompt
                   ? html`
-                      <p class="session-auth-ok">
-                        Session key is ready for upload.
-                        ${sessionExpiresSummary
-                          ? html`<span class="session-expiry"
-                              >Earliest permission ends:
-                              <strong>${sessionExpiresSummary}</strong></span
-                            >`
+                      <div
+                        class="funding-prompt-inline"
+                        role="region"
+                        aria-labelledby="setup-confirm-heading"
+                      >
+                        <h5 id="setup-confirm-heading" class="funding-prompt-head">
+                          ${setupConfirmPrompt.headline}
+                        </h5>
+                        ${setupConfirmPrompt.lines.length
+                          ? html`
+                              <ul class="funding-prompt-lines">
+                                ${setupConfirmPrompt.lines.map(
+                                  (line) =>
+                                    html`<li class="funding-prompt-line">${line}</li>`,
+                                )}
+                              </ul>
+                            `
                           : null}
-                      </p>
-                      ${typeof onAuthorizeSession === "function"
-                        ? html`
-                            <button
-                              type="button"
-                              class="btn btn-secondary session-refresh-btn"
-                              ?disabled=${sessionBusy}
-                              @click=${onAuthorizeSession}
-                            >
-                              Refresh session key
-                            </button>
-                            <p class="session-refresh-hint">
-                              Signs a new on-chain authorization (about 1 hour). Use refresh after
-                              reload if uploads fail with an expired session.
-                            </p>
-                          `
-                        : null}
+                        <p class="funding-prompt-note" title="Cancel returns to file selection.">
+                          Cancel stops setup.
+                        </p>
+                        <div class="funding-prompt-actions">
+                          <button
+                            type="button"
+                            class="btn btn-primary funding-prompt-continue"
+                            @click=${onSetupConfirmContinue}
+                          >
+                            Continue
+                          </button>
+                          <button
+                            type="button"
+                            class="btn btn-secondary funding-prompt-cancel"
+                            @click=${onSetupConfirmCancel}
+                          >
+                            Cancel upload setup
+                          </button>
+                        </div>
+                      </div>
                     `
-                  : html`
-                      ${typeof onAuthorizeSession === "function"
-                        ? html`
-                            <div class="session-key-actions">
-                              <button
-                                type="button"
-                                class="btn btn-primary session-authorize-btn"
-                                ?disabled=${sessionBusy || !canAuthorizeSession}
-                                @click=${onAuthorizeSession}
-                              >
-                                Authorize upload session
-                              </button>
+                  : null}
+                ${!sessionAuthBusy && !setupAwaitingConfirm
+                  ? sessionAuthReady
+                    ? html`
+                        <p class="session-auth-ok">
+                          Session key is ready for upload.
+                          ${sessionExpiresSummary
+                            ? html`<span class="session-expiry"
+                                >Earliest permission ends:
+                                <strong>${sessionExpiresSummary}</strong></span
+                              >`
+                            : null}
+                        </p>
+                        ${typeof onAuthorizeSession === "function"
+                          ? html`
                               <button
                                 type="button"
                                 class="btn btn-secondary session-refresh-btn"
-                                ?disabled=${sessionBusy || !canAuthorizeSession}
+                                title="New on-chain authorization (~1h). Use after reload if uploads fail."
+                                ?disabled=${sessionBusy}
                                 @click=${onAuthorizeSession}
                               >
                                 Refresh session key
                               </button>
-                            </div>
-                            <p class="session-refresh-hint">
-                              Signs a new on-chain authorization (about 1 hour). Use refresh after
-                              reload if uploads fail with an expired session.
-                            </p>
-                          `
-                        : null}
-                    `}
+                            `
+                          : null}
+                      `
+                    : html`
+                        ${typeof onAuthorizeSession === "function"
+                          ? html`
+                              <div class="session-key-actions">
+                                <button
+                                  type="button"
+                                  class="btn btn-primary session-authorize-btn"
+                                  ?disabled=${sessionBusy || !canAuthorizeSession}
+                                  @click=${onAuthorizeSession}
+                                >
+                                  Authorize upload session
+                                </button>
+                                <button
+                                  type="button"
+                                  class="btn btn-secondary session-refresh-btn"
+                                  title="New on-chain authorization (~1h). Use after reload if uploads fail."
+                                  ?disabled=${sessionBusy || !canAuthorizeSession}
+                                  @click=${onAuthorizeSession}
+                                >
+                                  Refresh session key
+                                </button>
+                              </div>
+                            `
+                          : null}
+                      `
+                  : null}
                 ${sessionAuthError
                   ? html`<p class="wallet-error" role="alert">${sessionAuthError}</p>`
                   : null}
-                <p class="configure-section-lead configure-hint-subtle">
-                  Ensure this wallet is on the same chain as FilStream config (see
-                  <code>storeChainId</code>). FilStream runs one upfront warm-storage funding action
-                  before processing and does not prompt for funding during encode/upload.
+                <p
+                  class="configure-section-lead configure-hint-subtle"
+                  title="Wallet chain must match storeChainId. One upfront warm-storage funding tx before encode."
+                >
+                  Chain must match <code>storeChainId</code>.
                 </p>
               </div>
               <div class="session-key-block" aria-label="Warm storage funding">
@@ -234,7 +292,7 @@ export function uploadConfigurePanel(props) {
                       </div>
                     `
                   : null}
-                ${fundingReady
+                ${fundingReady && !fundingAwaitingConfirm
                   ? html`
                       <p class="session-auth-ok">
                         Funding check passed.
@@ -251,12 +309,50 @@ export function uploadConfigurePanel(props) {
                       </p>
                     `
                   : null}
-                ${!fundingReady && !fundingBusy
+                ${fundingAwaitingConfirm && fundingPrompt && !fundingBusy
                   ? html`
-                      <p class="configure-section-lead">
-                        Before moving to Define, FilStream checks funding/lockup for this file and
-                        may request one upfront transaction using
-                        <code>max(5 USDFC, 120% of estimated required deposit)</code>.
+                      <div
+                        class="funding-prompt-inline"
+                        role="region"
+                        aria-labelledby="funding-prompt-heading"
+                      >
+                        <h5 id="funding-prompt-heading" class="funding-prompt-head">
+                          ${fundingPrompt.headline}
+                        </h5>
+                        <ul class="funding-prompt-lines">
+                          ${fundingPrompt.lines.map(
+                            (line) => html`<li class="funding-prompt-line">${line}</li>`,
+                          )}
+                        </ul>
+                        <p class="funding-prompt-note" title="Cancel returns to file selection.">
+                          Copy amounts above if needed. Cancel stops setup.
+                        </p>
+                        <div class="funding-prompt-actions">
+                          <button
+                            type="button"
+                            class="btn btn-primary funding-prompt-continue"
+                            @click=${onFundingPromptContinue}
+                          >
+                            Continue with funding
+                          </button>
+                          <button
+                            type="button"
+                            class="btn btn-secondary funding-prompt-cancel"
+                            @click=${onFundingPromptCancel}
+                          >
+                            Cancel upload setup
+                          </button>
+                        </div>
+                      </div>
+                    `
+                  : null}
+                ${!fundingReady && !fundingBusy && !fundingAwaitingConfirm
+                  ? html`
+                      <p
+                        class="configure-section-lead"
+                        title="FilStream may request one upfront top-up: max(5 tUSDFC, 120% of estimated deposit)."
+                      >
+                        One funding check before Define.
                       </p>
                     `
                   : null}

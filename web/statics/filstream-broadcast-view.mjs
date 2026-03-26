@@ -30,9 +30,34 @@ export function broadcastCopyFromMeta(meta) {
 }
 
 /**
+ * @param {unknown} meta
+ * @returns {string | null}
+ */
+export function formatUploadDateLabel(meta) {
+  if (!meta || typeof meta !== "object") return null;
+  const m = /** @type {Record<string, unknown>} */ (meta);
+  const completed =
+    typeof m.listingCompletedAt === "string" ? m.listingCompletedAt : null;
+  const tm = m.transcodeMeta;
+  const assembledFromTranscode =
+    tm && typeof tm === "object" && tm !== null && "assembledAt" in tm
+      ? String(/** @type {Record<string, unknown>} */ (tm).assembledAt)
+      : null;
+  const assembledTop =
+    typeof m.assembledAt === "string" ? m.assembledAt : null;
+  const raw = completed || assembledTop || assembledFromTranscode;
+  if (!raw) return null;
+  const d = new Date(raw);
+  if (Number.isNaN(d.getTime())) return null;
+  return d.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
+}
+
+/**
  * @param {{
  *   meta: unknown,
  *   videoEl: HTMLVideoElement,
+ *   reviewIframeSrc?: string | null,
+ *   uploadDateLabel?: string | null,
  *   downloadSourceFile?: File | null,
  *   downloadLabel?: string,
  *   variant?: string,
@@ -49,6 +74,8 @@ export function broadcastViewTemplate(props) {
   const {
     meta,
     videoEl,
+    reviewIframeSrc = null,
+    uploadDateLabel = null,
     downloadSourceFile = null,
     downloadLabel = "Download source video",
     variant,
@@ -66,10 +93,22 @@ export function broadcastViewTemplate(props) {
       aria-label="Review stream playback"
     >
       <div class="broadcast-video-shell">
-        <div class="broadcast-video-frame">${videoEl}</div>
+        <div class="broadcast-video-frame">
+          ${reviewIframeSrc
+            ? html`<iframe
+                class="broadcast-review-iframe"
+                src=${reviewIframeSrc}
+                title="Stream playback"
+                allow="autoplay; fullscreen; encrypted-media"
+              ></iframe>`
+            : videoEl}
+        </div>
       </div>
       <div class="broadcast-meta">
         <h1 class="broadcast-title">${title}</h1>
+        ${uploadDateLabel
+          ? html`<p class="broadcast-upload-date" title="Listing completed">${uploadDateLabel}</p>`
+          : null}
         <div class="broadcast-description">
           ${desc
             ? html`<p class="broadcast-desc-body">${desc}</p>`

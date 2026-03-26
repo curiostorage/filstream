@@ -57,6 +57,8 @@ export function applyStreamMode(player, mode, rungs) {
  *     uploadDetail: string,
  *     uploadPhaseNote?: string,
  *   } | null,
+ *   /** When set (finalize / on-chain commit), replaces pipeline bars — bold centered status. */
+ *   awaitCommitHighlight?: string | null,
  *   storageUpload?: { pct: number, label: string } | null,
  * }} props
  */
@@ -85,11 +87,22 @@ export function convertProgressPanel(props) {
     awaitPosterUrl = null,
     awaitUploadBannerText = "Upload in progress",
     awaitPipelineBars = null,
+    awaitCommitHighlight = null,
     storageUpload = null,
   } = props;
 
   const pipelineBarsBlock =
-    awaitPipelineBars != null
+    awaitCommitHighlight != null && String(awaitCommitHighlight).trim() !== ""
+      ? html`
+          <div
+            class="await-commit-highlight"
+            role="status"
+            aria-live="polite"
+          >
+            <p class="await-commit-highlight-text">${awaitCommitHighlight}</p>
+          </div>
+        `
+      : awaitPipelineBars != null
       ? html`
           <div
             class="await-pipeline-bars"
@@ -274,7 +287,9 @@ export function convertProgressPanel(props) {
         : html`
             <header class="convert-head">
               <h2 class="convert-title">${panelTitle}</h2>
-              <p class="convert-file">${fileName}</p>
+              ${fileName
+                ? html`<p class="convert-file">${fileName}</p>`
+                : null}
             </header>
             ${mediaBlock}
           `}

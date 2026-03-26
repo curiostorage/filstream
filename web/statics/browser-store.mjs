@@ -255,59 +255,8 @@ export async function createSynapseForSession(
   }
   try {
     const options = buildSynapseInitOptions(cfg, rootAddress, normalized, sessionExpirations);
-    // #region agent log
-    fetch("http://127.0.0.1:7633/ingest/7d7c4be0-eed8-4a57-baec-1bad87d28ccf", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "57c358" },
-      body: JSON.stringify({
-        sessionId: "57c358",
-        hypothesisId: "H1",
-        location: "browser-store.mjs:createSynapseForSession",
-        message: "before Synapse.create",
-        data: {
-          chainId: cfg.chainId,
-          transportKind: "custom-jsonrpc",
-          accountTypeString: typeof options.account,
-          runId: "post-fix",
-        },
-        timestamp: Date.now(),
-      }),
-    }).catch(() => {});
-    // #endregion
-    const synapse = Synapse.create(options);
-    // #region agent log
-    fetch("http://127.0.0.1:7633/ingest/7d7c4be0-eed8-4a57-baec-1bad87d28ccf", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "57c358" },
-      body: JSON.stringify({
-        sessionId: "57c358",
-        hypothesisId: "H1-verify",
-        location: "browser-store.mjs:createSynapseForSession",
-        message: "Synapse.create ok",
-        data: { runId: "post-fix" },
-        timestamp: Date.now(),
-      }),
-    }).catch(() => {});
-    // #endregion
-    return synapse;
+    return Synapse.create(options);
   } catch (error) {
-    // #region agent log
-    fetch("http://127.0.0.1:7633/ingest/7d7c4be0-eed8-4a57-baec-1bad87d28ccf", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "57c358" },
-      body: JSON.stringify({
-        sessionId: "57c358",
-        hypothesisId: "H1-H2",
-        location: "browser-store.mjs:createSynapseForSession:catch",
-        message: "Synapse.create failed",
-        data: {
-          errMsg: error instanceof Error ? error.message : String(error),
-          errName: error instanceof Error ? error.name : "unknown",
-        },
-        timestamp: Date.now(),
-      }),
-    }).catch(() => {});
-    // #endregion
     if (
       error instanceof Error &&
       error.message.includes("Session key does not have the required permissions")
@@ -744,10 +693,146 @@ function parseOptionalJsonObject(raw) {
 function extractPlaybackUrls(files) {
   const master = files.find((f) => f.path === "master-app.m3u8");
   const manifest = files.find((f) => f.path === "manifest.json");
+  const meta = files.find((f) => f.path === "meta.json");
   return {
     masterAppUrl: master?.retrievalUrl || null,
     manifestUrl: manifest?.retrievalUrl || null,
+    metaJsonUrl: meta?.retrievalUrl || null,
   };
+}
+
+/**
+ * @param {BrowserFilstreamUploadSession} session
+ * @param {number} dataSetId
+ * @param {bigint} pieceId
+ * @returns {Promise<Record<string, string>>}
+ */
+async function readPieceMetadataKv(session, dataSetId, pieceId) {
+  const chain = getChain(session.cfg.chainId);
+  const client = session.synapse.client;
+  const [keys, values] = await client.readContract({
+    address: chain.contracts.fwssView.address,
+    abi: chain.contracts.fwssView.abi,
+    functionName: "getAllPieceMetadata",
+    args: [BigInt(dataSetId), pieceId],
+  });
+  /** @type {Record<string, string>} */
+  const out = {};
+  for (let i = 0; i < keys.length; i++) {
+    out[keys[i]] = values[i];
+  }
+  return out;
+}
+
+/**
+ * @param {string} assetId
+ * @param {number} version
+ */
+function catalogPieceMetadata(assetId, version) {
+  return validatePieceMetadata({
+    FS_ASSET: assetId,
+    FS_VAR: "root",
+    FS_NAME: "filstream_catalog.json",
+    FS_VER: String(version),
+  });
+}
+
+/**
+ * @param {BrowserFilstreamUploadSession} session
+ * @returns {Promise<{ catalogVersion: number | null, catalogPieceCid: string | null }>}
+ */
+async function appendFilstreamCatalogPiece(session) {
+  const metaMapping = session.fileMappings.find((f) => f.path === "meta.json");
+  const metaUrl = metaMapping?.retrievalUrl ?? null;
+  if (!metaUrl || typeof metaUrl !== "string") {
+    return { catalogVersion: null, catalogPieceCid: null };
+  }
+
+  let title = "Untitled";
+  try {
+    const metaFile = session.textFiles.get("meta.json");
+    if (metaFile) {
+      const doc = parseOptionalJsonObject(new TextDecoder().decode(metaFile.data));
+      const t =
+        doc && typeof doc.listing === "object" && doc.listing !== null
+          ? /** @type {{ title?: string }} */ (doc.listing).title
+          : undefined;
+      if (typeof t === "string" && t.trim()) title = t.trim();
+    }
+  } catch {
+    /* ignore */
+  }
+
+  let nextVer = 0;
+  /** @type {{ title: string, metapath: string }[]} */
+  let movies = [];
+  let bestVer = -1;
+  /** @type {unknown} */
+  let bestCid = null;
+
+  const dsId = session.dataSetId;
+  if (dsId != null && session.context) {
+    try {
+      for await (const row of session.context.getPieces()) {
+        const kv = await readPieceMetadataKv(session, dsId, row.pieceId);
+        if (kv.FS_NAME === "filstream_catalog.json") {
+          const v = Number.parseInt(kv.FS_VER ?? "0", 10);
+          if (Number.isFinite(v) && v > bestVer) {
+            bestVer = v;
+            bestCid = row.pieceCid;
+          }
+        }
+      }
+    } catch (e) {
+      console.warn("[filstream] catalog scan failed", e);
+    }
+
+    if (bestCid != null && bestVer >= 0) {
+      try {
+        const url = session.context.getPieceUrl(bestCid);
+        const res = await fetch(url);
+        if (res.ok) {
+          const prev = await res.json();
+          if (prev && Array.isArray(prev.movies)) {
+            movies = [...prev.movies];
+          }
+        }
+      } catch (e) {
+        console.warn("[filstream] catalog fetch failed", e);
+      }
+      nextVer = bestVer + 1;
+    }
+  }
+
+  movies.push({ title, metapath: metaUrl });
+  const doc = { kind: "filstream v1", movies };
+  let text = JSON.stringify(doc, null, 2);
+  const enc = new TextEncoder();
+  let bytes = enc.encode(text);
+  while (bytes.byteLength < SYNAPSE_MIN_PIECE_BYTES) {
+    text += "\n";
+    bytes = enc.encode(text);
+  }
+
+  const metadata = catalogPieceMetadata(session.assetId, nextVer);
+  const piece = await session.storePieceBytes({
+    bytes,
+    pieceMetadata: metadata,
+    variant: metadata.FS_VAR || "root",
+    sequence: null,
+  });
+  session.fileMappings.push({
+    path: "filstream_catalog.json",
+    mimeType: "application/json",
+    pieceCid: piece.pieceCid,
+    retrievalUrl: piece.retrievalUrl,
+    offset: 0,
+    length: bytes.byteLength,
+    variant: metadata.FS_VAR || "root",
+    sequence: null,
+    segmentIndex: null,
+  });
+  return { catalogVersion: nextVer, catalogPieceCid: piece.pieceCid };
 }
 
 /**
@@ -1840,7 +1925,10 @@ export class BrowserFilstreamUploadSession {
    *   transactionHash: string | null,
    *   masterAppUrl: string | null,
    *   manifestUrl: string | null,
+   *   metaJsonUrl: string | null,
    *   dataSetId: number | null,
+   *   catalogVersion: number | null,
+   *   catalogPieceCid: string | null,
    * }>}
    */
   async finalizeUpload() {
@@ -1870,6 +1958,13 @@ export class BrowserFilstreamUploadSession {
       mimeType: "application/json",
       data: new TextEncoder().encode(manifestText),
     });
+    /** @type {{ catalogVersion: number | null, catalogPieceCid: string | null }} */
+    let catalogOut = { catalogVersion: null, catalogPieceCid: null };
+    try {
+      catalogOut = await appendFilstreamCatalogPiece(this);
+    } catch (e) {
+      console.warn("[filstream] catalog append failed", e);
+    }
     const commit = await this.commitPendingPieces();
     this.finalized = true;
     const liveFiles = this.fileMappings.filter((f) => {
@@ -1883,7 +1978,10 @@ export class BrowserFilstreamUploadSession {
       transactionHash: commit.transactionHash,
       masterAppUrl: playback.masterAppUrl,
       manifestUrl: playback.manifestUrl,
+      metaJsonUrl: playback.metaJsonUrl,
       dataSetId: this.dataSetId,
+      catalogVersion: catalogOut.catalogVersion,
+      catalogPieceCid: catalogOut.catalogPieceCid,
     };
   }
 

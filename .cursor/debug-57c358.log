@@ -1,6 +1,0 @@
-{"sessionId":"57c358","hypothesisId":"H1","location":"browser-store.mjs:createSynapseForSession","message":"before Synapse.create","data":{"chainId":314159,"transportKind":"custom-jsonrpc","accountTypeString":"string","runId":"post-fix"},"timestamp":1774497282056}
-{"sessionId":"57c358","hypothesisId":"H1-verify","location":"browser-store.mjs:createSynapseForSession","message":"Synapse.create ok","data":{"runId":"post-fix"},"timestamp":1774497282056}
-{"sessionId":"57c358","location":"ui.mjs:finalizeStoreUpload","message":"finalize start (before drain)","data":{"backlogLen":0,"disabled":false,"hasSession":true},"timestamp":1774497354096,"hypothesisId":"H3"}
-{"sessionId":"57c358","location":"ui.mjs:drainStoreIngestQueue","message":"drain pass start","data":{"pass":0,"backlogLen":0,"disabled":false,"hasSession":true},"timestamp":1774497354097,"hypothesisId":"H1"}
-{"sessionId":"57c358","location":"ui.mjs:drainStoreIngestQueue","message":"drain pass await settled","data":{"pass":0,"elapsedMs":1797401},"timestamp":1774499151498,"hypothesisId":"H1"}
-{"sessionId":"57c358","location":"ui.mjs:drainStoreIngestQueue","message":"drain queue stable","data":{"pass":0},"timestamp":1774499151499,"hypothesisId":"H2"}
