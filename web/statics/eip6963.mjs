@@ -11,7 +11,10 @@
  * @typedef {{ info: Eip6963ProviderInfo, provider: Eip1193Provider }} Eip6963AnnouncedWallet
  */
 
-const LEGACY_UUID = "eip6963:legacy-window-ethereum";
+/** Matches the synthetic wallet entry from `mergeLegacyEthereum`. */
+export const EIP6963_LEGACY_PROVIDER_UUID = "eip6963:legacy-window-ethereum";
+
+const LEGACY_UUID = EIP6963_LEGACY_PROVIDER_UUID;
 
 /** @param {Eip6963AnnouncedWallet[]} list */
 function mergeLegacyEthereum(list) {

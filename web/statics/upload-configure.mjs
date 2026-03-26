@@ -21,8 +21,13 @@ function shortAddress(addr) {
  *   onConnectInjected: (provider: import("./eip6963.mjs").Eip1193Provider, info: { uuid: string, name: string }) => void | Promise<void>,
  *   onDisconnectWallet: () => void,
  *   onRefreshWallets: () => void,
- *   fundStepActive?: boolean,
- *   onContinueFromFund?: () => void,
+ *   sessionAuthReady?: boolean,
+ *   sessionAuthBusy?: boolean,
+ *   sessionAuthWaitPhase?: "idle" | "wallet" | "chain" | "session_sync",
+ *   sessionAuthError?: string | null,
+ *   sessionExpiresSummary?: string | null,
+ *   canAuthorizeSession?: boolean,
+ *   onAuthorizeSession?: () => void | Promise<void>,
  * }} props
  */
 export function uploadConfigurePanel(props) {
@@ -39,13 +44,39 @@ export function uploadConfigurePanel(props) {
     onConnectInjected,
     onDisconnectWallet,
     onRefreshWallets,
-    fundStepActive = false,
-    onContinueFromFund,
+    sessionAuthReady = false,
+    sessionAuthBusy = false,
+    sessionAuthWaitPhase = "idle",
+    sessionAuthError = null,
+    sessionExpiresSummary = null,
+    canAuthorizeSession = false,
+    onAuthorizeSession,
   } = props;
 
   const connected = Boolean(walletAddress);
-  const showFundContinue =
-    connected && fundStepActive && typeof onContinueFromFund === "function";
+  const sessionBusy = Boolean(sessionAuthBusy || walletBusy);
+
+  /** @type {{ title: string, detail: string }} */
+  let waitUi = { title: "", detail: "" };
+  if (sessionAuthBusy) {
+    if (sessionAuthWaitPhase === "chain") {
+      waitUi = {
+        title: "Waiting for the network",
+        detail:
+          "Your transaction was sent. Confirming it on-chain can take a minute on Filecoin. You can leave this tab open.",
+      };
+    } else if (sessionAuthWaitPhase === "session_sync") {
+      waitUi = {
+        title: "Finalizing session",
+        detail: "Reading authorization data from the chain…",
+      };
+    } else {
+      waitUi = {
+        title: "Confirm in wallet",
+        detail: "Approve the session-key transaction when your wallet prompts you.",
+      };
+    }
+  }
 
   return html`
     <section class="upload-configure" aria-label="Wallet and upload settings">
@@ -89,24 +120,93 @@ export function uploadConfigurePanel(props) {
                   Disconnect
                 </button>
               </div>
-              ${showFundContinue
-                ? html`
-                    <div class="fund-continue-wrap">
-                      <button
-                        type="button"
-                        class="btn btn-primary fund-continue-btn"
-                        ?disabled=${walletBusy}
-                        @click=${onContinueFromFund}
-                      >
-                        DEBUG-UNTIL-WIRED: Continue to Define
-                      </button>
-                      <p class="fund-continue-hint">
-                        Move to the next step when you are ready. Transcoding can still run in the
-                        panel below.
+              <div class="session-key-block" aria-label="Filecoin session key">
+                <h4 class="configure-section-title">Authorize upload (session key)</h4>
+                <p class="configure-section-lead">
+                  <a
+                    href="https://docs.filecoin.cloud/developer-guides/session-keys/"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    >Session keys</a
+                  >
+                  let FilStream sign PDP storage actions after you approve once in your wallet.
+                </p>
+                ${sessionAuthBusy
+                  ? html`
+                      <div class="session-auth-progress" role="status" aria-live="polite">
+                        <span class="session-auth-spinner" aria-hidden="true"></span>
+                        <div class="session-auth-progress-copy">
+                          <strong class="session-auth-progress-title">${waitUi.title}</strong>
+                          <p class="session-auth-progress-detail">${waitUi.detail}</p>
+                        </div>
+                      </div>
+                    `
+                  : null}
+                ${sessionAuthReady
+                  ? html`
+                      <p class="session-auth-ok">
+                        Session key is ready for upload.
+                        ${sessionExpiresSummary
+                          ? html`<span class="session-expiry"
+                              >Earliest permission ends (UTC):
+                              <strong>${sessionExpiresSummary}</strong></span
+                            >`
+                          : null}
                       </p>
-                    </div>
-                  `
-                : null}
+                      ${typeof onAuthorizeSession === "function"
+                        ? html`
+                            <button
+                              type="button"
+                              class="btn btn-secondary session-refresh-btn"
+                              ?disabled=${sessionBusy}
+                              @click=${onAuthorizeSession}
+                            >
+                              Refresh session key
+                            </button>
+                            <p class="session-refresh-hint">
+                              Signs a new on-chain authorization (about 1 hour). Use refresh after
+                              reload if uploads fail with an expired session.
+                            </p>
+                          `
+                        : null}
+                    `
+                  : html`
+                      ${typeof onAuthorizeSession === "function"
+                        ? html`
+                            <div class="session-key-actions">
+                              <button
+                                type="button"
+                                class="btn btn-primary session-authorize-btn"
+                                ?disabled=${sessionBusy || !canAuthorizeSession}
+                                @click=${onAuthorizeSession}
+                              >
+                                Authorize upload session
+                              </button>
+                              <button
+                                type="button"
+                                class="btn btn-secondary session-refresh-btn"
+                                ?disabled=${sessionBusy || !canAuthorizeSession}
+                                @click=${onAuthorizeSession}
+                              >
+                                Refresh session key
+                              </button>
+                            </div>
+                            <p class="session-refresh-hint">
+                              Signs a new on-chain authorization (about 1 hour). Use refresh after
+                              reload if uploads fail with an expired session.
+                            </p>
+                          `
+                        : null}
+                    `}
+                ${sessionAuthError
+                  ? html`<p class="wallet-error" role="alert">${sessionAuthError}</p>`
+                  : null}
+                <p class="configure-section-lead configure-hint-subtle">
+                  Ensure this wallet is on the same chain as FilStream config (see
+                  <code>storeChainId</code>). You also need adequate Filecoin Pay / warm-storage
+                  balance; deposit if an upload reports insufficient funds.
+                </p>
+              </div>
             `
           : null}
 
@@ -161,9 +261,9 @@ export function uploadConfigurePanel(props) {
           Pricing, destination, and signing will live here after the wallet is connected.
         </p>
         <ul class="later-steps-list">
-          <li>Confirm network &amp; token</li>
-          <li>Authorize upload / session</li>
-          <li>Optional: pin or attest output</li>
+          <li>Switch wallet to FilStream chain if prompted</li>
+          <li>Session key login (one wallet confirmation)</li>
+          <li>Fund warm storage if uploads require it</li>
         </ul>
       </div>
     </section>

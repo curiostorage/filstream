@@ -968,6 +968,21 @@ export async function resetFilstreamPlayback() {
 }
 
 /**
+ * Destroy only the Shaka Player (does not revoke blob URLs — debug export + listing artifacts stay valid).
+ * Call when leaving local preview (e.g. Await); Review attaches a new player to the retrieval URL.
+ */
+export async function destroyActivePipelinePlayer() {
+  if (player) {
+    try {
+      await player.destroy();
+    } catch {
+      /* ignore */
+    }
+    player = null;
+  }
+}
+
+/**
  * Whether the last run left HLS blobs in memory (before reset / new encode).
  * @returns {boolean}
  */
@@ -1372,10 +1387,7 @@ export async function runFilstreamPipeline(file, ui) {
           segmentURLs: v.segmentURLs.slice(),
         })),
       };
-      setStatus(
-        `Ready — ${nVar} HLS levels (${segSummary}). Local ABR favors high quality. ${stackHint}`,
-        "ok",
-      );
+      setStatus("", "");
     } catch (e) {
       await player.destroy();
       player = null;

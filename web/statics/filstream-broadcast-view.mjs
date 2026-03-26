@@ -1,6 +1,6 @@
 /**
  * Final published layout: video + poster + title + description + download + viewer donate.
- * Consumes parsed `meta.json` plus playback/download URLs; intended for embed or Publish demo.
+ * Consumes parsed `meta.json` plus playback/download URLs; intended for embed or Review demo.
  */
 import { html } from "https://cdn.jsdelivr.net/npm/lit-html@3.2.1/+esm";
 import { viewerDonateBlock } from "./filstream-viewer-donate.mjs";
@@ -63,7 +63,7 @@ export function broadcastViewTemplate(props) {
   return html`
     <section
       class="broadcast-view ${variant ? `broadcast-view--${variant}` : ""}"
-      aria-label="Published stream"
+      aria-label="Review stream playback"
     >
       <div class="broadcast-video-shell">
         <div class="broadcast-video-frame">${videoEl}</div>

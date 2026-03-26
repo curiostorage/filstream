@@ -50,6 +50,14 @@ export function applyStreamMode(player, mode, rungs) {
  *   awaitListingDescription?: string,
  *   awaitPosterUrl?: string | null,
  *   awaitUploadBannerText?: string,
+ *   awaitPipelineBars?: {
+ *     transcodePct: number,
+ *     transcodeDetail: string,
+ *     uploadPct: number,
+ *     uploadDetail: string,
+ *     uploadPhaseNote?: string,
+ *   } | null,
+ *   storageUpload?: { pct: number, label: string } | null,
  * }} props
  */
 export function convertProgressPanel(props) {
@@ -76,7 +84,79 @@ export function convertProgressPanel(props) {
     awaitListingDescription = "",
     awaitPosterUrl = null,
     awaitUploadBannerText = "Upload in progress",
+    awaitPipelineBars = null,
+    storageUpload = null,
   } = props;
+
+  const pipelineBarsBlock =
+    awaitPipelineBars != null
+      ? html`
+          <div
+            class="await-pipeline-bars"
+            role="group"
+            aria-label="Transcode and PDP upload"
+          >
+            <div class="await-pipeline-row-wrap">
+              <div class="await-pipeline-row await-pipeline-row--transcode">
+                <span class="await-pipeline-label">Transcoding</span>
+                <progress
+                  class="progress await-pipeline-bar"
+                  max="100"
+                  .value=${awaitPipelineBars.transcodePct}
+                ></progress>
+                <span class="await-pipeline-pct"
+                  >${awaitPipelineBars.transcodePct}%</span
+                >
+              </div>
+              ${awaitPipelineBars.transcodeDetail
+                ? html`<p class="await-pipeline-row-detail">
+                    ${awaitPipelineBars.transcodeDetail}
+                  </p>`
+                : null}
+            </div>
+            <div class="await-pipeline-row-wrap">
+              <div class="await-pipeline-row await-pipeline-row--upload">
+                <span class="await-pipeline-label">Uploading</span>
+                <progress
+                  class="progress await-pipeline-bar"
+                  max="100"
+                  .value=${awaitPipelineBars.uploadPct}
+                ></progress>
+                <span class="await-pipeline-pct"
+                  >${awaitPipelineBars.uploadPct}%</span
+                >
+              </div>
+              ${awaitPipelineBars.uploadDetail
+                ? html`<p class="await-pipeline-row-detail">
+                    ${awaitPipelineBars.uploadDetail}
+                  </p>`
+                : null}
+              ${awaitPipelineBars.uploadPhaseNote
+                ? html`<p class="await-pipeline-row-detail await-pipeline-row-detail--phase">
+                    ${awaitPipelineBars.uploadPhaseNote}
+                  </p>`
+                : null}
+            </div>
+          </div>
+        `
+      : null;
+
+  const storeUploadBlock = storageUpload
+    ? html`
+        <div class="store-upload-panel" role="status" aria-live="polite">
+          <div class="store-upload-row">
+            <span class="store-upload-heading">PDP upload</span>
+            <progress
+              class="progress store-upload-bar"
+              max="100"
+              .value=${storageUpload.pct}
+            ></progress>
+            <span class="store-upload-pct">${storageUpload.pct}%</span>
+          </div>
+          <p class="store-upload-detail">${storageUpload.label}</p>
+        </div>
+      `
+    : null;
 
   const isPlaybackMedia = phase === "playback";
   const sectionTone =
@@ -135,13 +215,15 @@ export function convertProgressPanel(props) {
             </div>
           `
         : phase === "encoding"
-            ? html`
-                <div class="convert-encode-skinny" aria-hidden="false">
-                  <span class="convert-encode-label">Encoding</span>
-                  <progress class="progress convert-progress-bar" max="100" .value=${progress}></progress>
-                  <span class="convert-encode-pct">${progress}%</span>
-                </div>
-              `
+            ? awaitPipelineBars
+              ? null
+              : html`
+                  <div class="convert-encode-skinny" aria-hidden="false">
+                    <span class="convert-encode-label">Encoding</span>
+                    <progress class="progress convert-progress-bar" max="100" .value=${progress}></progress>
+                    <span class="convert-encode-pct">${progress}%</span>
+                  </div>
+                `
             : phase === "define"
               ? html`
                   <div class="convert-encode-skinny" aria-hidden="false">
@@ -152,6 +234,12 @@ export function convertProgressPanel(props) {
               : null}
     </div>
   `;
+
+  const statusLine = statusMsg
+    ? html`<p class="status ${statusKind} convert-status" aria-live="polite">
+        ${statusMsg}
+      </p>`
+    : null;
 
   return html`
     <section class="convert-progress ${sectionTone}" aria-label=${ariaPanel}>
@@ -164,6 +252,13 @@ export function convertProgressPanel(props) {
             >
               ${awaitUploadBannerText}
             </p>
+          `
+        : null}
+      ${statusLine}
+      ${pipelineBarsBlock}
+      ${storeUploadBlock}
+      ${awaitListingLayout
+        ? html`
             <div class="await-yt-layout">
               <div class="await-yt-primary">${mediaBlock}</div>
               <div class="await-yt-meta">
@@ -219,8 +314,6 @@ export function convertProgressPanel(props) {
             </p>
           `
         : null}
-
-      <p class="status ${statusKind} convert-status" aria-live="polite">${statusMsg}</p>
 
       <div class="convert-actions">
         ${phase === "encoding" || phase === "define" || phase === "awaiting"
