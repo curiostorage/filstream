@@ -1,5 +1,10 @@
 # filstream
 
+A whole movie upload site at [https://curiostorage.github.io/filstream/](https://curiostorage.github.io/filstream/).
+They're your movies. 
+Share movies with the world without a Terms of Service nor a gatekeeper company, and in a company-independent way.
+Requires tUSDFC in a browser-wallet (Metamask).
+
 ## Documentation Map
 
 - [`docs/filstream-config.mjs`](docs/filstream-config.mjs): upload settings (`window.__FILSTREAM_CONFIG__`) with Calibration-oriented defaults.
