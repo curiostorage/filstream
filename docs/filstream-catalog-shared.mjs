@@ -6,9 +6,10 @@
  * @param {string} metapath
  * @param {string | null} catalogParam
  * @param {string} [baseHref] Page whose query will be replaced (default: current page, e.g. viewer.html)
+ * @param {number | string | null} [datasetId] PDP data set id (stable handle; catalog URL may be stale)
  * @returns {string}
  */
-export function viewerHrefForMeta(metapath, catalogParam, baseHref) {
+export function viewerHrefForMeta(metapath, catalogParam, baseHref, datasetId) {
   const u = new URL(
     baseHref ??
       (typeof window !== "undefined" ? window.location.href : "https://invalid/viewer.html"),
@@ -19,6 +20,16 @@ export function viewerHrefForMeta(metapath, catalogParam, baseHref) {
   } else {
     u.searchParams.delete("catalog");
   }
+  if (datasetId != null && datasetId !== "") {
+    const n = typeof datasetId === "number" ? datasetId : Number.parseInt(String(datasetId), 10);
+    if (Number.isFinite(n) && n >= 0) {
+      u.searchParams.set("dataset", String(n));
+    } else {
+      u.searchParams.delete("dataset");
+    }
+  } else {
+    u.searchParams.delete("dataset");
+  }
   return u.href;
 }
 
@@ -27,15 +38,26 @@ export function viewerHrefForMeta(metapath, catalogParam, baseHref) {
  *
  * @param {string} catalogUrl Absolute `filstream_catalog.json` URL
  * @param {string} [baseHref] Page used to resolve `creator.html` (default: current location)
+ * @param {number | string | null} [datasetId] PDP data set id (stable handle; catalog URL may be stale)
  * @returns {string}
  */
-export function creatorHrefForCatalog(catalogUrl, baseHref) {
+export function creatorHrefForCatalog(catalogUrl, baseHref, datasetId) {
   const u = new URL(
     "creator.html",
     baseHref ??
       (typeof window !== "undefined" ? window.location.href : "https://invalid/viewer.html"),
   );
   u.searchParams.set("catalog", catalogUrl.trim());
+  if (datasetId != null && datasetId !== "") {
+    const n = typeof datasetId === "number" ? datasetId : Number.parseInt(String(datasetId), 10);
+    if (Number.isFinite(n) && n >= 0) {
+      u.searchParams.set("dataset", String(n));
+    } else {
+      u.searchParams.delete("dataset");
+    }
+  } else {
+    u.searchParams.delete("dataset");
+  }
   return u.href;
 }
 

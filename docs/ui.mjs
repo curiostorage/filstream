@@ -1705,6 +1705,7 @@ function renderWizard() {
                         ? buildReviewViewerIframeSrc(
                             reviewMetaUrl,
                             reviewCatalogUrl || undefined,
+                            storeRuntime.finalizeResult?.dataSetId ?? undefined,
                           )
                         : null;
                       return html`

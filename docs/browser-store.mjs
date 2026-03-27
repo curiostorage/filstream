@@ -1050,6 +1050,311 @@ export async function readPieceMetadataKvPublic(input) {
 }
 
 /**
+ * Read-only Synapse client for public PDP / FWSS view calls (no session key).
+ *
+ * @param {{ rpcUrl: string, chainId: number, source: string }} cfg
+ */
+function createSynapseForPublicRead(cfg) {
+  const chain = getChain(cfg.chainId);
+  const transport = jsonRpcUrlCustomTransport(cfg.rpcUrl);
+  return Synapse.create({
+    chain,
+    transport,
+    account: "0x0000000000000000000000000000000000000001",
+    source: cfg.source,
+  });
+}
+
+/**
+ * @param {string} hex
+ * @returns {Uint8Array}
+ */
+function hexToBytes(hex) {
+  const h = hex.startsWith("0x") || hex.startsWith("0X") ? hex.slice(2) : hex;
+  const out = new Uint8Array(h.length / 2);
+  for (let i = 0; i < out.length; i++) {
+    out[i] = parseInt(h.slice(i * 2, i * 2 + 2), 16);
+  }
+  return out;
+}
+
+/**
+ * @param {unknown} data
+ * @returns {{ pieces: unknown[], pieceIds: unknown[], hasMore: boolean }}
+ */
+function parseGetActivePiecesResult(data) {
+  if (Array.isArray(data)) {
+    const a = /** @type {unknown[]} */ (data);
+    return {
+      pieces: Array.isArray(a[0]) ? a[0] : [],
+      pieceIds: Array.isArray(a[1]) ? a[1] : [],
+      hasMore: Boolean(a[2]),
+    };
+  }
+  if (data && typeof data === "object" && data !== null) {
+    const d = /** @type {Record<string, unknown>} */ (data);
+    if (Array.isArray(d.pieces) && Array.isArray(d.pieceIds)) {
+      return {
+        pieces: d.pieces,
+        pieceIds: d.pieceIds,
+        hasMore: Boolean(d.hasMore),
+      };
+    }
+  }
+  return { pieces: [], pieceIds: [], hasMore: false };
+}
+
+/**
+ * @param {unknown} cidStruct
+ * @param {string} serviceURL
+ * @returns {Promise<string | null>}
+ */
+async function pieceCidStructToRetrievalUrl(cidStruct, serviceURL) {
+  if (!cidStruct || typeof cidStruct !== "object") return null;
+  const data = /** @type {{ data?: unknown }} */ (cidStruct).data;
+  if (data == null) return null;
+  let bytes;
+  if (data instanceof Uint8Array) {
+    bytes = data;
+  } else if (typeof data === "string") {
+    bytes = hexToBytes(data);
+  } else {
+    return null;
+  }
+  const { CID } = await import("https://esm.sh/multiformats@13.0.1/cid");
+  const cid = CID.decode(bytes);
+  return new URL(`piece/${cid.toString()}`, serviceURL).href;
+}
+
+/**
+ * @param {unknown} data Return value of FWSS `getDataSet(uint256)`.
+ * @returns {{ providerId: number } | null}
+ */
+function providerIdFromGetDataSetView(data) {
+  if (data == null || typeof data !== "object") {
+    return null;
+  }
+  const d = /** @type {Record<string, unknown>} */ (data);
+  const info =
+    "info" in d && d.info != null && typeof d.info === "object"
+      ? /** @type {Record<string, unknown>} */ (d.info)
+      : d;
+  const rail = info.pdpRailId;
+  const railZero =
+    rail === 0n ||
+    rail === 0 ||
+    rail === "0" ||
+    (typeof rail === "string" && /^0x0*$/i.test(rail.trim()));
+  if (railZero) {
+    return null;
+  }
+  const pid = info.providerId;
+  let n;
+  if (typeof pid === "bigint") {
+    n = Number(pid);
+  } else if (typeof pid === "number") {
+    n = pid;
+  } else {
+    return null;
+  }
+  if (!Number.isFinite(n) || n < 0) {
+    return null;
+  }
+  return { providerId: n };
+}
+
+/**
+ * Resolve the PDP provider id for a data set via `fwssView.getDataSet` (no catalog JSON needed).
+ *
+ * @param {import("@filoz/synapse-sdk").Synapse} synapse
+ * @param {number} chainId
+ * @param {number} dataSetId
+ * @returns {Promise<number | null>}
+ */
+async function resolveProviderIdFromDataSetId(synapse, chainId, dataSetId) {
+  const client = synapse.client;
+  const chain = getChain(chainId);
+  try {
+    const data = await client.readContract({
+      address: chain.contracts.fwssView.address,
+      abi: chain.contracts.fwssView.abi,
+      functionName: "getDataSet",
+      args: [BigInt(dataSetId)],
+    });
+    const out = providerIdFromGetDataSetView(data);
+    return out?.providerId ?? null;
+  } catch (e) {
+    console.warn("[filstream] resolveProviderIdFromDataSetId failed", e);
+    return null;
+  }
+}
+
+/**
+ * Find the highest-`FS_VER` `filstream_catalog.json` piece on a PDP data set and fetch its JSON
+ * from the provider retrieval URL. Uses public chain reads only (no storage session / ownership).
+ *
+ * When `providerId` is omitted, it is resolved from `fwssView.getDataSet(dataSetId)` so callers
+ * only need `chainId` + `dataSetId` (e.g. creator recovery when the catalog URL is dead).
+ *
+ * @param {{
+ *   chainId: number,
+ *   dataSetId: number,
+ *   providerId?: number | null,
+ *   rpcUrl?: string,
+ *   source?: string,
+ * }} input
+ * @returns {Promise<{ retrievalUrl: string, doc: unknown, catalogVersion: number } | null>}
+ */
+export async function fetchLatestCatalogJsonForDataSet(input) {
+  const { chainId, dataSetId } = input;
+  let providerId =
+    typeof input.providerId === "number" && Number.isFinite(input.providerId)
+      ? input.providerId
+      : null;
+  if (!Number.isFinite(chainId) || !Number.isFinite(dataSetId)) {
+    return null;
+  }
+  const cfg = getFilstreamStoreConfig();
+  const rpcUrl =
+    typeof input.rpcUrl === "string" && input.rpcUrl.trim() !== ""
+      ? input.rpcUrl.trim()
+      : cfg.storeRpcUrl;
+  const source =
+    typeof input.source === "string" && input.source.trim() !== ""
+      ? input.source.trim()
+      : cfg.storeSource;
+
+  let synapse;
+  try {
+    synapse = createSynapseForPublicRead({ rpcUrl, chainId, source });
+  } catch (e) {
+    console.warn("[filstream] fetchLatestCatalogJsonForDataSet: synapse init failed", e);
+    return null;
+  }
+
+  const client = synapse.client;
+  const chain = getChain(chainId);
+
+  if (providerId == null) {
+    const resolved = await resolveProviderIdFromDataSetId(synapse, chainId, dataSetId);
+    if (resolved == null) {
+      console.warn(
+        "[filstream] fetchLatestCatalogJsonForDataSet: could not resolve providerId for data set",
+      );
+      return null;
+    }
+    providerId = resolved;
+  }
+
+  let providerInfo;
+  try {
+    providerInfo = await synapse.providers.getProvider({
+      providerId: BigInt(providerId),
+    });
+  } catch (e) {
+    console.warn("[filstream] fetchLatestCatalogJsonForDataSet: provider lookup failed", e);
+    return null;
+  }
+  const serviceURL = providerInfo?.pdp?.serviceURL;
+  if (typeof serviceURL !== "string" || serviceURL.trim() === "") {
+    return null;
+  }
+
+  let bestVer = -1;
+  /** @type {bigint | null} */
+  let bestPieceId = null;
+
+  try {
+    let offset = 0n;
+    const limit = 100n;
+    let hasMore = true;
+    while (hasMore) {
+      const raw = await client.readContract({
+        address: chain.contracts.pdp.address,
+        abi: chain.contracts.pdp.abi,
+        functionName: "getActivePieces",
+        args: [BigInt(dataSetId), offset, limit],
+      });
+      const { pieces, pieceIds, hasMore: more } = parseGetActivePiecesResult(raw);
+      hasMore = more;
+      offset += limit;
+      const n = Math.min(pieces.length, pieceIds.length);
+      for (let i = 0; i < n; i++) {
+        const pieceIdRaw = pieceIds[i];
+        const pieceId =
+          typeof pieceIdRaw === "bigint"
+            ? pieceIdRaw
+            : pieceIdRaw != null
+              ? BigInt(pieceIdRaw)
+              : null;
+        if (pieceId == null) continue;
+        const kv = await readPieceMetadataKvPublic({
+          synapse,
+          chainId,
+          dataSetId,
+          pieceId,
+        });
+        if (kv.FS_NAME !== "filstream_catalog.json") continue;
+        const v = Number.parseInt(kv.FS_VER ?? "0", 10);
+        if (Number.isFinite(v) && v > bestVer) {
+          bestVer = v;
+          bestPieceId = pieceId;
+        }
+      }
+      if (!hasMore) break;
+    }
+  } catch (e) {
+    console.warn("[filstream] fetchLatestCatalogJsonForDataSet: chain scan failed", e);
+    return null;
+  }
+
+  if (bestPieceId == null || bestVer < 0) {
+    return null;
+  }
+
+  let cidStruct;
+  try {
+    cidStruct = await client.readContract({
+      address: chain.contracts.pdp.address,
+      abi: chain.contracts.pdp.abi,
+      functionName: "getPieceCid",
+      args: [BigInt(dataSetId), bestPieceId],
+    });
+  } catch (e) {
+    console.warn("[filstream] fetchLatestCatalogJsonForDataSet: getPieceCid failed", e);
+    return null;
+  }
+
+  let retrievalUrl;
+  try {
+    retrievalUrl = await pieceCidStructToRetrievalUrl(cidStruct, serviceURL);
+  } catch (e) {
+    console.warn("[filstream] fetchLatestCatalogJsonForDataSet: CID decode failed", e);
+    return null;
+  }
+  if (!retrievalUrl) {
+    return null;
+  }
+
+  try {
+    const res = await fetch(retrievalUrl);
+    if (!res.ok) {
+      console.warn(
+        "[filstream] fetchLatestCatalogJsonForDataSet: HTTP",
+        res.status,
+        retrievalUrl,
+      );
+      return null;
+    }
+    const doc = await res.json();
+    return { retrievalUrl, doc, catalogVersion: bestVer };
+  } catch (e) {
+    console.warn("[filstream] fetchLatestCatalogJsonForDataSet: fetch failed", e);
+    return null;
+  }
+}
+
+/**
  * @param {BrowserFilstreamUploadSession} session
  * @param {number} dataSetId
  * @param {bigint} pieceId

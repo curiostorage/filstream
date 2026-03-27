@@ -1,5 +1,7 @@
 /**
- * GitHub Pages: `creator.html?catalog=<absolute-https-url-to-filstream_catalog.json>`
+ * GitHub Pages: `creator.html?catalog=<absolute-https-url-to-filstream_catalog.json>[&dataset=<pdp-data-set-id>]`
+ * If the catalog URL is missing or 404, `?dataset=` plus app chain config can load the latest
+ * `filstream_catalog.json` from PDP (same helper as refresh).
  *
  * Shows catalog identity, creator header, movie list, and (for the editor with a storage session)
  * editing: creator name/poster, movie order, save, and remove movie with PDP piece deletes.
@@ -7,6 +9,8 @@
 import {
   createSynapseForSession,
   deleteAllPiecesForAssetId,
+  fetchLatestCatalogJsonForDataSet,
+  getPieceRetrievalUrl,
   openDataSetContextForCatalog,
   publishFilstreamCatalogJson,
 } from "../browser-store.mjs";
@@ -56,6 +60,8 @@ let storageContext = null;
 
 /** @type {string | null} */
 let catalogUrl = null;
+/** @type {number | null} Parsed non-negative `?dataset=` for links / refresh (optional). */
+let datasetQueryParsed = null;
 /** @type {{ title: string, metapath: string, posterUrl?: string }[]} */
 let moviesState = [];
 /** @type {Record<string, unknown> | null} */
@@ -288,13 +294,21 @@ async function handleSaveCatalog() {
       typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
         ? crypto.randomUUID()
         : `cat_${Date.now()}_${Math.random().toString(16).slice(2)}`;
-    await publishFilstreamCatalogJson({
+    const { pieceCid } = await publishFilstreamCatalogJson({
       context: storageContext,
       synapse: synapseRef,
       assetId,
       catalogDoc: doc,
     });
     loadedCatalogRoot = doc;
+    const newCatalogUrl = await getPieceRetrievalUrl(storageContext, pieceCid);
+    if (newCatalogUrl) {
+      catalogUrl = newCatalogUrl;
+      if (catalogIdentity?.dataSetId != null) {
+        replaceBrowserUrlForCatalog(catalogUrl, catalogIdentity.dataSetId);
+      }
+    }
+    renderMovieLists();
     if (saveStatus) saveStatus.textContent = "Saved.";
     setStatus("");
   } catch (e) {
@@ -417,7 +431,12 @@ function renderMovieReadonlyList() {
   newestFirst.forEach((m) => {
     const a = document.createElement("a");
     a.className = "creator-catalog-row";
-    a.href = viewerHrefForMeta(m.metapath, catalogUrl, viewerBaseHref());
+    a.href = viewerHrefForMeta(
+      m.metapath,
+      catalogUrl,
+      viewerBaseHref(),
+      catalogIdentity?.dataSetId ?? datasetQueryParsed,
+    );
     a.title = m.title;
 
     const wrap = document.createElement("div");
@@ -529,6 +548,75 @@ function applyCatalogIdentity(doc) {
   refreshEditVisibility();
 }
 
+/**
+ * @param {unknown} doc
+ * @param {string} url Absolute `filstream_catalog.json` retrieval URL.
+ */
+async function applyLoadedCatalogDoc(doc, url) {
+  loadedCatalogRoot =
+    doc && typeof doc === "object" && doc !== null
+      ? /** @type {Record<string, unknown>} */ (doc)
+      : null;
+  catalogUrl = url;
+  moviesState = moviesFromCatalog(doc);
+  applyCatalogIdentity(doc);
+  await applyHeroFromDoc(loadedCatalogRoot ?? {});
+  if (catalogSection) catalogSection.hidden = moviesState.length === 0;
+  setStatus("");
+  document.title = "FilStream catalog · creator";
+}
+
+/**
+ * @param {string} catalogUrlStr
+ * @param {number | null} dataSetId
+ */
+function replaceBrowserUrlForCatalog(catalogUrlStr, dataSetId) {
+  const u = new URL(window.location.href);
+  u.searchParams.set("catalog", catalogUrlStr);
+  if (dataSetId != null && Number.isFinite(dataSetId) && dataSetId >= 0) {
+    u.searchParams.set("dataset", String(dataSetId));
+  }
+  history.replaceState({}, "", u);
+}
+
+/**
+ * If the loaded URL points at an old piece but a newer catalog exists on-chain, switch to it.
+ * Always re-renders movie links last so `?catalog=` on viewer URLs matches the current piece URL.
+ */
+async function upgradeCatalogFromChainIfNewer() {
+  try {
+    if (catalogIdentity?.dataSetId == null || catalogIdentity.chainId == null) {
+      return;
+    }
+    const refreshed = await fetchLatestCatalogJsonForDataSet({
+      chainId: catalogIdentity.chainId,
+      dataSetId: catalogIdentity.dataSetId,
+    });
+    if (!refreshed?.doc || typeof refreshed.doc !== "object") {
+      return;
+    }
+    const nextUrl = refreshed.retrievalUrl.trim();
+    const prevUrl = catalogUrl?.trim() ?? "";
+    if (!nextUrl || nextUrl === prevUrl) {
+      return;
+    }
+    catalogUrl = nextUrl;
+    loadedCatalogRoot =
+      refreshed.doc && typeof refreshed.doc === "object" && refreshed.doc !== null
+        ? /** @type {Record<string, unknown>} */ (refreshed.doc)
+        : loadedCatalogRoot;
+    moviesState = moviesFromCatalog(refreshed.doc);
+    applyCatalogIdentity(refreshed.doc);
+    await applyHeroFromDoc(loadedCatalogRoot ?? {});
+    if (catalogSection) catalogSection.hidden = moviesState.length === 0;
+    if (catalogIdentity.dataSetId != null) {
+      replaceBrowserUrlForCatalog(catalogUrl, catalogIdentity.dataSetId);
+    }
+  } finally {
+    renderMovieLists();
+  }
+}
+
 async function handleEnableEditing() {
   const eth = window.ethereum;
   if (!eth || !connectedAddress || !catalogIdentity?.dataSetId || !catalogIdentity.providerId) {
@@ -599,6 +687,17 @@ catalogUrl =
   catalogUrlRaw && /^https?:\/\//i.test(catalogUrlRaw.trim())
     ? catalogUrlRaw.trim()
     : null;
+const datasetQueryRaw = params.get("dataset");
+if (datasetQueryRaw && datasetQueryRaw.trim() !== "") {
+  const n = Number.parseInt(datasetQueryRaw.trim(), 10);
+  if (Number.isFinite(n) && n >= 0) {
+    datasetQueryParsed = n;
+  } else {
+    console.warn(
+      "[filstream creator] Ignoring invalid dataset query param (expected non-negative integer).",
+    );
+  }
+}
 
 if (catalogUrlRaw && !catalogUrl) {
   console.warn(
@@ -606,33 +705,72 @@ if (catalogUrlRaw && !catalogUrl) {
   );
 }
 
-if (!catalogUrl) {
-  setStatus("Missing or invalid ?catalog= URL (must be absolute http or https).", "err");
+if (!catalogUrl && datasetQueryParsed == null) {
+  setStatus(
+    "Missing ?catalog= (absolute https URL) or ?dataset= (PDP data set id to load from chain).",
+    "err",
+  );
 } else {
   void (async () => {
-    try {
-      const res = await fetch(catalogUrl);
-      if (!res.ok) {
-        throw new Error(`Catalog HTTP ${res.status}`);
+    /** @type {Error | null} */
+    let loadError = null;
+
+    if (catalogUrl) {
+      try {
+        const res = await fetch(catalogUrl);
+        if (!res.ok) {
+          loadError = new Error(`Catalog HTTP ${res.status}`);
+        } else {
+          const doc = await res.json();
+          await applyLoadedCatalogDoc(doc, catalogUrl);
+          if (
+            datasetQueryParsed != null &&
+            catalogIdentity?.dataSetId != null &&
+            datasetQueryParsed !== catalogIdentity.dataSetId
+          ) {
+            console.warn(
+              "[filstream creator] ?dataset= does not match catalog dataSetId; using catalog identity.",
+            );
+          }
+          await upgradeCatalogFromChainIfNewer();
+          return;
+        }
+      } catch (e) {
+        loadError = e instanceof Error ? e : new Error(String(e));
       }
-      const doc = await res.json();
-      loadedCatalogRoot =
-        doc && typeof doc === "object" && doc !== null
-          ? /** @type {Record<string, unknown>} */ (doc)
-          : null;
-      moviesState = moviesFromCatalog(doc);
-      applyCatalogIdentity(doc);
-      await applyHeroFromDoc(loadedCatalogRoot ?? {});
-      if (catalogSection) catalogSection.hidden = moviesState.length === 0;
-      renderMovieLists();
-      setStatus("");
-      document.title = "FilStream catalog · creator";
-    } catch (e) {
-      applyCatalogIdentity(null);
-      if (heroEl) heroEl.hidden = true;
-      if (catalogSection) catalogSection.hidden = true;
-      const msg = e instanceof Error ? e.message : String(e);
-      setStatus(`Could not load catalog: ${msg}`, "err");
     }
+
+    if (datasetQueryParsed != null) {
+      const cfg = getFilstreamStoreConfig();
+      const recovered = await fetchLatestCatalogJsonForDataSet({
+        chainId: cfg.storeChainId,
+        dataSetId: datasetQueryParsed,
+      });
+      if (recovered?.doc && typeof recovered.doc === "object") {
+        await applyLoadedCatalogDoc(recovered.doc, recovered.retrievalUrl.trim());
+        const ds = catalogIdentity?.dataSetId ?? datasetQueryParsed;
+        replaceBrowserUrlForCatalog(catalogUrl, ds);
+        await upgradeCatalogFromChainIfNewer();
+        if (loadError) {
+          console.warn(
+            "[filstream creator] Recovered using on-chain catalog (catalog URL was missing or failed):",
+            loadError.message,
+          );
+        }
+        return;
+      }
+    }
+
+    applyCatalogIdentity(null);
+    if (heroEl) heroEl.hidden = true;
+    if (catalogSection) catalogSection.hidden = true;
+    const hint =
+      datasetQueryParsed != null
+        ? " On-chain recovery failed (wrong network: set window.__FILSTREAM_CONFIG__ storeRpcUrl / storeChainId to match this data set)."
+        : "";
+    setStatus(
+      `Could not load catalog${loadError ? `: ${loadError.message}` : ""}.${hint}`,
+      "err",
+    );
   })();
 }

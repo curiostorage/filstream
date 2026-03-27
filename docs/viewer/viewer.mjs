@@ -1,8 +1,11 @@
 /**
  * GitHub Pages entry:
- * `viewer.html?meta=<absolute-https-url-to-meta.json>[&catalog=<absolute-url-to-filstream_catalog.json>]`
+ * `viewer.html?meta=<absolute-https-url-to-meta.json>[&catalog=<absolute-url-to-filstream_catalog.json>][&dataset=<pdp-data-set-id>]`
  *
- * Fetches `meta.json` for playback; optional `catalog` loads `filstream_catalog.json` and shows
+ * Fetches `meta.json` for playback. When `catalog` is present, the viewer always fetches that
+ * `filstream_catalog.json` URL for the sidebar and byline. Optional `dataset` is propagated on
+ * creator and sibling viewer links so the creator page can resolve the latest catalog on-chain.
+ * The sidebar shows
  * a right column (newest first): poster 168px + title 192px. Catalog rows include `posterUrl` when
  * published by FilStream so the sidebar does not fetch each `meta.json` for posters; legacy
  * catalogs fall back to fetching `meta` per row when `posterUrl` is absent.
@@ -124,10 +127,18 @@ async function fetchPosterUrlFromMeta(metapath) {
  * @param {string} catalogUrl
  * @param {string} currentMetaUrl
  * @param {string | null} catalogParam
+ * @param {number | null} datasetIdForLinks
  * @param {unknown} [currentMetaDoc]
  * @param {unknown | null} [preloadedDoc] Fetched catalog JSON, or `null` if fetch already failed (skip refetch)
  */
-async function renderCatalogSidebar(catalogUrl, currentMetaUrl, catalogParam, currentMetaDoc, preloadedDoc) {
+async function renderCatalogSidebar(
+  catalogUrl,
+  currentMetaUrl,
+  catalogParam,
+  datasetIdForLinks,
+  currentMetaDoc,
+  preloadedDoc,
+) {
   if (!catalogAside) return;
 
   try {
@@ -184,7 +195,7 @@ async function renderCatalogSidebar(catalogUrl, currentMetaUrl, catalogParam, cu
         a.classList.add("viewer-catalog-row--current");
         a.setAttribute("aria-current", "page");
       }
-      a.href = viewerHrefForMeta(m.metapath, catalogParam);
+      a.href = viewerHrefForMeta(m.metapath, catalogParam, undefined, datasetIdForLinks);
       a.title = m.title;
 
       const wrap = document.createElement("div");
@@ -226,12 +237,36 @@ function escapeHtml(s) {
 }
 
 /**
+ * Prefer `dataSetId` from loaded catalog JSON; fall back to `?dataset=` (viewer / share links).
+ *
+ * @param {unknown} doc
+ * @param {string | null} datasetQuery
+ * @returns {number | null}
+ */
+function resolveDatasetIdForCatalog(doc, datasetQuery) {
+  if (doc && typeof doc === "object" && doc !== null) {
+    const ds = /** @type {Record<string, unknown>} */ (doc).dataSetId;
+    if (typeof ds === "number" && Number.isFinite(ds)) {
+      return ds;
+    }
+  }
+  if (datasetQuery != null && datasetQuery.trim() !== "") {
+    const n = Number.parseInt(datasetQuery.trim(), 10);
+    if (Number.isFinite(n) && n >= 0) {
+      return n;
+    }
+  }
+  return null;
+}
+
+/**
  * @param {unknown} meta
- * @param {{ catalogUrl: string | null, catalogDoc: unknown | null }} [catalogCtx]
+ * @param {{ catalogUrl: string | null, catalogDoc: unknown | null, datasetId: number | null }} [catalogCtx]
  */
 function renderByline(meta, catalogCtx) {
   const catalogUrl = catalogCtx?.catalogUrl ?? null;
   const catalogDoc = catalogCtx?.catalogDoc ?? null;
+  const datasetId = catalogCtx?.datasetId ?? null;
   if (!bylineEl || !bylineCatalogEl || !donateRootEl) return;
 
   const cfg = donateConfigFromMeta(meta);
@@ -249,7 +284,7 @@ function renderByline(meta, catalogCtx) {
   bylineCatalogEl.innerHTML = "";
 
   if (showCatalogStrip && catalogUrl) {
-    const href = creatorHrefForCatalog(catalogUrl);
+    const href = creatorHrefForCatalog(catalogUrl, undefined, datasetId);
     const { creatorName, creatorPosterUrl } = creatorInfoFromCatalog(catalogDoc);
     const nameLabel = creatorName || "Creator";
 
@@ -298,7 +333,7 @@ function renderByline(meta, catalogCtx) {
  * Title, description, optional upload date, byline (catalog + donate), description panel — same data as Review chrome.
  *
  * @param {unknown} meta
- * @param {{ catalogUrl: string | null, catalogDoc: unknown | null }} [catalogCtx]
+ * @param {{ catalogUrl: string | null, catalogDoc: unknown | null, datasetId: number | null }} [catalogCtx]
  */
 function renderViewerMeta(meta, catalogCtx) {
   loadedMeta = meta;
@@ -307,7 +342,7 @@ function renderViewerMeta(meta, catalogCtx) {
   donateTxHash = "";
   if (!metaSection || !titleEl || !descriptionEl || !donateRootEl) return;
 
-  const ctx = catalogCtx ?? { catalogUrl: null, catalogDoc: null };
+  const ctx = catalogCtx ?? { catalogUrl: null, catalogDoc: null, datasetId: null };
 
   const copy = broadcastCopyFromMeta(meta);
   const title = copy.title.trim() || "Untitled";
@@ -427,6 +462,8 @@ async function handleViewerDonateClick() {
 const params = new URLSearchParams(window.location.search);
 const metaUrl = params.get("meta");
 const catalogUrlRaw = params.get("catalog");
+/** @type {string | null} */
+const datasetQueryRaw = params.get("dataset");
 const catalogUrl =
   catalogUrlRaw && /^https?:\/\//i.test(catalogUrlRaw.trim())
     ? catalogUrlRaw.trim()
@@ -434,6 +471,12 @@ const catalogUrl =
 
 if (catalogUrlRaw && !catalogUrl) {
   console.warn("[filstream viewer] Ignoring invalid catalog query param (expected absolute http(s) URL).");
+}
+if (datasetQueryRaw && datasetQueryRaw.trim() !== "") {
+  const test = Number.parseInt(datasetQueryRaw.trim(), 10);
+  if (!Number.isFinite(test) || test < 0) {
+    console.warn("[filstream viewer] Ignoring invalid dataset query param (expected non-negative integer).");
+  }
 }
 
 if (!metaUrl || !/^https?:\/\//i.test(metaUrl)) {
@@ -476,9 +519,14 @@ if (!metaUrl || !/^https?:\/\//i.test(metaUrl)) {
         }
       }
 
+      const resolvedDatasetId = resolveDatasetIdForCatalog(
+        catalogFetchOk ? catalogDocPreload : null,
+        datasetQueryRaw,
+      );
       renderViewerMeta(meta, {
         catalogUrl,
         catalogDoc: catalogFetchOk ? catalogDocPreload : null,
+        datasetId: resolvedDatasetId,
       });
       setStatus("");
       shaka.polyfill.installAll();
@@ -499,6 +547,7 @@ if (!metaUrl || !/^https?:\/\//i.test(metaUrl)) {
           catalogUrl,
           metaUrl,
           catalogUrl,
+          resolvedDatasetId,
           meta,
           catalogFetchOk ? catalogDocPreload : null,
         );

@@ -117,13 +117,15 @@ export function resolveViewerIndexPageUrl() {
 
 /**
  * Review / share URL: `meta` points at `meta.json`; optional `catalog` at `filstream_catalog.json`
- * for the same dataset (multi-title index appended at finalize).
+ * for the same dataset (multi-title index appended at finalize). Optional `dataset` is the PDP
+ * data set id so links stay valid if the catalog piece URL goes stale.
  *
  * @param {string} metaJsonUrl
  * @param {string | null | undefined} [catalogJsonUrl]
+ * @param {number | null | undefined} [dataSetId]
  * @returns {string}
  */
-export function buildReviewViewerIframeSrc(metaJsonUrl, catalogJsonUrl) {
+export function buildReviewViewerIframeSrc(metaJsonUrl, catalogJsonUrl, dataSetId) {
   const u = new URL(resolveViewerIndexPageUrl());
   u.searchParams.set("meta", metaJsonUrl);
   const cat =
@@ -132,6 +134,9 @@ export function buildReviewViewerIframeSrc(metaJsonUrl, catalogJsonUrl) {
       : "";
   if (cat) {
     u.searchParams.set("catalog", cat);
+  }
+  if (dataSetId != null && Number.isFinite(dataSetId) && dataSetId >= 0) {
+    u.searchParams.set("dataset", String(Math.floor(dataSetId)));
   }
   return u.href;
 }
