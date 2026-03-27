@@ -173,6 +173,11 @@ function bandwidthBits(videoBps, includeAudio) {
   return Math.max(1, Math.round(b));
 }
 
+/** HLS `CODECS=` fragment for Mediabunny audio output (AAC-LC vs Opus). */
+function hlsAudioCodecParam(audioCodec) {
+  return audioCodec === "aac" ? "mp4a.40.2" : "opus";
+}
+
 function copyU8(data) {
   return new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
 }
@@ -226,8 +231,8 @@ function buildMediaPlaylistLocal(durationsSec) {
   return lines.join("\n");
 }
 
-function buildMasterPlaylist(variants, includeAudio, videoCodecParam) {
-  const codecs = includeAudio ? `${videoCodecParam},opus` : videoCodecParam;
+function buildMasterPlaylist(variants, includeAudio, videoCodecParam, audioCodecParam) {
+  const codecs = includeAudio ? `${videoCodecParam},${audioCodecParam}` : videoCodecParam;
   const lines = [
     "#EXTM3U",
     "#EXT-X-VERSION:6",
@@ -244,8 +249,8 @@ function buildMasterPlaylist(variants, includeAudio, videoCodecParam) {
 }
 
 /** Master playlist with `v0/playlist.m3u8`-style lines for local inspection. */
-function buildMasterPlaylistLocal(variants, includeAudio, videoCodecParam) {
-  const codecs = includeAudio ? `${videoCodecParam},opus` : videoCodecParam;
+function buildMasterPlaylistLocal(variants, includeAudio, videoCodecParam, audioCodecParam) {
+  const codecs = includeAudio ? `${videoCodecParam},${audioCodecParam}` : videoCodecParam;
   const lines = [
     "#EXTM3U",
     "#EXT-X-VERSION:6",
@@ -384,12 +389,13 @@ function isRecoverableVideoHwError(message) {
  */
 
 /**
+ * @param {"aac"|"opus"|null} audioCodec `null` = no audio track
  * @param {FragmentReadyHooks | null | undefined} hooks
  * @param {boolean} [tryAvcPacketCopy] H.264 in / H.264 out without `bitrate` or `keyFrameInterval` so Mediabunny may copy samples
  */
 async function convertToFmp4Segments(
   file,
-  includeAudio,
+  audioCodec,
   videoOpts,
   onProgress,
   videoCodec,
@@ -469,8 +475,8 @@ async function convertToFmp4Segments(
       input,
       output,
       video: videoBlock,
-      audio: includeAudio
-        ? { codec: "opus", bitrate: 128_000 }
+      audio: audioCodec
+        ? { codec: audioCodec, bitrate: 128_000 }
         : { discard: true },
       showWarnings: false,
     });
@@ -1012,9 +1018,16 @@ export async function runFilstreamPipeline(file, ui) {
   });
   const primaryAudio = await probeInput.getPrimaryAudioTrack();
   const includeAudio = primaryAudio != null;
-  if (includeAudio && !canEncodeAudio("opus")) {
+  /** Prefer AAC so fMP4+HLS plays in Safari; Opus-in-MP4 is not supported there. */
+  const audioCodec =
+    includeAudio && canEncodeAudio("aac")
+      ? "aac"
+      : includeAudio && canEncodeAudio("opus")
+        ? "opus"
+        : null;
+  if (includeAudio && !audioCodec) {
     setStatus(
-      "This browser cannot encode Opus (WebCodecs). Try recent Chrome or Edge.",
+      "This browser cannot encode AAC or Opus (WebCodecs). Try a recent Chrome, Edge, or Safari.",
       "err",
     );
     return;
@@ -1065,17 +1078,19 @@ export async function runFilstreamPipeline(file, ui) {
     const mayRemuxTop =
       useAvc && canFastRemuxAvcTopRung(vt, srcW, srcH, heights, 0, useAvc);
     const remuxOnly = mayRemuxTop && nVar === 1;
+    const audioLabel =
+      audioCodec === "aac" ? "AAC" : audioCodec === "opus" ? "Opus" : "";
     setStatus(
       remuxOnly
         ? includeAudio
-          ? `HLS: remuxing H.264 + Opus (no video re-encode)…`
+          ? `HLS: remuxing H.264 + ${audioLabel} (no video re-encode)…`
           : `HLS: remuxing H.264 (no video re-encode)…`
         : mayRemuxTop
           ? includeAudio
-            ? `HLS ABR: H.264 remux at source resolution + Opus + transcoded lower rung(s)…`
+            ? `HLS ABR: H.264 remux at source resolution + ${audioLabel} + transcoded lower rung(s)…`
             : `HLS ABR: H.264 remux at source resolution + transcoded lower rung(s)…`
           : includeAudio
-            ? `Transcoding ${nVar} ${videoLabel} + Opus rung(s) for HLS ABR…`
+            ? `Transcoding ${nVar} ${videoLabel} + ${audioLabel} rung(s) for HLS ABR…`
             : `Transcoding ${nVar} ${videoLabel} rung(s) for HLS ABR…`,
       "",
     );
@@ -1104,7 +1119,7 @@ export async function runFilstreamPipeline(file, ui) {
       const { init, segments, fragmentStartsSec, durationSec } =
         await convertToFmp4Segments(
           file,
-          includeAudio,
+          audioCodec,
           { height: h, width: w, bitrate: br },
           (localP) => {
             globalProgress[i] = localP;
@@ -1122,11 +1137,12 @@ export async function runFilstreamPipeline(file, ui) {
         variantIndex: i,
         width: w,
         height: h,
-        bandwidth: bandwidthBits(br, includeAudio),
+        bandwidth: bandwidthBits(br, audioCodec != null),
         segmentCount: segments.length,
         durationSec,
         videoCodec,
-        includeAudio,
+        includeAudio: audioCodec != null,
+        audioCodec: audioCodec ?? undefined,
         fragmentDurationSec: FRAGMENT_SECONDS,
       };
       dispatchFileEvent(ui, {
@@ -1158,7 +1174,7 @@ export async function runFilstreamPipeline(file, ui) {
         dursSec,
         width: w,
         height: h,
-        bandwidth: bandwidthBits(br, includeAudio),
+        bandwidth: bandwidthBits(br, audioCodec != null),
         segmentCount: segments.length,
       };
     }
@@ -1216,15 +1232,18 @@ export async function runFilstreamPipeline(file, ui) {
       }),
     );
 
+    const audioCodecParam = audioCodec ? hlsAudioCodecParam(audioCodec) : "";
     const masterText = buildMasterPlaylist(
       encoded,
-      includeAudio,
+      audioCodec != null,
       masterVideoCodecParam,
+      audioCodecParam,
     );
     const masterTextLocal = buildMasterPlaylistLocal(
       encoded,
-      includeAudio,
+      audioCodec != null,
       masterVideoCodecParam,
+      audioCodecParam,
     );
 
     const metaPayload = {
@@ -1232,15 +1251,20 @@ export async function runFilstreamPipeline(file, ui) {
       sourceName: file.name,
       nVar,
       videoCodec,
-      includeAudio,
+      includeAudio: audioCodec != null,
+      audioCodec: audioCodec ?? undefined,
       fragmentDurationSec: FRAGMENT_SECONDS,
     };
     pendingTranscodeMetaForListing = { ...metaPayload };
 
     const segSummary = segmentCountSummary(encoded);
     const stackHint = useAvc
-      ? "H.264 + Opus in fMP4 (hardware encoder when available)."
-      : "VP9 + Opus in fMP4.";
+      ? includeAudio
+        ? `H.264 + ${audioLabel} in fMP4 (hardware encoder when available).`
+        : "H.264 in fMP4 (hardware encoder when available)."
+      : includeAudio
+        ? `VP9 + ${audioLabel} in fMP4.`
+        : "VP9 in fMP4.";
     const mediaPlaylistTextsLocal = encoded.map((v) =>
       buildMediaPlaylistLocal(v.dursSec),
     );

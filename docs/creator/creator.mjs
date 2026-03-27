@@ -6,7 +6,7 @@
  * Shows catalog identity, creator header, movie list, and (for the editor with a storage session)
  * editing: creator name/poster, movie order, save, and remove movie with PDP piece deletes.
  */
-import "../register-piece-head-sw.mjs";
+import { whenPieceHeadServiceWorkerReady } from "../register-piece-head-sw.mjs";
 import {
   createSynapseForSession,
   deleteAllPiecesForAssetId,
@@ -22,6 +22,8 @@ import { moviesFromCatalog, viewerHrefForMeta } from "../filstream-catalog-share
 import { mountFilstreamBrand } from "../filstream-brand.mjs";
 import { getFilstreamStoreConfig } from "../filstream-config.mjs";
 import { authorizeSessionKeyForUpload } from "../session-key-bootstrap.mjs";
+
+await whenPieceHeadServiceWorkerReady();
 
 const brandMount = document.getElementById("creator-brand-mount");
 if (brandMount) {

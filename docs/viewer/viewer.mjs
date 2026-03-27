@@ -17,8 +17,7 @@
  * share/embed actions and catalog/meta are omitted.
  *
  */
-import "../register-piece-head-sw.mjs";
-import shaka from "https://esm.sh/shaka-player@4.7.11/dist/shaka-player.ui.js";
+import { whenPieceHeadServiceWorkerReady } from "../register-piece-head-sw.mjs";
 import {
   broadcastCopyFromMeta,
   formatUploadDateLabel,
@@ -36,6 +35,11 @@ import {
   proposeDonateTransfer,
   resolveViewerProvider,
 } from "../filstream-viewer-donate.mjs";
+
+await whenPieceHeadServiceWorkerReady();
+const shaka = (
+  await import("https://esm.sh/shaka-player@4.7.11/dist/shaka-player.ui.js")
+).default;
 
 const params = new URLSearchParams(window.location.search);
 const embedMode = params.get("embed") === "true";

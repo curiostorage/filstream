@@ -2,7 +2,7 @@
  * Wizard shell — edit and refresh; no `npm run build`.
  * Wallet/configure: `upload-configure.mjs`. Transcode + preview: `convert-progress.mjs`. Pipeline: `core.mjs`.
  */
-import "./register-piece-head-sw.mjs";
+import { whenPieceHeadServiceWorkerReady } from "./register-piece-head-sw.mjs";
 import { html, render } from "https://cdn.jsdelivr.net/npm/lit-html@3.2.1/+esm";
 import {
   createBrowserUploadSession,
@@ -59,6 +59,8 @@ import {
   getChain,
   Synapse,
 } from "./vendor/synapse-browser.mjs";
+
+await whenPieceHeadServiceWorkerReady();
 
 const WIZARD_MAX_STEP = 5;
 
