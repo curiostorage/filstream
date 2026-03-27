@@ -888,6 +888,55 @@ function posterUrlFromPublishedMetaDoc(doc) {
 }
 
 /**
+ * @param {string} addr
+ * @returns {string}
+ */
+function normalizeEditorAddress(addr) {
+  if (typeof addr !== "string" || addr.trim() === "") return "";
+  try {
+    return getAddress(/** @type {`0x${string}`} */ (addr.trim()));
+  } catch {
+    return addr.trim().toLowerCase();
+  }
+}
+
+/**
+ * Published `filstream_catalog.json` top-level fields so viewers can match dataset + editor wallet.
+ *
+ * @param {BrowserFilstreamUploadSession} session
+ * @param {{ title: string, metapath: string, posterUrl?: string }[]} movies
+ * @param {Record<string, unknown> | null} prevCatalog Prior catalog (chain), for merging `dataSetId` if session has not committed yet
+ * @returns {Record<string, unknown>}
+ */
+function buildFilstreamCatalogDoc(session, movies, prevCatalog) {
+  const editorAddress = normalizeEditorAddress(session.clientAddress);
+  let dataSetId = session.dataSetId != null ? session.dataSetId : null;
+  if (dataSetId == null && prevCatalog) {
+    const p = prevCatalog.dataSetId;
+    if (typeof p === "number" && Number.isFinite(p)) {
+      dataSetId = p;
+    }
+  }
+
+  /** @type {Record<string, unknown>} */
+  const doc = {
+    kind: "filstream v1",
+    editorAddress,
+    movies,
+  };
+  if (dataSetId != null) {
+    doc.dataSetId = dataSetId;
+  }
+  if (session.providerId != null && Number.isFinite(session.providerId)) {
+    doc.providerId = session.providerId;
+  }
+  if (session.cfg?.chainId != null && Number.isFinite(session.cfg.chainId)) {
+    doc.chainId = session.cfg.chainId;
+  }
+  return doc;
+}
+
+/**
  * @param {BrowserFilstreamUploadSession} session
  * @returns {Promise<{ catalogVersion: number | null, catalogPieceCid: string | null }>}
  */
@@ -919,6 +968,8 @@ async function appendFilstreamCatalogPiece(session) {
   let nextVer = 0;
   /** @type {{ title: string, metapath: string, posterUrl?: string }[]} */
   let movies = [];
+  /** @type {Record<string, unknown> | null} */
+  let prevCatalog = null;
   let bestVer = -1;
   /** @type {unknown} */
   let bestCid = null;
@@ -946,6 +997,9 @@ async function appendFilstreamCatalogPiece(session) {
         const res = await fetch(url);
         if (res.ok) {
           const prev = await res.json();
+          if (prev && typeof prev === "object" && prev !== null) {
+            prevCatalog = /** @type {Record<string, unknown>} */ (prev);
+          }
           if (prev && Array.isArray(prev.movies)) {
             movies = [...prev.movies];
           }
@@ -963,7 +1017,7 @@ async function appendFilstreamCatalogPiece(session) {
     entry.posterUrl = posterUrl;
   }
   movies.push(entry);
-  const doc = { kind: "filstream v1", movies };
+  const doc = buildFilstreamCatalogDoc(session, movies, prevCatalog);
   let text = JSON.stringify(doc, null, 2);
   const enc = new TextEncoder();
   let bytes = enc.encode(text);

@@ -4,13 +4,33 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>FilStream viewer</title>
+  <link rel="icon" href="favicon.svg" type="image/svg+xml" />
   <link rel="stylesheet" href="viewer/viewer.css" />
 </head>
 <body>
+  <script>
+    window.__FILSTREAM_CONFIG__ = window.__FILSTREAM_CONFIG__ || {};
+  </script>
   <div id="root" class="viewer-layout">
     <div class="viewer-main">
+      <header id="viewer-brand-mount" class="viewer-brand" role="banner"></header>
+      <div id="viewer-identity" class="viewer-identity" hidden>
+        <div class="viewer-identity-row">
+          <span class="viewer-identity-dataset" id="viewer-dataset-label"></span>
+          <span class="viewer-identity-role" id="viewer-role-label" aria-live="polite"></span>
+        </div>
+        <button type="button" id="viewer-connect-wallet" class="viewer-connect-wallet" hidden>
+          Connect wallet
+        </button>
+      </div>
       <p class="viewer-status" id="viewer-status">Loading…</p>
       <video id="viewer-video" controls playsinline></video>
+      <section id="viewer-meta" class="viewer-meta" hidden aria-label="About this video">
+        <h1 id="viewer-title" class="broadcast-title"></h1>
+        <p id="viewer-upload-date" class="broadcast-upload-date" hidden></p>
+        <div id="viewer-description" class="broadcast-description"></div>
+        <div id="viewer-donate-root" class="broadcast-actions"></div>
+      </section>
     </div>
     <aside id="viewer-catalog" class="viewer-catalog" hidden aria-label="Catalog"></aside>
   </div>

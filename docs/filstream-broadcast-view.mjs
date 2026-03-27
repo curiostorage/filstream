@@ -1,6 +1,8 @@
 /**
  * Final published layout: video + poster + title + description + download + viewer donate.
- * Consumes parsed `meta.json` plus playback/download URLs; intended for embed or Review demo.
+ * Consumes parsed `meta.json` plus playback/download URLs; intended for local preview or Review.
+ * When `reviewIframeSrc` is set (Review embed), only the iframe is rendered — title/description/donate
+ * live in `viewer.html`.
  */
 import { html } from "https://cdn.jsdelivr.net/npm/lit-html@3.2.1/+esm";
 import { viewerDonateBlock } from "./filstream-viewer-donate.mjs";
@@ -110,6 +112,27 @@ export function broadcastViewTemplate(props) {
     }
   }
 
+  /* Standalone `viewer.html` shows title, description, donate; embed is iframe-only. */
+  if (reviewIframeSrc) {
+    return html`
+      <section
+        class="broadcast-view ${variant ? `broadcast-view--${variant}` : ""}"
+        aria-label="Review stream playback"
+      >
+        <div class="broadcast-video-shell">
+          <div class="broadcast-video-frame">
+            <iframe
+              class="broadcast-review-iframe"
+              src=${reviewIframeSrc}
+              title="Stream playback"
+              allow="autoplay; fullscreen; encrypted-media"
+            ></iframe>
+          </div>
+        </div>
+      </section>
+    `;
+  }
+
   return html`
     <section
       class="broadcast-view ${variant ? `broadcast-view--${variant}` : ""}"
@@ -117,14 +140,7 @@ export function broadcastViewTemplate(props) {
     >
       <div class="broadcast-video-shell">
         <div class="broadcast-video-frame">
-          ${reviewIframeSrc
-            ? html`<iframe
-                class="broadcast-review-iframe"
-                src=${reviewIframeSrc}
-                title="Stream playback"
-                allow="autoplay; fullscreen; encrypted-media"
-              ></iframe>`
-            : videoEl}
+          ${videoEl}
         </div>
       </div>
       <div class="broadcast-meta">

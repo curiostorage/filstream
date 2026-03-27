@@ -27,10 +27,8 @@ import {
   requestInjectedProviders,
   subscribeInjectedWallets,
 } from "./eip6963.mjs";
-import {
-  broadcastViewTemplate,
-  formatUploadDateLabel,
-} from "./filstream-broadcast-view.mjs";
+import { broadcastViewTemplate } from "./filstream-broadcast-view.mjs";
+import { filstreamBrandLit } from "./filstream-brand.mjs";
 import {
   buildReviewViewerIframeSrc,
   ensureFilstreamId,
@@ -38,11 +36,6 @@ import {
   resolveCatalogJsonUrlFromFinalize,
   resolveMetaJsonUrlFromFinalize,
 } from "./filstream-config.mjs";
-import {
-  donateConfigFromMeta,
-  proposeDonateTransfer,
-  resolveViewerProvider,
-} from "./filstream-viewer-donate.mjs";
 import { publishMetadataForm } from "./publish-metadata.mjs";
 import {
   authorizeSessionKeyForUpload,
@@ -1027,9 +1020,6 @@ const wizardState = {
   storeUploadLabel: "",
   /** Short finalize phase hint shown after stats (e.g. draining queue, on-chain commit). */
   storeUploadPhaseNote: "",
-  viewerDonateBusy: false,
-  viewerDonateError: "",
-  viewerDonateTxHash: "",
   /** PDP `meta.json` retrieval URL for Review iframe */
   reviewMetaJsonUrl: "",
   /** PDP `filstream_catalog.json` retrieval URL for share / Review (optional) */
@@ -1299,30 +1289,6 @@ function broadcastPreviewMeta() {
     },
     donate: { enabled: false },
   };
-}
-
-async function handleViewerDonateClick() {
-  const meta = broadcastPreviewMeta();
-  const cfg = donateConfigFromMeta(meta);
-  if (!cfg.enabled) return;
-  const provider = resolveViewerProvider(null);
-  if (!provider) {
-    wizardState.viewerDonateError = "No browser wallet found.";
-    renderWizard();
-    return;
-  }
-  wizardState.viewerDonateBusy = true;
-  wizardState.viewerDonateError = "";
-  renderWizard();
-  try {
-    const { txHash } = await proposeDonateTransfer(provider, cfg);
-    wizardState.viewerDonateTxHash = txHash;
-  } catch (e) {
-    wizardState.viewerDonateError = e instanceof Error ? e.message : String(e);
-  } finally {
-    wizardState.viewerDonateBusy = false;
-    renderWizard();
-  }
 }
 
 function handleUseSeekPosition(v) {
@@ -1600,13 +1566,6 @@ function handleDisconnectWallet() {
   renderWizard();
 }
 
-/** @returns {string} Public FilStream site (matches `viewBaseUrl`, default GitHub Pages). */
-function projectSiteHref() {
-  const u = getFilstreamStoreConfig().viewBaseUrl.trim();
-  if (u) return u.endsWith("/") ? u : `${u}/`;
-  return "https://curiostorage.github.io/filstream/";
-}
-
 function renderWizard() {
   const root = document.getElementById("wizard-root");
   if (!root) return;
@@ -1626,27 +1585,7 @@ function renderWizard() {
       >
         <div class="site-top-bar">
           <header role="banner">
-            <a
-              class="site-brand"
-              href=${projectSiteHref()}
-              target="_blank"
-              rel="noopener noreferrer"
-              title="FilStream — CalibrationNet edition"
-              aria-label="FilStream — CalibrationNet edition (project site)"
-            >
-              <img
-                class="site-brand-mark"
-                src="favicon.svg"
-                width="40"
-                height="40"
-                alt=""
-                decoding="async"
-              />
-              <div class="site-brand-text">
-                <span class="site-brand-name">FilStream</span>
-                <span class="site-brand-tagline">CalibrationNet edition</span>
-              </div>
-            </a>
+            ${filstreamBrandLit()}
           </header>
 
           <ol class="wizard-steps" aria-label="Progress">
@@ -1783,19 +1722,8 @@ function renderWizard() {
                           meta: broadcastPreviewMeta(),
                           videoEl: v,
                           reviewIframeSrc: reviewViewerUrl,
-                          uploadDateLabel: (() => {
-                            const when = formatUploadDateLabel(broadcastPreviewMeta());
-                            return when ? `Uploaded ${when}` : null;
-                          })(),
                           downloadSourceFile: null,
                           variant: "embed-demo",
-                          getWalletList: () => wizardState.injectedWallets,
-                          viewerDonate: {
-                            busy: wizardState.viewerDonateBusy,
-                            error: wizardState.viewerDonateError,
-                            txHash: wizardState.viewerDonateTxHash,
-                            onClick: handleViewerDonateClick,
-                          },
                         })}
                       </section>
                     `;
@@ -2009,10 +1937,7 @@ async function wizardGoBackToChoose() {
   wizardState.storeUploadProgressPct = 0;
   wizardState.storeUploadLabel = "";
   wizardState.storeUploadPhaseNote = "";
-  wizardState.viewerDonateBusy = false;
-  wizardState.viewerDonateError = "";
-  wizardState.viewerDonateTxHash = "";
-  wizardState.reviewMetaJsonUrl = "";
+    wizardState.reviewMetaJsonUrl = "";
   wizardState.reviewCatalogJsonUrl = "";
   if (wizardState.posterObjectUrl) {
     URL.revokeObjectURL(wizardState.posterObjectUrl);
