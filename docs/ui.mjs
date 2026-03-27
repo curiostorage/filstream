@@ -1605,6 +1605,9 @@ function renderWizard() {
           ${wizardState.step === 1
             ? html`
                 <h1>Store your video as streamable on the Filecoin chain.</h1>
+                <p class="hero-price-estimate">
+                  Rough pricing: under 0.01 USDFC per movie hour per year (warm storage).
+                </p>
                 <section class="wizard-step hero-dropzone-wrap" aria-labelledby="step1-title">
                   <p>Recommended browsers: Chromium-class browsers (Chrome, Edge) with MetaMask or Wallet-Class browsers (Brave, Opera)</p>
                   <p id="step1-title" class="hint">

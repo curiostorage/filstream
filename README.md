@@ -19,7 +19,7 @@ From the repo root:
 go run .
 ```
 
-Serves [`docs/`](docs/) at `http://localhost:8080` (wizard at `/`, static viewer at `/viewer.html`).
+Serves [`docs/`](docs/) at `http://localhost:8080` (landing at `/`, upload wizard at `/upload.html`, static viewer at `/viewer.html`).
 
 **Synapse upload runs in the browser** via [`docs/browser-store.mjs`](docs/browser-store.mjs) and [`docs/vendor/synapse-browser.mjs`](docs/vendor/synapse-browser.mjs).
 
@@ -34,7 +34,7 @@ The [`docs/`](docs/) folder is the published site root for `https://curiostorage
 
 ## Session init (browser)
 
-The UI calls `createBrowserUploadSession({ assetId, clientAddress, sessionPrivateKey, sessionExpirations })` when the first store-bound event is queued. Public RPC/chain/provider settings use [`filstream-config.mjs`](docs/filstream-config.mjs) defaults unless you set `window.__FILSTREAM_CONFIG__` in [`docs/index.html`](docs/index.html) (see [`docs/env.example`](docs/env.example)).
+The UI calls `createBrowserUploadSession({ assetId, clientAddress, sessionPrivateKey, sessionExpirations })` when the first store-bound event is queued. Public RPC/chain/provider settings use [`filstream-config.mjs`](docs/filstream-config.mjs) defaults unless you set `window.__FILSTREAM_CONFIG__` in [`docs/upload.html`](docs/upload.html) (see [`docs/env.example`](docs/env.example)).
 
 Rules:
 

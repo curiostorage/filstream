@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>FilStream catalog · creator</title>
+  <link rel="icon" href="favicon.svg" type="image/svg+xml" />
+  <link rel="stylesheet" href="creator/creator.css" />
+</head>
+<body>
+  <script>
+    window.__FILSTREAM_CONFIG__ = window.__FILSTREAM_CONFIG__ || {};
+  </script>
+  <div id="root" class="creator-layout">
+    <header id="creator-brand-mount" class="creator-brand" role="banner"></header>
+    <p class="creator-status" id="creator-status">Loading…</p>
+
+    <section class="creator-hero" id="creator-hero" hidden>
+      <div class="creator-hero-poster-wrap">
+        <img id="creator-poster" class="creator-hero-poster" alt="" width="168" height="252" hidden />
+      </div>
+      <div class="creator-hero-text">
+        <h1 class="creator-title" id="creator-title">Catalog</h1>
+        <p class="creator-dataset-line" id="creator-dataset-label"></p>
+      </div>
+    </section>
+
+    <section
+      id="creator-identity"
+      class="creator-identity"
+      hidden
+      aria-label="Wallet"
+    >
+      <div class="creator-wallet-row" id="creator-wallet-block">
+        <span class="creator-role" id="creator-role-label" aria-live="polite"></span>
+        <button type="button" id="creator-connect-wallet" class="creator-connect-wallet" hidden>
+          Connect wallet
+        </button>
+      </div>
+    </section>
+
+    <section id="creator-edit-section" class="creator-edit-section" hidden aria-label="Edit catalog">
+      <p class="creator-edit-hint" id="creator-edit-hint"></p>
+      <button type="button" id="creator-enable-edit" class="creator-primary-btn" hidden>
+        Enable editing
+      </button>
+      <div id="creator-edit-form" class="creator-edit-form" hidden>
+        <label class="creator-field">
+          <span>Creator / channel name</span>
+          <input type="text" id="creator-name-input" autocomplete="off" />
+        </label>
+        <label class="creator-field">
+          <span>Creator poster URL (https)</span>
+          <input type="url" id="creator-poster-input" autocomplete="off" placeholder="https://…" />
+        </label>
+        <div class="creator-movie-editor-head">
+          <span>Movies (order = catalog order, oldest first)</span>
+          <button type="button" id="creator-save-btn" class="creator-primary-btn">Save catalog</button>
+        </div>
+        <p class="creator-save-status" id="creator-save-status" aria-live="polite"></p>
+        <ul id="creator-movie-edit-list" class="creator-movie-edit-list"></ul>
+      </div>
+    </section>
+
+    <section class="creator-catalog-section" id="creator-catalog-section" hidden aria-label="Movies in this catalog">
+      <h2 class="creator-catalog-head">Movies</h2>
+      <div id="creator-movie-list" class="creator-movie-list"></div>
+    </section>
+  </div>
+  <script type="module" src="creator/creator.mjs"></script>
+</body>
+</html>

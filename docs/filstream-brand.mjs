@@ -7,7 +7,7 @@ import { getFilstreamStoreConfig } from "./filstream-config.mjs";
 export const FILSTREAM_BRAND = {
   name: "FilStream",
   tagline: "CalibrationNet edition",
-  /** Relative to `docs/` pages (`index.html`, `viewer.html`). */
+  /** Relative to `docs/` pages (`index.html`, `upload.html`, `viewer.html`). */
   logoSrc: "favicon.svg",
 };
 

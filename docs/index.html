@@ -3,17 +3,39 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>FilStream — CalibrationNet edition</title>
+  <title>FilStream — Own your movies</title>
   <link rel="icon" href="favicon.svg" type="image/svg+xml" />
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
-  <div id="wizard-root"></div>
-  <!-- Optional: override defaults from filstream-config.mjs (see env.example). -->
-  <script>
-    window.__FILSTREAM_CONFIG__ = window.__FILSTREAM_CONFIG__ || {};
-  </script>
-  <!-- UI: ui.mjs + upload-configure.mjs (EIP-6963). Pipeline: core.mjs. -->
-  <script type="module" src="ui.mjs"></script>
+  <div class="wrap landing-wrap">
+    <header class="landing-brand" aria-label="FilStream">
+      <img
+        class="site-brand-mark"
+        src="favicon.svg"
+        width="40"
+        height="40"
+        alt=""
+        decoding="async"
+      />
+      <div class="site-brand-text">
+        <span class="site-brand-name">FilStream</span>
+        <span class="site-brand-tagline">CalibrationNet edition</span>
+      </div>
+    </header>
+
+    <h1 class="landing-headline">Own your movies:</h1>
+    <ul class="landing-list">
+      <li>No Terms of Service</li>
+      <li>No gatekeepers</li>
+      <li>No central owning company</li>
+      <li>Get 100% of ads revenue if you want them (coming soon)</li>
+      <li>Just pay for space on Filecoin: under 0.01 USDFC per movie hour per year.</li>
+    </ul>
+
+    <p class="landing-cta">
+      <a class="btn btn-primary" href="upload.html">Upload a movie</a>
+    </p>
+  </div>
 </body>
 </html>

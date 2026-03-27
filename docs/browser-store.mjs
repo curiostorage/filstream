@@ -493,6 +493,191 @@ export async function terminateDataSet(context) {
   await context.terminate();
 }
 
+/**
+ * Open an existing PDP data set for the catalog `providerId` / `dataSetId`.
+ * `catalogChainId` must match `getFilstreamStoreConfig().storeChainId` (or omit when absent).
+ *
+ * @param {{
+ *   synapse: import("@filoz/synapse-sdk").Synapse,
+ *   providerId: number,
+ *   dataSetId: number,
+ *   catalogChainId?: number | null,
+ * }} input
+ * @returns {Promise<import("@filoz/synapse-sdk/storage").StorageContext>}
+ */
+export async function openDataSetContextForCatalog(input) {
+  const { synapse, providerId, dataSetId, catalogChainId } = input;
+  if (!synapse?.storage) {
+    throw new StoreError(500, "Synapse storage manager is unavailable");
+  }
+  const cfg = getFilstreamStoreConfig();
+  if (
+    catalogChainId != null &&
+    Number.isFinite(catalogChainId) &&
+    catalogChainId !== cfg.storeChainId
+  ) {
+    throw new StoreError(
+      400,
+      "Catalog chainId does not match FilStream store config (set window.__FILSTREAM_CONFIG__.storeChainId)",
+    );
+  }
+  return createExistingDataSetContext(synapse.storage, providerId, dataSetId);
+}
+
+/**
+ * Highest `FS_VER` among `filstream_catalog.json` pieces on the data set, and the version to use for the next catalog piece.
+ *
+ * @param {{
+ *   context: import("@filoz/synapse-sdk/storage").StorageContext,
+ *   synapse: import("@filoz/synapse-sdk").Synapse,
+ *   chainId: number,
+ *   dataSetId: number,
+ * }} input
+ * @returns {Promise<{ latestVersion: number, nextVersion: number }>}
+ */
+export async function findLatestCatalogVersion(input) {
+  const { context, synapse, chainId, dataSetId } = input;
+  if (!context || typeof context.getPieces !== "function") {
+    throw new StoreError(500, "Storage context.getPieces is unavailable");
+  }
+  let bestVer = -1;
+  try {
+    for await (const row of context.getPieces()) {
+      const kv = await readPieceMetadataKvPublic({
+        synapse,
+        chainId,
+        dataSetId,
+        pieceId: row.pieceId,
+      });
+      if (kv.FS_NAME === "filstream_catalog.json") {
+        const v = Number.parseInt(kv.FS_VER ?? "0", 10);
+        if (Number.isFinite(v) && v > bestVer) {
+          bestVer = v;
+        }
+      }
+    }
+  } catch (e) {
+    console.warn("[filstream] findLatestCatalogVersion scan failed", e);
+  }
+  const nextVersion = bestVer < 0 ? 0 : bestVer + 1;
+  return { latestVersion: bestVer < 0 ? -1 : bestVer, nextVersion };
+}
+
+/**
+ * Store and commit a new `filstream_catalog.json` piece (next `FS_VER`).
+ *
+ * @param {{
+ *   context: import("@filoz/synapse-sdk/storage").StorageContext,
+ *   synapse: import("@filoz/synapse-sdk").Synapse,
+ *   assetId: string,
+ *   catalogDoc: Record<string, unknown>,
+ * }} input
+ * @returns {Promise<{ pieceCid: string, catalogVersion: number }>}
+ */
+export async function publishFilstreamCatalogJson(input) {
+  const { context, synapse, assetId, catalogDoc } = input;
+  if (!context || typeof context.store !== "function") {
+    throw new StoreError(500, "Storage context.store is unavailable");
+  }
+  if (!synapse?.client) {
+    throw new StoreError(500, "Synapse client is unavailable");
+  }
+  if (!assetId || typeof assetId !== "string") {
+    throw new StoreError(400, "assetId is required for catalog piece metadata");
+  }
+  const dataSetIdRaw = context.dataSetId;
+  const dataSetId =
+    dataSetIdRaw != null
+      ? parseSafeNonNegativeInt(
+          typeof dataSetIdRaw === "bigint" ? Number(dataSetIdRaw) : dataSetIdRaw,
+        )
+      : null;
+  if (dataSetId == null) {
+    throw new StoreError(500, "Storage context has no dataSetId");
+  }
+  const cfg = getFilstreamStoreConfig();
+  const chainId = cfg.storeChainId;
+  if (!chainId || !Number.isFinite(chainId)) {
+    throw new StoreError(500, "Invalid storeChainId in config");
+  }
+  const { nextVersion } = await findLatestCatalogVersion({
+    context,
+    synapse,
+    chainId,
+    dataSetId,
+  });
+  let text = JSON.stringify(catalogDoc, null, 2);
+  const enc = new TextEncoder();
+  let bytes = enc.encode(text);
+  while (bytes.byteLength < SYNAPSE_MIN_PIECE_BYTES) {
+    text += "\n";
+    bytes = enc.encode(text);
+  }
+  const storeResult = await context.store(bytes);
+  const pieceRef = storeResult?.pieceCid;
+  if (!pieceRef) {
+    throw new StoreError(500, "store() response is missing pieceCid");
+  }
+  const pieceCid = String(pieceRef);
+  const metadata = catalogPieceMetadata(assetId, nextVersion);
+  if (typeof context.commit !== "function") {
+    throw new StoreError(500, "Storage context.commit is unavailable");
+  }
+  await context.commit({
+    pieces: [{ pieceCid: pieceRef, pieceMetadata: metadata }],
+  });
+  return { pieceCid, catalogVersion: nextVersion };
+}
+
+/**
+ * Schedule PDP deletion for every piece with `FS_ASSET === assetId`, except `filstream_catalog.json` catalog pieces.
+ *
+ * @param {{
+ *   context: import("@filoz/synapse-sdk/storage").StorageContext,
+ *   synapse: import("@filoz/synapse-sdk").Synapse,
+ *   chainId: number,
+ *   dataSetId: number,
+ *   assetId: string,
+ * }} input
+ * @returns {Promise<{ deleted: number, errors: string[] }>}
+ */
+export async function deleteAllPiecesForAssetId(input) {
+  const { context, synapse, chainId, dataSetId, assetId } = input;
+  if (!context || typeof context.getPieces !== "function") {
+    throw new StoreError(500, "Storage context.getPieces is unavailable");
+  }
+  let deleted = 0;
+  /** @type {string[]} */
+  const errors = [];
+  try {
+    for await (const row of context.getPieces()) {
+      const kv = await readPieceMetadataKvPublic({
+        synapse,
+        chainId,
+        dataSetId,
+        pieceId: row.pieceId,
+      });
+      if (kv.FS_NAME === "filstream_catalog.json") {
+        continue;
+      }
+      if (kv.FS_ASSET !== assetId) {
+        continue;
+      }
+      try {
+        await deletePiece(context, row.pieceCid);
+        deleted += 1;
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        errors.push(msg);
+      }
+    }
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    errors.push(msg);
+  }
+  return { deleted, errors };
+}
+
 // --- Pure helpers (from Node service.mjs) ---
 
 /**
@@ -833,14 +1018,23 @@ function buildPublishedMetaDocument(session, urls) {
 }
 
 /**
- * @param {BrowserFilstreamUploadSession} session
- * @param {number} dataSetId
- * @param {bigint} pieceId
+ * PDP piece metadata key-values from chain (FWSS view).
+ *
+ * @param {{
+ *   synapse: import("@filoz/synapse-sdk").Synapse,
+ *   chainId: number,
+ *   dataSetId: number,
+ *   pieceId: bigint,
+ * }} input
  * @returns {Promise<Record<string, string>>}
  */
-async function readPieceMetadataKv(session, dataSetId, pieceId) {
-  const chain = getChain(session.cfg.chainId);
-  const client = session.synapse.client;
+export async function readPieceMetadataKvPublic(input) {
+  const { synapse, chainId, dataSetId, pieceId } = input;
+  if (!synapse?.client) {
+    throw new StoreError(500, "Synapse client is unavailable");
+  }
+  const chain = getChain(chainId);
+  const client = synapse.client;
   const [keys, values] = await client.readContract({
     address: chain.contracts.fwssView.address,
     abi: chain.contracts.fwssView.abi,
@@ -853,6 +1047,21 @@ async function readPieceMetadataKv(session, dataSetId, pieceId) {
     out[keys[i]] = values[i];
   }
   return out;
+}
+
+/**
+ * @param {BrowserFilstreamUploadSession} session
+ * @param {number} dataSetId
+ * @param {bigint} pieceId
+ * @returns {Promise<Record<string, string>>}
+ */
+async function readPieceMetadataKv(session, dataSetId, pieceId) {
+  return readPieceMetadataKvPublic({
+    synapse: session.synapse,
+    chainId: session.cfg.chainId,
+    dataSetId,
+    pieceId,
+  });
 }
 
 /**
@@ -902,6 +1111,7 @@ function normalizeEditorAddress(addr) {
 
 /**
  * Published `filstream_catalog.json` top-level fields so viewers can match dataset + editor wallet.
+ * Optional `creatorName` / `creatorPosterUrl` (https URL) are merged from `prevCatalog` when present.
  *
  * @param {BrowserFilstreamUploadSession} session
  * @param {{ title: string, metapath: string, posterUrl?: string }[]} movies
@@ -932,6 +1142,16 @@ function buildFilstreamCatalogDoc(session, movies, prevCatalog) {
   }
   if (session.cfg?.chainId != null && Number.isFinite(session.cfg.chainId)) {
     doc.chainId = session.cfg.chainId;
+  }
+  if (prevCatalog) {
+    const cn = prevCatalog.creatorName;
+    if (typeof cn === "string" && cn.trim() !== "") {
+      doc.creatorName = cn.trim();
+    }
+    const cpu = prevCatalog.creatorPosterUrl;
+    if (typeof cpu === "string" && cpu.trim() !== "") {
+      doc.creatorPosterUrl = cpu.trim();
+    }
   }
   return doc;
 }
