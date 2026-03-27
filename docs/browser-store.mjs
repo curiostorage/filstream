@@ -668,7 +668,24 @@ function filePieceMetadata(assetId, path) {
 function defaultMimeForPath(filePath) {
   if (filePath.endsWith(".m3u8")) return "application/vnd.apple.mpegurl";
   if (filePath.endsWith(".json")) return "application/json";
+  const lower = filePath.toLowerCase();
+  if (lower.endsWith(".png")) return "image/png";
+  if (lower.endsWith(".jpg") || lower.endsWith(".jpeg")) return "image/jpeg";
+  if (lower.endsWith(".webp")) return "image/webp";
+  if (lower.endsWith(".gif")) return "image/gif";
   return "application/octet-stream";
+}
+
+/**
+ * Safe single-segment path for a listing poster (basename only).
+ *
+ * @param {string} raw
+ * @returns {string}
+ */
+function sanitizePosterPath(raw) {
+  const base = raw.split(/[/\\]/).pop() || "poster.png";
+  const cleaned = base.replace(/[^\w.\-]+/g, "_").replace(/^\.+/, "") || "poster.png";
+  return cleaned.slice(0, 200);
 }
 
 /**
@@ -689,15 +706,25 @@ function parseOptionalJsonObject(raw) {
 
 /**
  * @param {FileMapping[]} files
+ * @param {string | null | undefined} posterPath Staged poster file path (e.g. `poster-seek.png`), if any
  */
-function extractPlaybackUrls(files) {
+function extractPlaybackUrls(files, posterPath) {
   const master = files.find((f) => f.path === "master-app.m3u8");
   const manifest = files.find((f) => f.path === "manifest.json");
   const meta = files.find((f) => f.path === "meta.json");
+  const pNorm =
+    typeof posterPath === "string" && posterPath.trim() !== ""
+      ? posterPath.trim()
+      : "";
+  const poster =
+    pNorm !== "" ? files.find((f) => f.path === pNorm) : undefined;
+  const catalog = files.find((f) => f.path === "filstream_catalog.json");
   return {
     masterAppUrl: master?.retrievalUrl || null,
     manifestUrl: manifest?.retrievalUrl || null,
     metaJsonUrl: meta?.retrievalUrl || null,
+    posterUrl: poster?.retrievalUrl ?? null,
+    catalogJsonUrl: catalog?.retrievalUrl ?? null,
   };
 }
 
@@ -738,7 +765,12 @@ function abandonUncommittedStagingByPath(session, path) {
  * Listing + playback URLs + stable filstream ids for viewers and tools.
  *
  * @param {BrowserFilstreamUploadSession} session
- * @param {{ masterAppUrl: string | null, manifestUrl: string | null }} urls
+ * @param {{
+ *   masterAppUrl: string | null,
+ *   manifestUrl: string | null,
+ *   metaJsonUrl: string | null,
+ *   posterUrl: string | null,
+ * }} urls
  * @returns {Record<string, unknown>}
  */
 function buildPublishedMetaDocument(session, urls) {
@@ -759,6 +791,10 @@ function buildPublishedMetaDocument(session, urls) {
   }
   const master = typeof urls.masterAppUrl === "string" ? urls.masterAppUrl.trim() : "";
   const manifest = typeof urls.manifestUrl === "string" ? urls.manifestUrl.trim() : "";
+  const posterUrl =
+    typeof urls.posterUrl === "string" && urls.posterUrl.trim() !== ""
+      ? urls.posterUrl.trim()
+      : null;
   if (!master) {
     throw new StoreError(500, "Cannot publish meta.json: missing master-app.m3u8 retrieval URL.");
   }
@@ -770,12 +806,21 @@ function buildPublishedMetaDocument(session, urls) {
     typeof base.playback === "object" && base.playback !== null && !Array.isArray(base.playback)
       ? /** @type {Record<string, unknown>} */ (base.playback)
       : {};
+  /** @type {Record<string, unknown>} */
+  const prevPoster =
+    typeof base.poster === "object" && base.poster !== null && !Array.isArray(base.poster)
+      ? /** @type {Record<string, unknown>} */ ({ ...base.poster })
+      : {};
+  const posterOut =
+    posterUrl != null ? { ...prevPoster, url: posterUrl } : base.poster;
   return {
     ...base,
+    poster: posterOut,
     playback: {
       ...prevPb,
       masterAppUrl: master,
       manifestUrl: manifest,
+      ...(posterUrl != null ? { posterUrl } : {}),
     },
     filstream: {
       assetId: session.assetId,
@@ -1211,6 +1256,12 @@ export class BrowserFilstreamUploadSession {
     this.listingDetailsReceived = false;
     /** Staging path for listing JSON (`listingDetails`), default `meta.json`. */
     this.listingMetaPath = null;
+    /**
+     * Listing poster image bytes + path, uploaded as its own piece during finalize.
+     *
+     * @type {{ path: string, mimeType: string, data: Uint8Array } | null}
+     */
+    this.posterStagedFile = null;
     this.finalized = false;
     /** Concurrent `context.store()` calls (PDP piece uploads). */
     this._pdpUploadsInFlight = 0;
@@ -1784,6 +1835,7 @@ export class BrowserFilstreamUploadSession {
    */
   async handleListingDetails(detail) {
     this.listingDetailsReceived = true;
+    this.posterStagedFile = null;
     if (!detail || typeof detail !== "object") return;
     const d = /** @type {Record<string, unknown>} */ (detail);
     const metaPath =
@@ -1797,6 +1849,23 @@ export class BrowserFilstreamUploadSession {
         mimeType: "application/json",
         data: new TextEncoder().encode(d.metaJsonText),
       });
+    }
+    const pb = d.posterBytes;
+    if (pb instanceof Uint8Array && pb.byteLength > 0) {
+      const rawName =
+        typeof d.posterFileName === "string" && d.posterFileName.trim() !== ""
+          ? d.posterFileName.trim()
+          : "poster.png";
+      const path = sanitizePosterPath(rawName);
+      const mime =
+        typeof d.posterMimeType === "string" && d.posterMimeType.trim() !== ""
+          ? d.posterMimeType.trim()
+          : defaultMimeForPath(path);
+      this.posterStagedFile = {
+        path,
+        mimeType: mime,
+        data: pb,
+      };
     }
   }
 
@@ -1890,12 +1959,14 @@ export class BrowserFilstreamUploadSession {
     const livePieces = [...this.piecesByCid.values()].filter((p) => !p.abandoned);
     const livePieceSet = new Set(livePieces.map((p) => p.pieceCid));
     const files = this.fileMappings.filter((f) => livePieceSet.has(f.pieceCid));
-    const playback = extractPlaybackUrls(files);
+    const playback = extractPlaybackUrls(files, this.posterStagedFile?.path ?? null);
     /** @type {Record<string, string>} */
     const playbackOut = {};
     if (playback.masterAppUrl) playbackOut.masterAppUrl = playback.masterAppUrl;
     if (playback.manifestUrl) playbackOut.manifestUrl = playback.manifestUrl;
     if (playback.metaJsonUrl) playbackOut.metaJsonUrl = playback.metaJsonUrl;
+    if (playback.posterUrl) playbackOut.posterUrl = playback.posterUrl;
+    if (playback.catalogJsonUrl) playbackOut.catalogJsonUrl = playback.catalogJsonUrl;
     return {
       version: 1,
       createdAt: new Date().toISOString(),
@@ -2012,6 +2083,8 @@ export class BrowserFilstreamUploadSession {
    *   masterAppUrl: string | null,
    *   manifestUrl: string | null,
    *   metaJsonUrl: string | null,
+   *   posterUrl: string | null,
+   *   catalogJsonUrl: string | null,
    *   dataSetId: number | null,
    *   catalogVersion: number | null,
    *   catalogPieceCid: string | null,
@@ -2037,6 +2110,9 @@ export class BrowserFilstreamUploadSession {
     if (master) {
       await this.storeStagedFile(master);
     }
+    if (this.posterStagedFile) {
+      await this.storeStagedFile(this.posterStagedFile);
+    }
     const manifestDraft = this.buildManifest();
     const manifestDraftText = JSON.stringify(manifestDraft, null, 2);
     await this.storeStagedFile({
@@ -2049,7 +2125,10 @@ export class BrowserFilstreamUploadSession {
       const p = this.piecesByCid.get(f.pieceCid);
       return p != null && !p.abandoned;
     });
-    const urlsForMeta = extractPlaybackUrls(liveForMetaUrls);
+    const urlsForMeta = extractPlaybackUrls(
+      liveForMetaUrls,
+      this.posterStagedFile?.path ?? null,
+    );
     const publishedMeta = buildPublishedMetaDocument(this, urlsForMeta);
     const metaBytes = encodeJsonWithMinPiecePadding(publishedMeta);
     this.textFiles.set("meta.json", {
@@ -2086,7 +2165,7 @@ export class BrowserFilstreamUploadSession {
       const p = this.piecesByCid.get(f.pieceCid);
       return p != null && !p.abandoned;
     });
-    const playback = extractPlaybackUrls(liveFiles);
+    const playback = extractPlaybackUrls(liveFiles, this.posterStagedFile?.path ?? null);
     return {
       finalized: true,
       committedCount: commit.committedCount,
@@ -2094,6 +2173,8 @@ export class BrowserFilstreamUploadSession {
       masterAppUrl: playback.masterAppUrl,
       manifestUrl: playback.manifestUrl,
       metaJsonUrl: playback.metaJsonUrl,
+      posterUrl: playback.posterUrl,
+      catalogJsonUrl: playback.catalogJsonUrl,
       dataSetId: this.dataSetId,
       catalogVersion: catalogOut.catalogVersion,
       catalogPieceCid: catalogOut.catalogPieceCid,

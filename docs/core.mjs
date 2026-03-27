@@ -637,7 +637,7 @@ async function convertToFmp4Segments(
  * @property {object} transcodeMeta shallow copy of transcode fields (assembledAt, sourceName, nVar, …)
  * @property {{ title: string, description: string, showDonateButton: boolean, useSeekPosition: boolean, fundWalletAddress?: string | null, donateAmountUsdfc?: number | null }} listing — `fundWalletAddress` is the wallet connected on Fund (step 2); USDFC donate target
  * @property {{ enabled: boolean, recipient?: string, amountHuman?: string, token?: object, chainId?: number }} [donate] normalized viewer donate block in `metaJsonText`
- * @property {{ fileName: string, mimeType: string, size: number }} poster metadata (matches `poster` in `metaJsonText`)
+ * @property {{ fileName: string, mimeType: string, size: number, url?: string }} poster metadata (matches `poster` in `metaJsonText`; `url` is set after PDP upload at finalize)
  * @property {File} poster image file (upload or seek capture)
  * @property {string} metaJsonText pretty-printed JSON: transcodeMeta spread + `listing` + `poster` info + `listingCompletedAt` (no raw image-bytes)
  * @property {string} metaPath always `meta.json`

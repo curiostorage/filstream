@@ -40,7 +40,6 @@ export function applyStreamMode(player, mode, rungs) {
  *   streamMode: "auto" | number,
  *   onStreamMode: (mode: "auto" | number) => void,
  *   playingLabel: string,
- *   onCancel: () => void,
  *   onStartOver: () => void,
  *   awaitListingLayout?: boolean,
  *   awaitListingTitle?: string,
@@ -71,7 +70,6 @@ export function convertProgressPanel(props) {
     streamMode,
     onStreamMode,
     playingLabel,
-    onCancel,
     onStartOver,
     awaitListingLayout = false,
     awaitListingTitle = "",
@@ -333,15 +331,15 @@ export function convertProgressPanel(props) {
           `
         : null}
 
-      <div class="convert-actions">
-        ${phase === "encoding" || phase === "define" || phase === "awaiting"
-          ? html`<button type="button" class="btn" @click=${onCancel}>Cancel transcode</button>`
-          : html`
+      ${phase === "playback"
+        ? html`
+            <div class="convert-actions">
               <div class="convert-actions-row">
                 <button type="button" class="btn btn-primary" @click=${onStartOver}>Start over</button>
               </div>
-            `}
-      </div>
+            </div>
+          `
+        : null}
     </section>
   `;
 }

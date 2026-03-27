@@ -35,6 +35,7 @@ import {
   buildReviewViewerIframeSrc,
   ensureFilstreamId,
   getFilstreamStoreConfig,
+  resolveCatalogJsonUrlFromFinalize,
   resolveMetaJsonUrlFromFinalize,
 } from "./filstream-config.mjs";
 import {
@@ -97,6 +98,8 @@ const STORE_PHASE_FINALIZE_NOTE =
  *   masterAppUrl: string | null,
  *   manifestUrl: string | null,
  *   metaJsonUrl: string | null,
+ *   posterUrl: string | null,
+ *   catalogJsonUrl: string | null,
  *   dataSetId: number | null,
  *   catalogVersion: number | null,
  *   catalogPieceCid: string | null,
@@ -474,6 +477,7 @@ async function runFinalizeAfterListingDetail(detail) {
   wizardState.storeUploadPhaseNote = "Preparing finalize…";
   wizardState.storeUploadLabel = "";
   wizardState.reviewMetaJsonUrl = "";
+  wizardState.reviewCatalogJsonUrl = "";
   updateStoreUploadProgressFromSession();
   renderWizard();
   try {
@@ -482,7 +486,8 @@ async function runFinalizeAfterListingDetail(detail) {
     const masterUrl =
       typeof finalized?.masterAppUrl === "string" ? finalized.masterAppUrl : "";
     wizardState.reviewMetaJsonUrl = resolveMetaJsonUrlFromFinalize(finalized);
-    tryMergePlaybackIntoPublishedMeta(masterUrl);
+    wizardState.reviewCatalogJsonUrl = resolveCatalogJsonUrlFromFinalize(finalized);
+    tryMergePlaybackIntoPublishedMeta(finalized);
     wizardState.storeUploadProgressPct = 100;
     wizardState.storeUploadLabel = masterUrl ? "Stored — loading playback…" : "Stored.";
     wizardState.storeUploadPhaseNote = "";
@@ -511,7 +516,7 @@ async function flushListingFlowAfterTranscode() {
   const listing = buildListingEmitPayloadFromWizard();
   if (!listing) {
     wizardState.defineListingFlowPending = false;
-    setWizardStatus("Poster missing. Use Cancel and return to Define.", "err");
+    setWizardStatus("Poster missing. Go back to Define and add a poster.", "err");
     renderWizard();
     return;
   }
@@ -766,14 +771,38 @@ function flushStoreEventBacklog() {
   }
 }
 
+/**
+ * @param {unknown} originalDetail
+ * @param {Record<string, unknown>} basePayload
+ */
+async function augmentListingDetailsForStoreIngest(originalDetail, basePayload) {
+  if (!originalDetail || typeof originalDetail !== "object") return basePayload;
+  const src = /** @type {Record<string, unknown>} */ (originalDetail);
+  const poster = src.poster;
+  if (!(poster instanceof Blob)) return basePayload;
+  const bytes = new Uint8Array(await poster.arrayBuffer());
+  const name = poster instanceof File ? poster.name : "poster";
+  const mime = poster.type || "application/octet-stream";
+  return {
+    ...basePayload,
+    posterBytes: bytes,
+    posterFileName: name,
+    posterMimeType: mime,
+  };
+}
+
 function appendToStoreIngestQueue(eventType, detail) {
-  const payloadDetail = toBrowserStoreEventDetail(eventType, detail);
   storeRuntime.queue = storeRuntime.queue
     .then(async () => {
       if (storeRuntime.disabled || storeRuntime.finalized) return;
       await ensureStoreUploadSession();
       if (!storeRuntime.session) {
         return;
+      }
+      /** @type {Record<string, unknown>} */
+      let payloadDetail = toBrowserStoreEventDetail(eventType, detail);
+      if (eventType === LISTING_DETAILS_EVENT) {
+        payloadDetail = await augmentListingDetailsForStoreIngest(detail, payloadDetail);
       }
       await storeRuntime.session.ingestEvent(eventType, payloadDetail);
       updateStoreUploadProgressFromSession();
@@ -1003,6 +1032,8 @@ const wizardState = {
   viewerDonateTxHash: "",
   /** PDP `meta.json` retrieval URL for Review iframe */
   reviewMetaJsonUrl: "",
+  /** PDP `filstream_catalog.json` retrieval URL for share / Review (optional) */
+  reviewCatalogJsonUrl: "",
 };
 
 /** @type {HTMLVideoElement | null} */
@@ -1148,19 +1179,37 @@ function updateStoreUploadProgressFromSession() {
   renderWizard();
 }
 
-function tryMergePlaybackIntoPublishedMeta(masterUrl) {
-  if (!masterUrl || !wizardState.publishedMeta || typeof wizardState.publishedMeta !== "object") {
+/**
+ * @param {StoreFinalizeResponse | null | undefined} finalized
+ */
+function tryMergePlaybackIntoPublishedMeta(finalized) {
+  if (!wizardState.publishedMeta || typeof wizardState.publishedMeta !== "object") {
     return;
   }
   const m = /** @type {Record<string, unknown>} */ (wizardState.publishedMeta);
+  const f = finalized && typeof finalized === "object" ? finalized : {};
+  const pb =
+    typeof m.playback === "object" && m.playback !== null && !Array.isArray(m.playback)
+      ? /** @type {Record<string, unknown>} */ (m.playback)
+      : {};
+  const posterMeta =
+    typeof m.poster === "object" && m.poster !== null && !Array.isArray(m.poster)
+      ? /** @type {Record<string, unknown>} */ (m.poster)
+      : {};
+  /** @type {Record<string, unknown>} */
+  const nextPlayback = { ...pb };
+  const mu = typeof f.masterAppUrl === "string" ? f.masterAppUrl.trim() : "";
+  const manifest = typeof f.manifestUrl === "string" ? f.manifestUrl.trim() : "";
+  const metaUrl = typeof f.metaJsonUrl === "string" ? f.metaJsonUrl.trim() : "";
+  const pu = typeof f.posterUrl === "string" ? f.posterUrl.trim() : "";
+  if (mu) nextPlayback.masterAppUrl = mu;
+  if (manifest) nextPlayback.manifestUrl = manifest;
+  if (metaUrl) nextPlayback.metaJsonUrl = metaUrl;
+  if (pu) nextPlayback.posterUrl = pu;
   wizardState.publishedMeta = {
     ...m,
-    playback: {
-      ...(typeof m.playback === "object" && m.playback !== null && !Array.isArray(m.playback)
-        ? /** @type {Record<string, unknown>} */ (m.playback)
-        : {}),
-      masterAppUrl: masterUrl,
-    },
+    playback: nextPlayback,
+    ...(pu ? { poster: { ...posterMeta, url: pu } } : {}),
   };
 }
 
@@ -1689,21 +1738,37 @@ function renderWizard() {
               <div class="step2-stack">
                 ${wizardState.step === 5
                   ? (() => {
-                      /** Static viewer iframe only with `?meta=` — same contract as shared links. */
+                      /** Static viewer: `?meta=` + optional `?catalog=` — same contract as shared links. */
                       const reviewMetaUrl =
                         wizardState.reviewMetaJsonUrl ||
                         resolveMetaJsonUrlFromFinalize(storeRuntime.finalizeResult);
+                      const reviewCatalogUrl =
+                        wizardState.reviewCatalogJsonUrl ||
+                        resolveCatalogJsonUrlFromFinalize(storeRuntime.finalizeResult);
                       const reviewViewerUrl = reviewMetaUrl
-                        ? buildReviewViewerIframeSrc(reviewMetaUrl)
+                        ? buildReviewViewerIframeSrc(
+                            reviewMetaUrl,
+                            reviewCatalogUrl || undefined,
+                          )
                         : null;
                       return html`
                       <section class="publish-broadcast-shell" aria-labelledby="publish-broadcast-title">
                         <h2 id="publish-broadcast-title" class="publish-broadcast-head">Review</h2>
+                        ${reviewViewerUrl
+                          ? html`<p class="publish-broadcast-viewer-link broadcast-viewer-link">
+                              <a
+                                href=${reviewViewerUrl}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                >Open this video</a
+                              >
+                              <span class="subtle"> — same player as the preview above</span>
+                            </p>`
+                          : null}
                         ${broadcastViewTemplate({
                           meta: broadcastPreviewMeta(),
                           videoEl: v,
                           reviewIframeSrc: reviewViewerUrl,
-                          reviewViewerPageUrl: reviewViewerUrl,
                           uploadDateLabel: (() => {
                             const when = formatUploadDateLabel(broadcastPreviewMeta());
                             return when ? `Uploaded ${when}` : null;
@@ -1788,7 +1853,6 @@ function renderWizard() {
                   streamMode: wizardState.streamMode,
                   onStreamMode: handleStreamMode,
                   playingLabel: wizardState.playingResolution,
-                  onCancel: () => wizardGoBackToChoose(),
                   onStartOver: () => wizardStartOver(),
                   awaitListingLayout:
                     wizardState.step === 4 &&
@@ -1935,6 +1999,7 @@ async function wizardGoBackToChoose() {
   wizardState.viewerDonateError = "";
   wizardState.viewerDonateTxHash = "";
   wizardState.reviewMetaJsonUrl = "";
+  wizardState.reviewCatalogJsonUrl = "";
   if (wizardState.posterObjectUrl) {
     URL.revokeObjectURL(wizardState.posterObjectUrl);
     wizardState.posterObjectUrl = null;

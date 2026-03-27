@@ -22,10 +22,25 @@ export function broadcastCopyFromMeta(meta) {
   const listing = /** @type {{ title?: string, description?: string }} */ (
     "listing" in m && m.listing && typeof m.listing === "object" ? m.listing : {}
   );
+  const pb =
+    "playback" in m && m.playback && typeof m.playback === "object"
+      ? /** @type {{ posterUrl?: string }} */ (m.playback)
+      : {};
+  const posterBlock =
+    "poster" in m && m.poster && typeof m.poster === "object"
+      ? /** @type {{ url?: string }} */ (m.poster)
+      : {};
+  const posterUrl =
+    typeof posterBlock.url === "string" && posterBlock.url.trim() !== ""
+      ? posterBlock.url.trim()
+      : typeof pb.posterUrl === "string" && pb.posterUrl.trim() !== ""
+        ? pb.posterUrl.trim()
+        : null;
   return {
     title: typeof listing.title === "string" ? listing.title : "",
     description:
       typeof listing.description === "string" ? listing.description : "",
+    posterUrl,
   };
 }
 
@@ -57,7 +72,6 @@ export function formatUploadDateLabel(meta) {
  *   meta: unknown,
  *   videoEl: HTMLVideoElement,
  *   reviewIframeSrc?: string | null,
- *   reviewViewerPageUrl?: string | null, // same URL as iframe; “Open this video” link
  *   uploadDateLabel?: string | null,
  *   downloadSourceFile?: File | null,
  *   downloadLabel?: string,
@@ -76,7 +90,6 @@ export function broadcastViewTemplate(props) {
     meta,
     videoEl,
     reviewIframeSrc = null,
-    reviewViewerPageUrl = null,
     uploadDateLabel = null,
     downloadSourceFile = null,
     downloadLabel = "Download source video",
@@ -88,6 +101,14 @@ export function broadcastViewTemplate(props) {
   const copy = broadcastCopyFromMeta(meta);
   const title = copy.title.trim() || "Untitled";
   const desc = copy.description.trim();
+
+  if (videoEl && !reviewIframeSrc) {
+    if (copy.posterUrl) {
+      videoEl.setAttribute("poster", copy.posterUrl);
+    } else {
+      videoEl.removeAttribute("poster");
+    }
+  }
 
   return html`
     <section
@@ -105,17 +126,6 @@ export function broadcastViewTemplate(props) {
               ></iframe>`
             : videoEl}
         </div>
-        ${reviewViewerPageUrl
-          ? html`<p class="broadcast-viewer-link">
-              <a
-                href=${reviewViewerPageUrl}
-                target="_blank"
-                rel="noopener noreferrer"
-                >Open this video</a
-              >
-              <span class="subtle"> — same player as the preview above</span>
-            </p>`
-          : null}
       </div>
       <div class="broadcast-meta">
         <h1 class="broadcast-title">${title}</h1>

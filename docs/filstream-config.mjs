@@ -116,14 +116,23 @@ export function resolveViewerIndexPageUrl() {
 }
 
 /**
- * Review iframe URL with `meta` query (absolute URL to `meta.json` on PDP).
+ * Review / share URL: `meta` points at `meta.json`; optional `catalog` at `filstream_catalog.json`
+ * for the same dataset (multi-title index appended at finalize).
  *
  * @param {string} metaJsonUrl
+ * @param {string | null | undefined} [catalogJsonUrl]
  * @returns {string}
  */
-export function buildReviewViewerIframeSrc(metaJsonUrl) {
+export function buildReviewViewerIframeSrc(metaJsonUrl, catalogJsonUrl) {
   const u = new URL(resolveViewerIndexPageUrl());
   u.searchParams.set("meta", metaJsonUrl);
+  const cat =
+    typeof catalogJsonUrl === "string" && catalogJsonUrl.trim() !== ""
+      ? catalogJsonUrl.trim()
+      : "";
+  if (cat) {
+    u.searchParams.set("catalog", cat);
+  }
   return u.href;
 }
 
@@ -149,6 +158,19 @@ export function resolveMetaJsonUrlFromFinalize(result) {
     if (d) return d;
   }
   return "";
+}
+
+/**
+ * Absolute retrieval URL for `filstream_catalog.json` from finalize output (separate piece CID from `meta.json`).
+ *
+ * @param {null | { catalogJsonUrl?: string | null }} result
+ * @returns {string}
+ */
+export function resolveCatalogJsonUrlFromFinalize(result) {
+  if (!result) return "";
+  const direct =
+    typeof result.catalogJsonUrl === "string" ? result.catalogJsonUrl.trim() : "";
+  return direct;
 }
 
 /**

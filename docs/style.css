@@ -516,6 +516,10 @@ h3 {
   color: #e8eaed;
 }
 
+.publish-broadcast-viewer-link {
+  margin: 0 0 1rem;
+}
+
 .publish-broadcast-lead {
   margin: 0 0 1.25rem;
   font-size: 0.88rem;
