@@ -295,6 +295,11 @@ h3 {
   max-width: 52rem;
 }
 
+/* Review step: embedded viewer shows video + catalog sidebar (see viewer/viewer.css). */
+.layout-main.layout-main--review-wide {
+  max-width: min(80rem, calc(100vw - 2.5rem));
+}
+
 .site-top-bar {
   display: flex;
   flex-wrap: wrap;

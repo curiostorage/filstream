@@ -1614,7 +1614,9 @@ function renderWizard() {
 
   render(
     html`
-      <main class="wrap layout-main">
+      <main
+        class=${`wrap layout-main${wizardState.step === 5 ? " layout-main--review-wide" : ""}`}
+      >
         <div class="site-top-bar">
           <header
             class="site-brand"

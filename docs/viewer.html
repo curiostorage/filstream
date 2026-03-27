@@ -7,9 +7,12 @@
   <link rel="stylesheet" href="viewer/viewer.css" />
 </head>
 <body>
-  <div id="root">
-    <p class="viewer-status" id="viewer-status">Loading…</p>
-    <video id="viewer-video" controls playsinline></video>
+  <div id="root" class="viewer-layout">
+    <div class="viewer-main">
+      <p class="viewer-status" id="viewer-status">Loading…</p>
+      <video id="viewer-video" controls playsinline></video>
+    </div>
+    <aside id="viewer-catalog" class="viewer-catalog" hidden aria-label="Catalog"></aside>
   </div>
   <script type="module" src="viewer/viewer.mjs"></script>
 </body>

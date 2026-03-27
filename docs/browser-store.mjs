@@ -869,6 +869,25 @@ function catalogPieceMetadata(assetId, version) {
 }
 
 /**
+ * @param {Record<string, unknown> | null} doc Published `meta.json` object
+ * @returns {string}
+ */
+function posterUrlFromPublishedMetaDoc(doc) {
+  if (!doc) return "";
+  const poster = doc.poster;
+  if (poster && typeof poster === "object" && poster !== null) {
+    const u = /** @type {{ url?: string }} */ (poster).url;
+    if (typeof u === "string" && u.trim() !== "") return u.trim();
+  }
+  const pb = doc.playback;
+  if (pb && typeof pb === "object" && pb !== null) {
+    const u = /** @type {{ posterUrl?: string }} */ (pb).posterUrl;
+    if (typeof u === "string" && u.trim() !== "") return u.trim();
+  }
+  return "";
+}
+
+/**
  * @param {BrowserFilstreamUploadSession} session
  * @returns {Promise<{ catalogVersion: number | null, catalogPieceCid: string | null }>}
  */
@@ -880,6 +899,8 @@ async function appendFilstreamCatalogPiece(session) {
   }
 
   let title = "Untitled";
+  /** @type {string} */
+  let posterUrl = "";
   try {
     const metaFile = session.textFiles.get("meta.json");
     if (metaFile) {
@@ -889,13 +910,14 @@ async function appendFilstreamCatalogPiece(session) {
           ? /** @type {{ title?: string }} */ (doc.listing).title
           : undefined;
       if (typeof t === "string" && t.trim()) title = t.trim();
+      posterUrl = posterUrlFromPublishedMetaDoc(doc);
     }
   } catch {
     /* ignore */
   }
 
   let nextVer = 0;
-  /** @type {{ title: string, metapath: string }[]} */
+  /** @type {{ title: string, metapath: string, posterUrl?: string }[]} */
   let movies = [];
   let bestVer = -1;
   /** @type {unknown} */
@@ -935,7 +957,12 @@ async function appendFilstreamCatalogPiece(session) {
     }
   }
 
-  movies.push({ title, metapath: metaUrl });
+  /** @type {{ title: string, metapath: string, posterUrl?: string }} */
+  const entry = { title, metapath: metaUrl };
+  if (posterUrl !== "") {
+    entry.posterUrl = posterUrl;
+  }
+  movies.push(entry);
   const doc = { kind: "filstream v1", movies };
   let text = JSON.stringify(doc, null, 2);
   const enc = new TextEncoder();
