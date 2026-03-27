@@ -629,6 +629,173 @@ export async function publishFilstreamCatalogJson(input) {
   return { pieceCid, catalogVersion: nextVersion };
 }
 
+const CREATOR_POSTER_FS_NAME = "filstream_creator_poster";
+
+/**
+ * @param {string} assetId
+ */
+function creatorPosterPieceMetadata(assetId) {
+  return validatePieceMetadata({
+    FS_ASSET: assetId,
+    FS_VAR: "root",
+    FS_NAME: CREATOR_POSTER_FS_NAME,
+  });
+}
+
+/**
+ * @param {Uint8Array} bytes
+ * @returns {Uint8Array}
+ */
+function padBytesToMinPiece(bytes) {
+  if (bytes.byteLength >= SYNAPSE_MIN_PIECE_BYTES) {
+    return bytes;
+  }
+  const out = new Uint8Array(SYNAPSE_MIN_PIECE_BYTES);
+  out.set(bytes);
+  return out;
+}
+
+/**
+ * Upload a creator channel poster image as a single PDP piece and return its retrieval URL.
+ *
+ * @param {{
+ *   context: import("@filoz/synapse-sdk/storage").StorageContext,
+ *   synapse: import("@filoz/synapse-sdk").Synapse,
+ *   bytes: Uint8Array,
+ *   assetId: string,
+ * }} input
+ * @returns {Promise<{ pieceCid: string, retrievalUrl: string }>}
+ */
+export async function publishCreatorPosterImage(input) {
+  const { context, bytes, assetId } = input;
+  if (!context || typeof context.store !== "function") {
+    throw new StoreError(500, "Storage context.store is unavailable");
+  }
+  if (!assetId || typeof assetId !== "string") {
+    throw new StoreError(400, "assetId is required for creator poster piece");
+  }
+  const buf = padBytesToMinPiece(bytes);
+  if (buf.byteLength > SYNAPSE_MAX_PIECE_BYTES) {
+    throw new StoreError(400, "Image exceeds maximum piece size for PDP");
+  }
+  const storeResult = await context.store(buf);
+  const pieceRef = storeResult?.pieceCid;
+  if (!pieceRef) {
+    throw new StoreError(500, "store() response is missing pieceCid");
+  }
+  const metadata = creatorPosterPieceMetadata(assetId);
+  if (typeof context.commit !== "function") {
+    throw new StoreError(500, "Storage context.commit is unavailable");
+  }
+  await context.commit({
+    pieces: [{ pieceCid: pieceRef, pieceMetadata: metadata }],
+  });
+  const retrievalUrl = await getPieceRetrievalUrl(context, pieceRef);
+  if (!retrievalUrl) {
+    throw new StoreError(500, "No retrieval URL for creator poster piece");
+  }
+  return { pieceCid: String(pieceRef), retrievalUrl };
+}
+
+const DEFERRED_PIECE_DELETE_STORAGE_KEY = "filstream_deferred_piece_delete_v1";
+
+/**
+ * @returns {{ dataSetId: number, pieceCid: string, notBeforeMs: number }[]}
+ */
+function readDeferredPieceDeletes() {
+  try {
+    if (typeof localStorage === "undefined") {
+      return [];
+    }
+    const raw = localStorage.getItem(DEFERRED_PIECE_DELETE_STORAGE_KEY);
+    if (!raw) {
+      return [];
+    }
+    const p = JSON.parse(raw);
+    if (!Array.isArray(p)) {
+      return [];
+    }
+    return p.filter(
+      (x) =>
+        x &&
+        typeof x === "object" &&
+        typeof x.pieceCid === "string" &&
+        typeof x.dataSetId === "number" &&
+        Number.isFinite(x.notBeforeMs),
+    );
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * @param {{ dataSetId: number, pieceCid: string, notBeforeMs: number }[]} list
+ */
+function writeDeferredPieceDeletes(list) {
+  try {
+    if (typeof localStorage !== "undefined") {
+      localStorage.setItem(DEFERRED_PIECE_DELETE_STORAGE_KEY, JSON.stringify(list));
+    }
+  } catch {
+    /* quota / private mode */
+  }
+}
+
+/**
+ * Queue PDP deletion of `pieceCid` on `dataSetId` after `delayMs` (wall clock).
+ * {@link flushDeferredPieceDeletions} runs the delete when a storage session is available and `notBefore` has passed.
+ *
+ * @param {number} dataSetId
+ * @param {string} pieceCid
+ * @param {number} delayMs
+ */
+export function enqueueDeferredPieceDeletion(dataSetId, pieceCid, delayMs) {
+  if (!Number.isFinite(dataSetId) || !pieceCid || typeof pieceCid !== "string") {
+    return;
+  }
+  const notBeforeMs = Date.now() + Math.max(0, delayMs);
+  const list = readDeferredPieceDeletes().filter(
+    (x) => !(x.dataSetId === dataSetId && x.pieceCid === pieceCid),
+  );
+  list.push({ dataSetId, pieceCid, notBeforeMs });
+  writeDeferredPieceDeletes(list);
+}
+
+/**
+ * Delete any deferred pieces for `dataSetId` whose time has passed (requires an active storage context).
+ *
+ * @param {{
+ *   context: import("@filoz/synapse-sdk/storage").StorageContext,
+ *   dataSetId: number,
+ * }} input
+ */
+export async function flushDeferredPieceDeletions(input) {
+  const { context, dataSetId } = input;
+  if (!context || typeof context.deletePiece !== "function") {
+    return;
+  }
+  const list = readDeferredPieceDeletes();
+  const remaining = [];
+  const now = Date.now();
+  for (const item of list) {
+    if (item.dataSetId !== dataSetId) {
+      remaining.push(item);
+      continue;
+    }
+    if (item.notBeforeMs > now) {
+      remaining.push(item);
+      continue;
+    }
+    try {
+      await deletePiece(context, item.pieceCid);
+    } catch (e) {
+      console.warn("[filstream] deferred piece delete failed", item.pieceCid, e);
+      remaining.push(item);
+    }
+  }
+  writeDeferredPieceDeletes(remaining);
+}
+
 /**
  * Schedule PDP deletion for every piece with `FS_ASSET === assetId`, except `filstream_catalog.json` catalog pieces.
  *

@@ -120,22 +120,6 @@ body {
   color: var(--fg);
 }
 
-.creator-connect-wallet {
-  font: inherit;
-  font-size: 0.85rem;
-  padding: 0.35rem 0.75rem;
-  border-radius: 8px;
-  border: 1px solid #5f6368;
-  background: #282c34;
-  color: #e8eaed;
-  cursor: pointer;
-}
-
-.creator-connect-wallet:hover {
-  background: #323742;
-  border-color: #7c8187;
-}
-
 .creator-hero {
   display: flex;
   gap: 1.25rem;
@@ -285,7 +269,7 @@ body {
   color: var(--muted);
 }
 
-.creator-field input {
+.creator-field input:not([type="hidden"]) {
   font: inherit;
   font-size: 0.92rem;
   padding: 0.4rem 0.55rem;
@@ -293,6 +277,41 @@ body {
   border: 1px solid #5f6368;
   background: #1a1d24;
   color: var(--fg);
+}
+
+.creator-poster-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem 0.75rem;
+  margin-top: 0.15rem;
+}
+
+.creator-poster-btn {
+  font: inherit;
+  font-size: 0.88rem;
+  padding: 0.35rem 0.75rem;
+  border-radius: 6px;
+  border: 1px solid #5f6368;
+  background: #1a1d24;
+  color: var(--fg);
+  cursor: pointer;
+}
+
+.creator-poster-btn:hover:not(:disabled) {
+  background: #282c34;
+}
+
+.creator-poster-btn:disabled {
+  opacity: 0.65;
+  cursor: not-allowed;
+}
+
+.creator-poster-status {
+  font-size: 0.82rem;
+  color: var(--muted);
+  min-width: 0;
+  flex: 1;
 }
 
 .creator-movie-editor-head {

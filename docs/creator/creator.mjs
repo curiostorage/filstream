@@ -9,9 +9,12 @@
 import {
   createSynapseForSession,
   deleteAllPiecesForAssetId,
+  enqueueDeferredPieceDeletion,
   fetchLatestCatalogJsonForDataSet,
+  flushDeferredPieceDeletions,
   getPieceRetrievalUrl,
   openDataSetContextForCatalog,
+  publishCreatorPosterImage,
   publishFilstreamCatalogJson,
 } from "../browser-store.mjs";
 import { moviesFromCatalog, viewerHrefForMeta } from "../filstream-catalog-shared.mjs";
@@ -27,18 +30,19 @@ if (brandMount) {
 const statusEl = document.getElementById("creator-status");
 const heroEl = document.getElementById("creator-hero");
 const posterImg = document.getElementById("creator-poster");
+const posterUrlInput = document.getElementById("creator-poster-url");
+const posterFileInput = document.getElementById("creator-poster-file");
+const posterBrowseBtn = document.getElementById("creator-poster-browse");
+const posterUploadStatus = document.getElementById("creator-poster-status");
 const titleEl = document.getElementById("creator-title");
 const datasetLabel = document.getElementById("creator-dataset-label");
 const identityEl = document.getElementById("creator-identity");
-const walletBlock = document.getElementById("creator-wallet-block");
 const roleLabel = document.getElementById("creator-role-label");
-const connectBtn = document.getElementById("creator-connect-wallet");
 const editSection = document.getElementById("creator-edit-section");
 const editHint = document.getElementById("creator-edit-hint");
 const enableEditBtn = document.getElementById("creator-enable-edit");
 const editForm = document.getElementById("creator-edit-form");
 const nameInput = document.getElementById("creator-name-input");
-const posterInput = document.getElementById("creator-poster-input");
 const saveBtn = document.getElementById("creator-save-btn");
 const saveStatus = document.getElementById("creator-save-status");
 const movieEditList = document.getElementById("creator-movie-edit-list");
@@ -68,6 +72,23 @@ let moviesState = [];
 let loadedCatalogRoot = null;
 
 let saveBusy = false;
+
+/** Wall-clock delay before deleting a replaced creator-poster PDP piece (processed on next session). */
+const CREATOR_POSTER_REPLACE_DELETE_DELAY_MS = 7 * 24 * 60 * 60 * 1000;
+
+/**
+ * @param {number} dataSetId
+ * @returns {string}
+ */
+function creatorPosterPieceStorageKey(dataSetId) {
+  return `filstream_creator_poster_piece_${dataSetId}`;
+}
+
+function setPosterUploadStatus(msg) {
+  if (posterUploadStatus) {
+    posterUploadStatus.textContent = msg;
+  }
+}
 
 function setStatus(msg, kind) {
   if (!statusEl) return;
@@ -145,21 +166,9 @@ async function refreshConnectedAccount() {
   }
 }
 
-function initWalletConnect() {
+function initWalletListeners() {
   const eth = window.ethereum;
-  if (!connectBtn || !eth || typeof eth.request !== "function") return;
-  connectBtn.addEventListener("click", async () => {
-    try {
-      const accounts = /** @type {string[]} */ (
-        await eth.request({ method: "eth_requestAccounts" })
-      );
-      connectedAddress = accounts?.[0] ?? null;
-      refreshWalletRole();
-      refreshEditVisibility();
-    } catch {
-      /* user rejected */
-    }
-  });
+  if (!eth || typeof eth.request !== "function") return;
   if (typeof eth.on === "function") {
     eth.on("accountsChanged", (accs) => {
       const a = Array.isArray(accs) ? accs[0] : null;
@@ -234,22 +243,34 @@ function refreshEditVisibility() {
   editSection.hidden = false;
   if (!editor) {
     editHint.textContent =
-      "Connect with the catalog editor wallet to reorder entries, edit the channel name, or remove movies.";
-    enableEditBtn.hidden = true;
+      "Use “Sign in to edit” with the wallet that published this catalog (the editor address on-chain).";
+    if (enableEditBtn) {
+      enableEditBtn.hidden = false;
+      enableEditBtn.textContent = "Sign in to edit";
+    }
     editForm.hidden = true;
     return;
   }
   editHint.textContent = storageReady
     ? "Edits are saved as a new on-chain catalog piece. Removing a movie deletes its PDP pieces first, then updates the catalog."
-    : "Authorize a storage session (same as the upload wizard) to edit this catalog on-chain.";
+    : "Next: sign the storage session (same as the upload wizard) so PDP accepts catalog edits.";
+  if (enableEditBtn) {
+    enableEditBtn.textContent = "Sign in to edit";
+  }
   enableEditBtn.hidden = storageReady;
   editForm.hidden = !storageReady;
-  if (storageReady && nameInput && posterInput) {
+  if (storageReady && nameInput && posterUrlInput) {
     const cn = loadedCatalogRoot && /** @type {{ creatorName?: unknown }} */ (loadedCatalogRoot).creatorName;
     const cpu =
       loadedCatalogRoot && /** @type {{ creatorPosterUrl?: unknown }} */ (loadedCatalogRoot).creatorPosterUrl;
     nameInput.value = typeof cn === "string" ? cn : "";
-    posterInput.value = typeof cpu === "string" ? cpu : "";
+    posterUrlInput.value = typeof cpu === "string" ? cpu : "";
+  }
+  if (posterBrowseBtn) {
+    posterBrowseBtn.disabled = !storageReady;
+  }
+  if (!storageReady) {
+    setPosterUploadStatus("");
   }
 }
 
@@ -262,7 +283,7 @@ function buildPublishDoc() {
     throw new Error("Catalog has no editorAddress");
   }
   const cn = nameInput?.value?.trim() ?? "";
-  const cpu = posterInput?.value?.trim() ?? "";
+  const cpu = posterUrlInput?.value?.trim() ?? "";
   /** @type {Record<string, unknown>} */
   const doc = {
     kind: "filstream v1",
@@ -304,9 +325,9 @@ async function handleSaveCatalog() {
     const newCatalogUrl = await getPieceRetrievalUrl(storageContext, pieceCid);
     if (newCatalogUrl) {
       catalogUrl = newCatalogUrl;
-      if (catalogIdentity?.dataSetId != null) {
-        replaceBrowserUrlForCatalog(catalogUrl, catalogIdentity.dataSetId);
-      }
+      if (saveStatus) saveStatus.textContent = "Saved.";
+      navigateCreatorPageToCatalog(newCatalogUrl, catalogIdentity?.dataSetId ?? null);
+      return;
     }
     renderMovieLists();
     if (saveStatus) saveStatus.textContent = "Saved.";
@@ -524,7 +545,6 @@ function applyCatalogIdentity(doc) {
   if (!catalogIdentity) {
     datasetLabel.textContent =
       "This catalog has no dataSetId, providerId, chainId, or editorAddress fields.";
-    if (connectBtn) connectBtn.hidden = true;
     return;
   }
 
@@ -540,9 +560,6 @@ function applyCatalogIdentity(doc) {
   }
   datasetLabel.textContent = parts.length ? parts.join(" · ") : "Catalog";
 
-  if (connectBtn) {
-    connectBtn.hidden = !catalogIdentity.editorAddress || !window.ethereum;
-  }
   void refreshConnectedAccount();
   refreshWalletRole();
   refreshEditVisibility();
@@ -577,6 +594,21 @@ function replaceBrowserUrlForCatalog(catalogUrlStr, dataSetId) {
     u.searchParams.set("dataset", String(dataSetId));
   }
   history.replaceState({}, "", u);
+}
+
+/**
+ * Full navigation to `creator.html` with the saved catalog piece URL (reloads so the page matches the new `?catalog=`).
+ *
+ * @param {string} catalogUrlStr
+ * @param {number | null} dataSetId
+ */
+function navigateCreatorPageToCatalog(catalogUrlStr, dataSetId) {
+  const u = new URL(window.location.href);
+  u.searchParams.set("catalog", catalogUrlStr);
+  if (dataSetId != null && Number.isFinite(dataSetId) && dataSetId >= 0) {
+    u.searchParams.set("dataset", String(dataSetId));
+  }
+  window.location.replace(u.href);
 }
 
 /**
@@ -617,16 +649,44 @@ async function upgradeCatalogFromChainIfNewer() {
   }
 }
 
-async function handleEnableEditing() {
+async function handleSignInToEdit() {
   const eth = window.ethereum;
-  if (!eth || !connectedAddress || !catalogIdentity?.dataSetId || !catalogIdentity.providerId) {
+  if (!eth || !catalogIdentity?.dataSetId || !catalogIdentity.providerId || !catalogIdentity.editorAddress) {
     return;
   }
+
+  if (sessionPrivateKey && synapseRef && storageContext) {
+    refreshEditVisibility();
+    return;
+  }
+
   if (enableEditBtn) {
     enableEditBtn.disabled = true;
-    enableEditBtn.textContent = "Authorizing…";
+    enableEditBtn.textContent = connectedAddress ? "Authorizing…" : "Connecting…";
   }
+  if (saveStatus) saveStatus.textContent = "";
+
   try {
+    if (!connectedAddress) {
+      const accounts = /** @type {string[]} */ (
+        await eth.request({ method: "eth_requestAccounts" })
+      );
+      connectedAddress = accounts?.[0] ?? null;
+      refreshWalletRole();
+    }
+
+    if (!connectedAddress) {
+      return;
+    }
+
+    if (!sameEthAddress(connectedAddress, catalogIdentity.editorAddress)) {
+      if (saveStatus) {
+        saveStatus.textContent =
+          "This wallet is not the catalog editor. Switch accounts in your wallet, then try Sign in to edit again.";
+      }
+      return;
+    }
+
     const auth = await authorizeSessionKeyForUpload(eth, connectedAddress, {});
     sessionPrivateKey = auth.sessionPrivateKey;
     sessionExpirations = auth.sessionExpirations;
@@ -648,25 +708,28 @@ async function handleEnableEditing() {
       dataSetId: catalogIdentity.dataSetId,
       catalogChainId: catalogIdentity.chainId,
     });
-    if (enableEditBtn) {
-      enableEditBtn.textContent = "Enable editing";
-      enableEditBtn.disabled = false;
-    }
+    await flushDeferredPieceDeletions({
+      context: storageContext,
+      dataSetId: catalogIdentity.dataSetId,
+    });
     refreshEditVisibility();
     renderMovieLists();
   } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    if (saveStatus) saveStatus.textContent = `Sign-in failed: ${msg}`;
+  } finally {
     if (enableEditBtn) {
       enableEditBtn.disabled = false;
-      enableEditBtn.textContent = "Enable editing";
+      enableEditBtn.textContent = "Sign in to edit";
     }
-    const msg = e instanceof Error ? e.message : String(e);
-    if (saveStatus) saveStatus.textContent = `Session failed: ${msg}`;
+    refreshWalletRole();
+    refreshEditVisibility();
   }
 }
 
 function wireEditControls() {
   if (enableEditBtn) {
-    enableEditBtn.addEventListener("click", () => void handleEnableEditing());
+    enableEditBtn.addEventListener("click", () => void handleSignInToEdit());
   }
   if (saveBtn) {
     saveBtn.addEventListener("click", () => void handleSaveCatalog());
@@ -678,8 +741,82 @@ function wireEditControls() {
   }
 }
 
-initWalletConnect();
+/**
+ * @param {File} file
+ */
+async function handleCreatorPosterFileSelected(file) {
+  if (!storageContext || !synapseRef || !catalogIdentity?.dataSetId) {
+    setPosterUploadStatus("Sign in to edit first (wallet + storage session).");
+    return;
+  }
+  if (!file.type.startsWith("image/")) {
+    setPosterUploadStatus("Choose an image file.");
+    return;
+  }
+  const ds = catalogIdentity.dataSetId;
+  setPosterUploadStatus("Uploading…");
+  try {
+    const buf = new Uint8Array(await file.arrayBuffer());
+    const assetId =
+      typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+        ? crypto.randomUUID()
+        : `poster_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+    const { pieceCid, retrievalUrl } = await publishCreatorPosterImage({
+      context: storageContext,
+      synapse: synapseRef,
+      bytes: buf,
+      assetId,
+    });
+    const key = creatorPosterPieceStorageKey(ds);
+    const prevCid = (() => {
+      try {
+        return localStorage.getItem(key);
+      } catch {
+        return null;
+      }
+    })();
+    if (prevCid && prevCid !== pieceCid) {
+      enqueueDeferredPieceDeletion(ds, prevCid, CREATOR_POSTER_REPLACE_DELETE_DELAY_MS);
+    }
+    try {
+      localStorage.setItem(key, pieceCid);
+    } catch {
+      /* private mode */
+    }
+    if (posterUrlInput) {
+      posterUrlInput.value = retrievalUrl;
+    }
+    if (loadedCatalogRoot && typeof loadedCatalogRoot === "object") {
+      loadedCatalogRoot.creatorPosterUrl = retrievalUrl;
+    }
+    await applyHeroFromDoc(loadedCatalogRoot ?? {});
+    setPosterUploadStatus("Poster uploaded. Save catalog to publish.");
+    await flushDeferredPieceDeletions({ context: storageContext, dataSetId: ds });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    setPosterUploadStatus(`Upload failed: ${msg}`);
+  }
+}
+
+function wirePosterControls() {
+  if (posterBrowseBtn && posterFileInput) {
+    posterBrowseBtn.addEventListener("click", () => {
+      if (posterBrowseBtn.disabled) return;
+      posterFileInput.click();
+    });
+    posterFileInput.addEventListener("change", () => {
+      const f = posterFileInput.files?.[0];
+      posterFileInput.value = "";
+      if (f) {
+        void handleCreatorPosterFileSelected(f);
+      }
+    });
+  }
+}
+
+initWalletListeners();
 wireEditControls();
+wirePosterControls();
 
 const params = new URLSearchParams(window.location.search);
 const catalogUrlRaw = params.get("catalog");

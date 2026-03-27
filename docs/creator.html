@@ -33,16 +33,13 @@
     >
       <div class="creator-wallet-row" id="creator-wallet-block">
         <span class="creator-role" id="creator-role-label" aria-live="polite"></span>
-        <button type="button" id="creator-connect-wallet" class="creator-connect-wallet" hidden>
-          Connect wallet
-        </button>
       </div>
     </section>
 
     <section id="creator-edit-section" class="creator-edit-section" hidden aria-label="Edit catalog">
       <p class="creator-edit-hint" id="creator-edit-hint"></p>
       <button type="button" id="creator-enable-edit" class="creator-primary-btn" hidden>
-        Enable editing
+        Sign in to edit
       </button>
       <div id="creator-edit-form" class="creator-edit-form" hidden>
         <label class="creator-field">
@@ -50,8 +47,21 @@
           <input type="text" id="creator-name-input" autocomplete="off" />
         </label>
         <label class="creator-field">
-          <span>Creator poster URL (https)</span>
-          <input type="url" id="creator-poster-input" autocomplete="off" placeholder="https://…" />
+          <span>Creator poster</span>
+          <input type="hidden" id="creator-poster-url" value="" autocomplete="off" />
+          <div class="creator-poster-row">
+            <input
+              type="file"
+              id="creator-poster-file"
+              class="creator-poster-file"
+              accept="image/*"
+              hidden
+            />
+            <button type="button" id="creator-poster-browse" class="creator-poster-btn">
+              Browse…
+            </button>
+            <span class="creator-poster-status" id="creator-poster-status" aria-live="polite"></span>
+          </div>
         </label>
         <div class="creator-movie-editor-head">
           <span>Movies (order = catalog order, oldest first)</span>
