@@ -471,15 +471,21 @@ async function convertToFmp4Segments(
       target: new NullTarget(),
     });
 
-    const conversion = await Conversion.init({
-      input,
-      output,
-      video: videoBlock,
-      audio: audioCodec
-        ? { codec: audioCodec, bitrate: 128_000 }
-        : { discard: true },
-      showWarnings: false,
-    });
+    /** Mediabunny probes the encoder inside `Conversion.init`; failures must not reject here or VP9 HW retries never run. */
+    let conversion;
+    try {
+      conversion = await Conversion.init({
+        input,
+        output,
+        video: videoBlock,
+        audio: audioCodec
+          ? { codec: audioCodec, bitrate: 128_000 }
+          : { discard: true },
+        showWarnings: false,
+      });
+    } catch (error) {
+      return { ok: false, phase: "execute", error };
+    }
 
     if (!conversion.isValid) {
       const reasons = conversion.discardedTracks
