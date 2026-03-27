@@ -35,6 +35,7 @@ import {
   buildReviewViewerIframeSrc,
   ensureFilstreamId,
   getFilstreamStoreConfig,
+  resolveMetaJsonUrlFromFinalize,
 } from "./filstream-config.mjs";
 import {
   donateConfigFromMeta,
@@ -66,7 +67,7 @@ import {
 
 const WIZARD_MAX_STEP = 5;
 
-/** PDP finalize phase copy; must match {@link finalizeStoreUpload} and convert-progress highlight. */
+/** PDP finalize phase copy; shown under the upload bar while {@link finalizeStoreUpload} runs. */
 const STORE_PHASE_FINALIZE_NOTE =
   "Finalizing playlists, manifest, and on-chain commit…";
 
@@ -120,11 +121,6 @@ const storeRuntime = {
 /** Single in-flight funding preflight for step 2 (session + wallet + source file). */
 let fundingPreflightPromise = null;
 
-/** Resolves when the user answers the inline funding confirmation (replaces `window.confirm`). */
-let fundingPromptResolve = null;
-
-/** Resolves when the user answers the inline session-setup confirmation (replaces `window.confirm`). */
-let setupConfirmResolve = null;
 
 /** PDP ingest is deferred until Fund wallet + session key exist; backlog preserves segment order (no cap / drops). */
 /** @type {{ eventType: string, detail: unknown }[]} */
@@ -188,6 +184,34 @@ function fundStepSessionAuthReady() {
   return readStoreSessionAuth() != null;
 }
 
+/** Fund step complete: ready to advance to Define (minimal wallet UI only). */
+function fundStepGateComplete() {
+  return (
+    fundStepSessionAuthReady() &&
+    wizardState.fundingReady &&
+    !wizardState.sessionAuthBusy &&
+    !wizardState.fundingBusy &&
+    !wizardState.fundingError &&
+    !wizardState.sessionAuthError
+  );
+}
+
+/**
+ * When Fund needs a session key, start authorization automatically (wallet opens with explainer).
+ */
+function scheduleFundStepSessionAuthorizeIfNeeded() {
+  if (wizardState.step !== 2) return;
+  if (!wizardState.walletAddress || !wizardState.eip1193Provider) return;
+  if (fundStepSessionAuthReady()) return;
+  if (wizardState.sessionAuthBusy) return;
+  queueMicrotask(() => {
+    if (wizardState.step !== 2) return;
+    if (fundStepSessionAuthReady()) return;
+    if (wizardState.sessionAuthBusy) return;
+    void handleAuthorizeSession({ force: false });
+  });
+}
+
 function resetFundingGateState() {
   wizardState.fundingBusy = false;
   wizardState.fundingReady = false;
@@ -195,22 +219,6 @@ function resetFundingGateState() {
   wizardState.fundingSummary = "";
   wizardState.fundingTxHash = "";
   wizardState.fundingCheckKey = "";
-  wizardState.fundingPrompt = null;
-  if (fundingPromptResolve) {
-    const r = fundingPromptResolve;
-    fundingPromptResolve = null;
-    r(false);
-  }
-  resetSetupConfirmState();
-}
-
-function resetSetupConfirmState() {
-  wizardState.setupConfirmPrompt = null;
-  if (setupConfirmResolve) {
-    const r = setupConfirmResolve;
-    setupConfirmResolve = null;
-    r(false);
-  }
 }
 
 /**
@@ -337,21 +345,14 @@ async function ensureFundingPreparedForCurrentUpload(force = false) {
       const availableFunds = BigInt(await synapse.payments.balance());
       const fundingShortfall =
         targetDeposit > availableFunds ? targetDeposit - availableFunds : 0n;
-      const expected = formatWeiAsUsdfc(expectedDeposit);
       const target = formatWeiAsUsdfc(targetDeposit);
       const available = formatWeiAsUsdfc(availableFunds);
       const shortfall = formatWeiAsUsdfc(fundingShortfall);
       const needsFwssMaxApproval = prepared.costs?.needsFwssMaxApproval === true;
-      const authCopy = needsFwssMaxApproval
-        ? "This includes FilecoinPay operator approval (FWSS)."
-        : "Operator approval is already in place.";
-      const bufferCopy =
-        expectedDeposit === 0n
-          ? "Estimated required deposit is zero, but FilStream still targets a minimum 5 USDFC available balance as safety buffer."
-          : "";
+      const needsTopUp = fundingShortfall > 0n;
       if (fundingShortfall === 0n && !needsFwssMaxApproval) {
         wizardState.fundingSummary =
-          "Funding and approvals are already ready for this upload.";
+          "FilecoinPay balance and approvals are already sufficient for this upload.";
         wizardState.fundingReady = true;
         wizardState.fundingCheckKey = fundingKey;
         wizardState.fundingError = null;
@@ -359,31 +360,19 @@ async function ensureFundingPreparedForCurrentUpload(force = false) {
         maybeAutoAdvanceFromFund();
         return;
       }
-      wizardState.fundingPrompt = {
-        headline:
-          "Funding or approval is required before upload can continue. Review the amounts below, then continue or cancel upload setup.",
-        lines: [
-          `Estimated required deposit: ${expected}`,
-          `Target available balance (max(5 USDFC, 120% of estimate)): ${target}`,
-          `Current available balance (FilecoinPay): ${available}`,
-          `Required top-up now: ${shortfall}`,
-          authCopy,
-          ...(bufferCopy ? [bufferCopy] : []),
-        ],
-      };
-      const ok = await new Promise((resolve) => {
-        fundingPromptResolve = resolve;
-        wizardState.fundingBusy = false;
-        renderWizard();
-      });
-      wizardState.fundingPrompt = null;
-      fundingPromptResolve = null;
-      if (!ok) {
-        return;
-      }
-      wizardState.fundingBusy = true;
-      wizardState.fundingSummary =
-        "Upfront funding transaction submitted — waiting for chain confirmation…";
+      const bufferNote =
+        expectedDeposit === 0n && needsTopUp
+          ? " (Min buffer — deposit estimate for this file is 0.)"
+          : "";
+      wizardState.fundingSummary = [
+        "FilecoinPay (not the session-key tx): confirm in your wallet.",
+        needsTopUp
+          ? `Top-up up to ${shortfall} toward ${target} (${available} now).${bufferNote}`
+          : "No top-up — operator approval only.",
+        needsFwssMaxApproval ? "First time: approve the storage operator for FilecoinPay." : "",
+      ]
+        .filter(Boolean)
+        .join(" ");
       renderWizard();
       await synapse.payments.fundSync({
         amount: fundingShortfall,
@@ -394,7 +383,7 @@ async function ensureFundingPreparedForCurrentUpload(force = false) {
         },
       });
       wizardState.fundingSummary =
-        "Upfront funding and approvals are ready for this upload.";
+        "FilecoinPay is ready (deposit/approval as needed).";
       wizardState.fundingReady = true;
       wizardState.fundingCheckKey = fundingKey;
       wizardState.fundingError = null;
@@ -427,7 +416,12 @@ function maybeAutoAdvanceFromFund() {
   }
   wizardState.sessionAuthError = null;
   wizardState.fundingError = null;
-  wizardState.step = 3;
+  queueMicrotask(() => {
+    if (wizardState.step !== 2) return;
+    if (!fundStepSessionAuthReady() || !wizardState.fundingReady) return;
+    wizardState.step = 3;
+    renderWizard();
+  });
 }
 
 function computeWizardConvertPhase() {
@@ -487,9 +481,7 @@ async function runFinalizeAfterListingDetail(detail) {
     const finalized = await finalizeStoreUpload();
     const masterUrl =
       typeof finalized?.masterAppUrl === "string" ? finalized.masterAppUrl : "";
-    const metaJsonUrl =
-      typeof finalized?.metaJsonUrl === "string" ? finalized.metaJsonUrl : "";
-    wizardState.reviewMetaJsonUrl = metaJsonUrl;
+    wizardState.reviewMetaJsonUrl = resolveMetaJsonUrlFromFinalize(finalized);
     tryMergePlaybackIntoPublishedMeta(masterUrl);
     wizardState.storeUploadProgressPct = 100;
     wizardState.storeUploadLabel = masterUrl ? "Stored — loading playback…" : "Stored.";
@@ -612,6 +604,7 @@ function attemptRestoreWalletFromStorage(list) {
       }
       wizardState.walletError = null;
       maybeAutoAdvanceFromFund();
+      scheduleFundStepSessionAuthorizeIfNeeded();
       renderWizard();
     } catch {
       /* ignore */
@@ -969,18 +962,6 @@ const wizardState = {
   fundingSummary: "",
   fundingTxHash: "",
   fundingCheckKey: "",
-  /**
-   * Inline confirmation UI (replaces native confirm). Copy-friendly text lines.
-   *
-   * @type {{ headline: string, lines: string[] } | null}
-   */
-  fundingPrompt: null,
-  /**
-   * Inline confirmation before session authorize (replaces native confirm).
-   *
-   * @type {{ headline: string, lines: string[], declineReason: string } | null}
-   */
-  setupConfirmPrompt: null,
   walletBusy: false,
   /** @type {string | null} */
   walletError: null,
@@ -1189,6 +1170,10 @@ async function releaseLocalEncodePreviewPlayer() {
     variantListenerTeardown = null;
   }
   await destroyActivePipelinePlayer();
+  const el = ensureVideoEl();
+  el.removeAttribute("src");
+  el.removeAttribute("poster");
+  el.load();
   wizardState.player = null;
   wizardState.playingResolution = "";
   wizardState.streamMode = "auto";
@@ -1311,54 +1296,14 @@ function handlePosterInput(e) {
 }
 
 /**
- * Shows inline copy-friendly confirm UI; on cancel, aborts setup with `declineReason`.
- *
- * @param {string} message
- * @param {string} declineReason
- * @returns {Promise<boolean>}
+ * @param {{ force?: boolean }} [opts]
+ *   `force` — replace an existing session (Refresh session key).
  */
-function confirmSetupActionOrAbort(message, declineReason) {
-  return new Promise((resolve) => {
-    wizardState.setupConfirmPrompt = {
-      headline: message,
-      lines: [],
-      declineReason,
-    };
-    setupConfirmResolve = resolve;
-    renderWizard();
-  });
-}
-
-function handleSetupConfirmContinue() {
-  if (!setupConfirmResolve) return;
-  const r = setupConfirmResolve;
-  setupConfirmResolve = null;
-  wizardState.setupConfirmPrompt = null;
-  renderWizard();
-  r(true);
-}
-
-async function handleSetupConfirmCancel() {
-  if (!setupConfirmResolve) return;
-  const r = setupConfirmResolve;
-  const declineReason =
-    wizardState.setupConfirmPrompt?.declineReason ??
-    "Session-key authorization declined. Upload canceled.";
-  setupConfirmResolve = null;
-  wizardState.setupConfirmPrompt = null;
-  r(false);
-  await abortUploadSetupFlow(declineReason);
-}
-
-async function handleAuthorizeSession() {
+async function handleAuthorizeSession(opts = {}) {
+  const force = opts.force === true;
   if (!wizardState.eip1193Provider || !wizardState.walletAddress) return;
-  const confirmed = await confirmSetupActionOrAbort(
-    "Authorize a 1-hour upload session key now? If you decline, this upload will be canceled.",
-    "Session-key authorization declined. Upload canceled.",
-  );
-  if (!confirmed) {
-    return;
-  }
+  if (wizardState.sessionAuthBusy) return;
+  if (!force && fundStepSessionAuthReady()) return;
   wizardState.sessionAuthBusy = true;
   wizardState.sessionAuthWaitPhase = "wallet";
   wizardState.sessionAuthError = null;
@@ -1542,35 +1487,7 @@ function handleRefreshWallets() {
 
 async function handleRetryFundingCheck() {
   if (wizardState.step !== 2) return;
-  if (wizardState.fundingPrompt && fundingPromptResolve) {
-    const r = fundingPromptResolve;
-    fundingPromptResolve = null;
-    wizardState.fundingPrompt = null;
-    r(false);
-    if (fundingPreflightPromise) {
-      await fundingPreflightPromise;
-    }
-  }
   await ensureFundingPreparedForCurrentUpload(true);
-}
-
-function handleFundingPromptContinue() {
-  if (!fundingPromptResolve) return;
-  const r = fundingPromptResolve;
-  fundingPromptResolve = null;
-  wizardState.fundingPrompt = null;
-  wizardState.fundingBusy = true;
-  renderWizard();
-  r(true);
-}
-
-async function handleFundingPromptCancel() {
-  if (!fundingPromptResolve) return;
-  const r = fundingPromptResolve;
-  fundingPromptResolve = null;
-  wizardState.fundingPrompt = null;
-  r(false);
-  await abortUploadSetupFlow("Funding authorization declined. Upload canceled.");
 }
 
 /**
@@ -1612,6 +1529,7 @@ async function handleConnectInjected(provider, info) {
     wizardState.walletBusy = false;
     wizardState.connectingUuid = null;
     maybeAutoAdvanceFromFund();
+    scheduleFundStepSessionAuthorizeIfNeeded();
     renderWizard();
   }
 }
@@ -1685,10 +1603,6 @@ function renderWizard() {
           ${wizardState.step === 1
             ? html`
                 <h1>Store your video as streamable on the Filecoin chain.</h1>
-                <p class="hero-price-estimate">
-                  Estimated price: $0.15 per 10 minutes of 1080p video.
-                  Estimated time: 1/3 of the movie run length, plus 1 minute.
-                </p>
                 <section class="wizard-step hero-dropzone-wrap" aria-labelledby="step1-title">
                   <p>Recommended browsers: Chromium-class browsers (Chrome, Edge) with MetaMask or Wallet-Class browsers (Brave, Opera)</p>
                   <p id="step1-title" class="hint">
@@ -1775,8 +1689,12 @@ function renderWizard() {
               <div class="step2-stack">
                 ${wizardState.step === 5
                   ? (() => {
-                      const reviewViewerUrl = wizardState.reviewMetaJsonUrl
-                        ? buildReviewViewerIframeSrc(wizardState.reviewMetaJsonUrl)
+                      /** Static viewer iframe only with `?meta=` — same contract as shared links. */
+                      const reviewMetaUrl =
+                        wizardState.reviewMetaJsonUrl ||
+                        resolveMetaJsonUrlFromFinalize(storeRuntime.finalizeResult);
+                      const reviewViewerUrl = reviewMetaUrl
+                        ? buildReviewViewerIframeSrc(reviewMetaUrl)
                         : null;
                       return html`
                       <section class="publish-broadcast-shell" aria-labelledby="publish-broadcast-title">
@@ -1830,6 +1748,7 @@ function renderWizard() {
                   : null}
                 ${uploadConfigurePanel({
                   show: wizardState.step === 2,
+                  fundGateComplete: fundStepGateComplete(),
                   injectedWallets: wizardState.injectedWallets,
                   walletAddress: wizardState.walletAddress,
                   connectedWalletName: wizardState.connectedWalletName,
@@ -1852,14 +1771,9 @@ function renderWizard() {
                   canAuthorizeSession: Boolean(
                     wizardState.walletAddress && wizardState.eip1193Provider,
                   ),
-                  onAuthorizeSession: handleAuthorizeSession,
+                  onAuthorizeSession: () => handleAuthorizeSession({ force: false }),
+                  onRefreshSessionKey: () => handleAuthorizeSession({ force: true }),
                   onRetryFundingCheck: handleRetryFundingCheck,
-                  fundingPrompt: wizardState.fundingPrompt,
-                  onFundingPromptContinue: handleFundingPromptContinue,
-                  onFundingPromptCancel: handleFundingPromptCancel,
-                  setupConfirmPrompt: wizardState.setupConfirmPrompt,
-                  onSetupConfirmContinue: handleSetupConfirmContinue,
-                  onSetupConfirmCancel: handleSetupConfirmCancel,
                 })}
                 ${convertProgressPanel({
                   show: wizardState.step < 5,
@@ -1884,18 +1798,8 @@ function renderWizard() {
                   awaitListingDescription: wizardState.publishDescription,
                   awaitPosterUrl: wizardState.posterObjectUrl,
                   awaitUploadBannerText: "Upload in progress",
-                  awaitCommitHighlight: (() => {
-                    if (wizardState.step !== 4) return null;
-                    if (!wizardState.storageUploadActive) return null;
-                    const n = wizardState.storeUploadPhaseNote?.trim() ?? "";
-                    return n === STORE_PHASE_FINALIZE_NOTE ? n : null;
-                  })(),
                   awaitPipelineBars: (() => {
                     if (wizardState.step !== 4) return null;
-                    if (wizardState.storageUploadActive) {
-                      const n = wizardState.storeUploadPhaseNote?.trim() ?? "";
-                      if (n === STORE_PHASE_FINALIZE_NOTE) return null;
-                    }
                     const s = storeRuntime.session;
                     const rungN = wizardState.rungs?.length ?? 0;
                     const transcodeDetail =
@@ -1961,13 +1865,21 @@ function renderWizard() {
     syncSourcePreviewSrc();
     const vid = ensureVideoEl();
     if (
-      (wizardState.step === 4 || wizardState.step === 5) &&
+      wizardState.step === 5 &&
       wizardState.progress >= 100 &&
       wizardState.posterObjectUrl
     ) {
       vid.poster = wizardState.posterObjectUrl;
-    } else if (wizardState.step !== 4 && wizardState.step !== 5) {
+    } else if (wizardState.step !== 5) {
       vid.removeAttribute("poster");
+    }
+    if (
+      wizardState.step === 4 &&
+      computeWizardConvertPhase() === "awaiting"
+    ) {
+      vid.removeAttribute("src");
+      vid.removeAttribute("poster");
+      vid.load();
     }
   });
 }
@@ -2066,6 +1978,7 @@ async function onWizardFileChosen(file) {
   ensureInjectedWalletSubscription();
   requestInjectedProviders();
   maybeAutoAdvanceFromFund();
+  scheduleFundStepSessionAuthorizeIfNeeded();
   renderWizard();
 
   runFilstreamPipeline(file, {

@@ -57,8 +57,7 @@ export function formatUploadDateLabel(meta) {
  *   meta: unknown,
  *   videoEl: HTMLVideoElement,
  *   reviewIframeSrc?: string | null,
- *   /** Same URL as the iframe; shown as “Open this video” for sharing. */
- *   reviewViewerPageUrl?: string | null,
+ *   reviewViewerPageUrl?: string | null, // same URL as iframe; “Open this video” link
  *   uploadDateLabel?: string | null,
  *   downloadSourceFile?: File | null,
  *   downloadLabel?: string,

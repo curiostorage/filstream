@@ -702,6 +702,92 @@ function extractPlaybackUrls(files) {
 }
 
 /**
+ * @param {Record<string, unknown>} obj
+ * @returns {Uint8Array}
+ */
+function encodeJsonWithMinPiecePadding(obj) {
+  let text = JSON.stringify(obj, null, 2);
+  const enc = new TextEncoder();
+  let bytes = enc.encode(text);
+  while (bytes.byteLength < SYNAPSE_MIN_PIECE_BYTES) {
+    text += "\n";
+    bytes = enc.encode(text);
+  }
+  return bytes;
+}
+
+/**
+ * Drop uncommitted staged pieces for `path` (e.g. replace draft manifest with final).
+ *
+ * @param {BrowserFilstreamUploadSession} session
+ * @param {string} path
+ */
+function abandonUncommittedStagingByPath(session, path) {
+  for (let i = session.fileMappings.length - 1; i >= 0; i--) {
+    if (session.fileMappings[i].path !== path) continue;
+    const cid = session.fileMappings[i].pieceCid;
+    const p = session.piecesByCid.get(cid);
+    if (p && !p.committed) {
+      p.abandoned = true;
+    }
+    session.fileMappings.splice(i, 1);
+  }
+}
+
+/**
+ * Listing + playback URLs + stable filstream ids for viewers and tools.
+ *
+ * @param {BrowserFilstreamUploadSession} session
+ * @param {{ masterAppUrl: string | null, manifestUrl: string | null }} urls
+ * @returns {Record<string, unknown>}
+ */
+function buildPublishedMetaDocument(session, urls) {
+  const stagingPath =
+    typeof session.listingMetaPath === "string" && session.listingMetaPath.trim() !== ""
+      ? session.listingMetaPath.trim()
+      : "meta.json";
+  const metaFile = session.textFiles.get(stagingPath);
+  if (!metaFile) {
+    throw new StoreError(
+      400,
+      "Listing meta is missing — complete Listing Details before finalize.",
+    );
+  }
+  const base = parseOptionalJsonObject(new TextDecoder().decode(metaFile.data));
+  if (!base) {
+    throw new StoreError(400, "Listing meta (meta.json) is not valid JSON.");
+  }
+  const master = typeof urls.masterAppUrl === "string" ? urls.masterAppUrl.trim() : "";
+  const manifest = typeof urls.manifestUrl === "string" ? urls.manifestUrl.trim() : "";
+  if (!master) {
+    throw new StoreError(500, "Cannot publish meta.json: missing master-app.m3u8 retrieval URL.");
+  }
+  if (!manifest) {
+    throw new StoreError(500, "Cannot publish meta.json: missing manifest.json retrieval URL.");
+  }
+  /** @type {Record<string, unknown>} */
+  const prevPb =
+    typeof base.playback === "object" && base.playback !== null && !Array.isArray(base.playback)
+      ? /** @type {Record<string, unknown>} */ (base.playback)
+      : {};
+  return {
+    ...base,
+    playback: {
+      ...prevPb,
+      masterAppUrl: master,
+      manifestUrl: manifest,
+    },
+    filstream: {
+      assetId: session.assetId,
+      filstreamId: session.filstreamId,
+      dataSetId: session.dataSetId,
+      providerId: session.providerId,
+      clientAddress: session.clientAddress,
+    },
+  };
+}
+
+/**
  * @param {BrowserFilstreamUploadSession} session
  * @param {number} dataSetId
  * @param {bigint} pieceId
@@ -1123,6 +1209,8 @@ export class BrowserFilstreamUploadSession {
     };
     this.transcodeCompleteReceived = false;
     this.listingDetailsReceived = false;
+    /** Staging path for listing JSON (`listingDetails`), default `meta.json`. */
+    this.listingMetaPath = null;
     this.finalized = false;
     /** Concurrent `context.store()` calls (PDP piece uploads). */
     this._pdpUploadsInFlight = 0;
@@ -1702,6 +1790,7 @@ export class BrowserFilstreamUploadSession {
       typeof d.metaPath === "string" && d.metaPath.trim() !== ""
         ? d.metaPath.trim()
         : "meta.json";
+    this.listingMetaPath = metaPath;
     if (typeof d.metaJsonText === "string" && d.metaJsonText.trim() !== "") {
       this.textFiles.set(metaPath, {
         path: metaPath,
@@ -1801,12 +1890,12 @@ export class BrowserFilstreamUploadSession {
     const livePieces = [...this.piecesByCid.values()].filter((p) => !p.abandoned);
     const livePieceSet = new Set(livePieces.map((p) => p.pieceCid));
     const files = this.fileMappings.filter((f) => livePieceSet.has(f.pieceCid));
-    const metaFile = this.textFiles.get("meta.json");
-    const metaDoc =
-      metaFile != null
-        ? parseOptionalJsonObject(new TextDecoder().decode(metaFile.data))
-        : null;
     const playback = extractPlaybackUrls(files);
+    /** @type {Record<string, string>} */
+    const playbackOut = {};
+    if (playback.masterAppUrl) playbackOut.masterAppUrl = playback.masterAppUrl;
+    if (playback.manifestUrl) playbackOut.manifestUrl = playback.manifestUrl;
+    if (playback.metaJsonUrl) playbackOut.metaJsonUrl = playback.metaJsonUrl;
     return {
       version: 1,
       createdAt: new Date().toISOString(),
@@ -1815,9 +1904,7 @@ export class BrowserFilstreamUploadSession {
       clientAddress: this.clientAddress,
       providerId: this.providerId,
       dataSetId: this.dataSetId,
-      playback: {
-        masterAppUrl: playback.masterAppUrl,
-      },
+      playback: playbackOut,
       eventCounts: { ...this.eventCounts },
       transcodeCompleteReceived: this.transcodeCompleteReceived,
       listingDetailsReceived: this.listingDetailsReceived,
@@ -1841,7 +1928,6 @@ export class BrowserFilstreamUploadSession {
         sequence: f.sequence,
         segmentIndex: f.segmentIndex,
       })),
-      meta: metaDoc,
     };
   }
 
@@ -1951,13 +2037,42 @@ export class BrowserFilstreamUploadSession {
     if (master) {
       await this.storeStagedFile(master);
     }
-    const manifestDoc = this.buildManifest();
-    const manifestText = JSON.stringify(manifestDoc, null, 2);
+    const manifestDraft = this.buildManifest();
+    const manifestDraftText = JSON.stringify(manifestDraft, null, 2);
     await this.storeStagedFile({
       path: "manifest.json",
       mimeType: "application/json",
-      data: new TextEncoder().encode(manifestText),
+      data: new TextEncoder().encode(manifestDraftText),
     });
+
+    const liveForMetaUrls = this.fileMappings.filter((f) => {
+      const p = this.piecesByCid.get(f.pieceCid);
+      return p != null && !p.abandoned;
+    });
+    const urlsForMeta = extractPlaybackUrls(liveForMetaUrls);
+    const publishedMeta = buildPublishedMetaDocument(this, urlsForMeta);
+    const metaBytes = encodeJsonWithMinPiecePadding(publishedMeta);
+    this.textFiles.set("meta.json", {
+      path: "meta.json",
+      mimeType: "application/json",
+      data: metaBytes,
+    });
+    await this.storeStagedFile({
+      path: "meta.json",
+      mimeType: "application/json",
+      data: metaBytes,
+    });
+
+    abandonUncommittedStagingByPath(this, "manifest.json");
+
+    const manifestFinal = this.buildManifest();
+    const manifestFinalText = JSON.stringify(manifestFinal, null, 2);
+    await this.storeStagedFile({
+      path: "manifest.json",
+      mimeType: "application/json",
+      data: new TextEncoder().encode(manifestFinalText),
+    });
+
     /** @type {{ catalogVersion: number | null, catalogPieceCid: string | null }} */
     let catalogOut = { catalogVersion: null, catalogPieceCid: null };
     try {

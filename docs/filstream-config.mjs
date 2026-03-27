@@ -128,6 +128,47 @@ export function buildReviewViewerIframeSrc(metaJsonUrl) {
 }
 
 /**
+ * Absolute retrieval URL for `meta.json` from finalize output, or the same directory as
+ * `manifest.json` / `master-app.m3u8` when the PDP response omits `metaJsonUrl`.
+ *
+ * @param {null | { metaJsonUrl?: string | null, manifestUrl?: string | null, masterAppUrl?: string | null }} result
+ * @returns {string}
+ */
+export function resolveMetaJsonUrlFromFinalize(result) {
+  if (!result) return "";
+  const direct = typeof result.metaJsonUrl === "string" ? result.metaJsonUrl.trim() : "";
+  if (direct) return direct;
+  const manifest = typeof result.manifestUrl === "string" ? result.manifestUrl.trim() : "";
+  if (manifest) {
+    const d = replaceUrlPathLeaf(manifest, "manifest.json", "meta.json");
+    if (d) return d;
+  }
+  const master = typeof result.masterAppUrl === "string" ? result.masterAppUrl.trim() : "";
+  if (master) {
+    const d = replaceUrlPathLeaf(master, "master-app.m3u8", "meta.json");
+    if (d) return d;
+  }
+  return "";
+}
+
+/**
+ * @param {string} absoluteUrl
+ * @param {string} fromLeaf
+ * @param {string} toLeaf
+ * @returns {string}
+ */
+function replaceUrlPathLeaf(absoluteUrl, fromLeaf, toLeaf) {
+  try {
+    const u = new URL(absoluteUrl);
+    if (!u.pathname.endsWith(`/${fromLeaf}`)) return "";
+    u.pathname = `${u.pathname.slice(0, -fromLeaf.length)}${toLeaf}`;
+    return u.href;
+  } catch {
+    return "";
+  }
+}
+
+/**
  * Ensure FILSTREAM-ID exists (persisted in config object on window).
  *
  * @param {FilstreamPublicConfig} cfg

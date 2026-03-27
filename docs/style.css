@@ -747,6 +747,16 @@ h3 {
   background: #16181d;
 }
 
+.upload-configure--wallet-only {
+  padding: 0.85rem 1.1rem;
+}
+
+.upload-configure--wallet-only .wallet-injected-block {
+  margin-top: 0;
+  padding-top: 0;
+  border-top: none;
+}
+
 .configure-head {
   margin-bottom: 1rem;
 }
@@ -1226,70 +1236,37 @@ h3 {
   font-style: italic;
 }
 
-.convert-media--await-yt-wait {
-  min-height: 0;
+.await-yt-primary--waiting {
+  display: flex;
+  flex-direction: row;
+  flex-wrap: wrap;
+  gap: 1rem;
+  align-items: flex-start;
+}
+
+.await-poster-thumb {
+  width: 180px;
+  max-width: min(40%, 240px);
+  height: auto;
   aspect-ratio: 16 / 9;
-  background: #0a0b0d;
-}
-
-.convert-media--await-yt-wait .await-poster-frame-img {
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
   object-fit: cover;
-  z-index: 0;
-  pointer-events: none;
-}
-
-.convert-media--await-yt-wait .convert-player-wrap {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  margin: -1px;
-  padding: 0;
-  border: 0;
-  clip: rect(0, 0, 0, 0);
-  overflow: hidden;
-  opacity: 0;
-  pointer-events: none;
-  z-index: 0;
-}
-
-.convert-media--await-yt-wait .convert-awaiting-overlay {
-  z-index: 2;
-}
-
-.convert-media--awaiting {
-  position: relative;
-  min-height: 200px;
+  border-radius: 8px;
+  flex-shrink: 0;
   background: #0a0b0d;
 }
 
-.convert-media--awaiting .convert-player-wrap {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  margin: -1px;
-  padding: 0;
-  border: 0;
-  clip: rect(0, 0, 0, 0);
-  overflow: hidden;
-  opacity: 0;
-  pointer-events: none;
-}
-
-.convert-awaiting-overlay {
-  position: absolute;
-  inset: 0;
+.convert-awaiting-panel {
+  flex: 1;
+  min-width: min(100%, 12rem);
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  padding: 1.25rem;
+  padding: 1.25rem 1rem;
   text-align: center;
-  background: rgb(10 11 13 / 0.92);
-  z-index: 2;
+  background: #1a1d24;
+  border-radius: 8px;
+  border: 1px solid rgb(138 180 248 / 0.28);
 }
 
 .convert-awaiting-spinner {
@@ -1345,23 +1322,6 @@ h3 {
   min-width: 0;
   height: 0.45rem;
   accent-color: #8ab4f8;
-}
-
-.await-commit-highlight {
-  margin: 0 0 1rem;
-  padding: 1rem 1.1rem;
-  border-radius: 10px;
-  background: rgb(0 0 0 / 0.35);
-  border: 1px solid rgb(138 180 248 / 0.35);
-  text-align: center;
-}
-
-.await-commit-highlight-text {
-  margin: 0;
-  font-size: 0.98rem;
-  font-weight: 700;
-  line-height: 1.45;
-  color: #e8eaed;
 }
 
 .await-pipeline-bars {

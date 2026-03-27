@@ -54,8 +54,6 @@ export function applyStreamMode(player, mode, rungs) {
  *     uploadDetail: string,
  *     uploadPhaseNote?: string,
  *   } | null,
- *   /** When set (finalize / on-chain commit), replaces pipeline bars — bold centered status. */
- *   awaitCommitHighlight?: string | null,
  *   storageUpload?: { pct: number, label: string } | null,
  * }} props
  */
@@ -81,22 +79,11 @@ export function convertProgressPanel(props) {
     awaitPosterUrl = null,
     awaitUploadBannerText = "Upload in progress",
     awaitPipelineBars = null,
-    awaitCommitHighlight = null,
     storageUpload = null,
   } = props;
 
   const pipelineBarsBlock =
-    awaitCommitHighlight != null && String(awaitCommitHighlight).trim() !== ""
-      ? html`
-          <div
-            class="await-commit-highlight"
-            role="status"
-            aria-live="polite"
-          >
-            <p class="await-commit-highlight-text">${awaitCommitHighlight}</p>
-          </div>
-        `
-      : awaitPipelineBars != null
+    awaitPipelineBars != null
       ? html`
           <div
             class="await-pipeline-bars"
@@ -187,58 +174,78 @@ export function convertProgressPanel(props) {
           ? "Waiting for playback stream"
           : "Playback preview";
 
-  const mediaBlock = html`
-    <div
-      class="convert-media ${phase === "awaiting"
-        ? "convert-media--awaiting"
-        : isPlaybackMedia
-          ? "convert-media--playback"
-          : "convert-media--encoding"} ${awaitListingLayout && phase === "awaiting"
-        ? "convert-media--await-yt-wait"
-        : ""}"
-    >
-      ${phase === "awaiting" && awaitListingLayout && awaitPosterUrl
-        ? html`
-            <img
-              class="await-poster-frame-img"
-              src=${awaitPosterUrl}
-              alt=""
-              width="1280"
-              height="720"
-              decoding="async"
-            />
-          `
-        : null}
-      <div class="convert-player-wrap">${videoEl}</div>
-      ${phase === "awaiting"
-        ? html`
-            <div class="convert-awaiting-overlay" aria-live="polite">
-              <div class="convert-awaiting-spinner" aria-hidden="true"></div>
-              <p class="convert-awaiting-title">Waiting for stream</p>
-              <p class="convert-awaiting-sub">
-                ${statusMsg ||
-                "Playback is still attaching. This step stays here until the player is ready."}
-              </p>
-            </div>
-          `
-        : phase === "encoding"
-            ? awaitPipelineBars
-              ? null
-              : html`
-                  <div class="convert-encode-skinny" aria-hidden="false">
-                    <span class="convert-encode-label">Encoding</span>
-                    <progress class="progress convert-progress-bar" max="100" .value=${progress}></progress>
-                    <span class="convert-encode-pct">${progress}%</span>
-                  </div>
-                `
-            : phase === "define"
+  const awaitingStatusInner = html`
+    <div class="convert-awaiting-spinner" aria-hidden="true"></div>
+    <p class="convert-awaiting-title">Waiting for stream</p>
+    <p class="convert-awaiting-sub">
+      ${statusMsg ||
+      "Playback is still attaching. This step stays here until the player is ready."}
+    </p>
+  `;
+
+  const awaitingBlock = awaitListingLayout
+    ? html`
+        <div class="await-yt-layout">
+          <div class="await-yt-primary await-yt-primary--waiting">
+            ${awaitPosterUrl
               ? html`
-                  <div class="convert-encode-skinny" aria-hidden="false">
-                    <span class="convert-encode-label">Preparing</span>
-                    <progress class="progress convert-progress-bar" max="100" .value=${100}></progress>
-                  </div>
+                  <img
+                    class="await-poster-thumb"
+                    src=${awaitPosterUrl}
+                    alt=""
+                    width="320"
+                    height="180"
+                    decoding="async"
+                  />
                 `
               : null}
+            <div class="convert-awaiting-panel" aria-live="polite">
+              ${awaitingStatusInner}
+            </div>
+          </div>
+          <div class="await-yt-meta">
+            <h1 class="await-yt-title">${awaitListingTitle.trim() || "Untitled"}</h1>
+            <div class="await-yt-description">
+              ${awaitListingDescription.trim()
+                ? html`<p class="await-yt-desc-copy">${awaitListingDescription}</p>`
+                : html`<p class="await-yt-desc-empty">No description</p>`}
+            </div>
+          </div>
+        </div>
+      `
+    : html`
+        <header class="convert-head">
+          <h2 class="convert-title">${panelTitle}</h2>
+          ${fileName ? html`<p class="convert-file">${fileName}</p>` : null}
+        </header>
+        <div class="convert-awaiting-panel" aria-live="polite">${awaitingStatusInner}</div>
+      `;
+
+  const mediaBlock = html`
+    <div
+      class="convert-media ${isPlaybackMedia
+        ? "convert-media--playback"
+        : "convert-media--encoding"}"
+    >
+      <div class="convert-player-wrap">${videoEl}</div>
+      ${phase === "encoding"
+        ? awaitPipelineBars
+          ? null
+          : html`
+              <div class="convert-encode-skinny" aria-hidden="false">
+                <span class="convert-encode-label">Encoding</span>
+                <progress class="progress convert-progress-bar" max="100" .value=${progress}></progress>
+                <span class="convert-encode-pct">${progress}%</span>
+              </div>
+            `
+        : phase === "define"
+          ? html`
+              <div class="convert-encode-skinny" aria-hidden="false">
+                <span class="convert-encode-label">Preparing</span>
+                <progress class="progress convert-progress-bar" max="100" .value=${100}></progress>
+              </div>
+            `
+          : null}
     </div>
   `;
 
@@ -264,29 +271,31 @@ export function convertProgressPanel(props) {
       ${statusLine}
       ${pipelineBarsBlock}
       ${storeUploadBlock}
-      ${awaitListingLayout
-        ? html`
-            <div class="await-yt-layout">
-              <div class="await-yt-primary">${mediaBlock}</div>
-              <div class="await-yt-meta">
-                <h1 class="await-yt-title">${awaitListingTitle.trim() || "Untitled"}</h1>
-                <div class="await-yt-description">
-                  ${awaitListingDescription.trim()
-                    ? html`<p class="await-yt-desc-copy">${awaitListingDescription}</p>`
-                    : html`<p class="await-yt-desc-empty">No description</p>`}
+      ${phase === "awaiting"
+        ? awaitingBlock
+        : awaitListingLayout
+          ? html`
+              <div class="await-yt-layout">
+                <div class="await-yt-primary">${mediaBlock}</div>
+                <div class="await-yt-meta">
+                  <h1 class="await-yt-title">${awaitListingTitle.trim() || "Untitled"}</h1>
+                  <div class="await-yt-description">
+                    ${awaitListingDescription.trim()
+                      ? html`<p class="await-yt-desc-copy">${awaitListingDescription}</p>`
+                      : html`<p class="await-yt-desc-empty">No description</p>`}
+                  </div>
                 </div>
               </div>
-            </div>
-          `
-        : html`
-            <header class="convert-head">
-              <h2 class="convert-title">${panelTitle}</h2>
-              ${fileName
-                ? html`<p class="convert-file">${fileName}</p>`
-                : null}
-            </header>
-            ${mediaBlock}
-          `}
+            `
+          : html`
+              <header class="convert-head">
+                <h2 class="convert-title">${panelTitle}</h2>
+                ${fileName
+                  ? html`<p class="convert-file">${fileName}</p>`
+                  : null}
+              </header>
+              ${mediaBlock}
+            `}
 
       ${phase === "playback" && rungs?.length
         ? html`
