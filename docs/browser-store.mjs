@@ -473,6 +473,17 @@ export async function getPieceRetrievalUrl(context, pieceCid) {
 }
 
 /**
+ * PDP rejects a second delete when that piece is already queued for removal.
+ * Treat as success so callers can delete the rest of an asset’s pieces.
+ *
+ * @param {unknown} e
+ */
+function isPieceAlreadyScheduledForRemovalError(e) {
+  const msg = e instanceof Error ? e.message : String(e);
+  return /already scheduled.*removal|scheduled for removal/i.test(msg);
+}
+
+/**
  * @param {import("@filoz/synapse-sdk/storage").StorageContext} context
  * @param {PieceCID | string} pieceCid
  */
@@ -789,6 +800,9 @@ export async function flushDeferredPieceDeletions(input) {
     try {
       await deletePiece(context, item.pieceCid);
     } catch (e) {
+      if (isPieceAlreadyScheduledForRemovalError(e)) {
+        continue;
+      }
       console.warn("[filstream] deferred piece delete failed", item.pieceCid, e);
       remaining.push(item);
     }
@@ -816,6 +830,8 @@ export async function deleteAllPiecesForAssetId(input) {
   let deleted = 0;
   /** @type {string[]} */
   const errors = [];
+  /** @type {string[]} */
+  const toDelete = [];
   try {
     for await (const row of context.getPieces()) {
       const kv = await readPieceMetadataKvPublic({
@@ -830,17 +846,24 @@ export async function deleteAllPiecesForAssetId(input) {
       if (kv.FS_ASSET !== assetId) {
         continue;
       }
-      try {
-        await deletePiece(context, row.pieceCid);
-        deleted += 1;
-      } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e);
-        errors.push(msg);
-      }
+      toDelete.push(row.pieceCid);
     }
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     errors.push(msg);
+  }
+  for (const pieceCid of toDelete) {
+    try {
+      await deletePiece(context, pieceCid);
+      deleted += 1;
+    } catch (e) {
+      if (isPieceAlreadyScheduledForRemovalError(e)) {
+        deleted += 1;
+        continue;
+      }
+      const msg = e instanceof Error ? e.message : String(e);
+      errors.push(msg);
+    }
   }
   return { deleted, errors };
 }

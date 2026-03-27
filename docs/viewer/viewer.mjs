@@ -1,6 +1,6 @@
 /**
  * GitHub Pages entry:
- * `viewer.html?meta=<absolute-https-url-to-meta.json>[&catalog=<absolute-url-to-filstream_catalog.json>][&dataset=<pdp-data-set-id>]`
+ * `viewer.html?meta=<absolute-https-url-to-meta.json>[&catalog=<absolute-url-to-filstream_catalog.json>][&dataset=<pdp-data-set-id>][&embed=true]`
  *
  * Fetches `meta.json` for playback. When `catalog` is present, the viewer always fetches that
  * `filstream_catalog.json` URL for the sidebar and byline. Optional `dataset` is propagated on
@@ -13,28 +13,42 @@
  * Below the player: title, optional upload date, byline (catalog creator + donate when
  * `?catalog=`), description in a panel, and donate from `meta.json` (same data as Review chrome).
  *
+ * `?embed=true` shows only the video and Shaka controls (⋯ menu: speed, quality, FilStream);
+ * share/embed actions and catalog/meta are omitted.
+ *
  */
-import shaka from "https://esm.sh/shaka-player";
+import "../register-piece-head-sw.mjs";
+import shaka from "https://esm.sh/shaka-player@4.7.11/dist/shaka-player.ui.js";
 import {
   broadcastCopyFromMeta,
   formatUploadDateLabel,
 } from "../filstream-broadcast-view.mjs";
-import { mountFilstreamBrand } from "../filstream-brand.mjs";
+import { FILSTREAM_BRAND, mountFilstreamBrand } from "../filstream-brand.mjs";
 import {
   creatorHrefForCatalog,
   creatorInfoFromCatalog,
   moviesFromCatalog,
   viewerHrefForMeta,
 } from "../filstream-catalog-shared.mjs";
+import { resolveViewerIndexPageUrl } from "../filstream-config.mjs";
 import {
   donateConfigFromMeta,
   proposeDonateTransfer,
   resolveViewerProvider,
 } from "../filstream-viewer-donate.mjs";
 
+const params = new URLSearchParams(window.location.search);
+const embedMode = params.get("embed") === "true";
+
+if (embedMode) {
+  document.documentElement.classList.add("viewer-embed");
+}
+
 const brandMount = document.getElementById("viewer-brand-mount");
-if (brandMount) {
+if (brandMount && !embedMode) {
   mountFilstreamBrand(brandMount);
+} else if (brandMount) {
+  brandMount.hidden = true;
 }
 
 const statusEl = document.getElementById("viewer-status");
@@ -46,6 +60,8 @@ const descriptionEl = document.getElementById("viewer-description");
 const bylineEl = document.getElementById("viewer-byline");
 const bylineCatalogEl = document.getElementById("viewer-byline-catalog");
 const donateRootEl = document.getElementById("viewer-donate-root");
+const viewerActionsEl = document.getElementById("viewer-actions");
+const shakaContainerEl = document.getElementById("viewer-shaka-container");
 const catalogAside = document.getElementById("viewer-catalog");
 
 /** @type {unknown | null} */
@@ -55,6 +71,61 @@ let donateBusy = false;
 let donateError = "";
 /** @type {string} */
 let donateTxHash = "";
+
+let filstreamOverflowRegistered = false;
+
+/** Opens the full viewer page (no embed) from the Shaka ⋯ overflow menu. */
+class FilstreamSiteButton extends shaka.ui.Element {
+  /**
+   * @param {HTMLElement} parent
+   * @param {*} controls
+   */
+  constructor(parent, controls) {
+    super(parent, controls);
+    const button = document.createElement("button");
+    button.type = "button";
+    button.classList.add("shaka-filstream-site-button");
+    button.classList.add("shaka-no-propagation");
+    const label = document.createElement("label");
+    label.classList.add("shaka-overflow-button-label");
+    label.classList.add("shaka-overflow-menu-only");
+    label.classList.add("shaka-simple-overflow-button-label-inline");
+    const img = document.createElement("img");
+    img.src = FILSTREAM_BRAND.logoSrc;
+    img.alt = "";
+    img.width = 24;
+    img.height = 24;
+    img.decoding = "async";
+    const nameSpan = document.createElement("span");
+    nameSpan.textContent = "Open on FilStream";
+    label.append(img, nameSpan);
+    button.appendChild(label);
+    button.setAttribute("aria-label", "Open FilStream viewer page");
+    this.parent.appendChild(button);
+    this.eventManager.listen(button, "click", () => {
+      window.open(buildViewerUrlWithoutEmbed(), "_blank", "noopener,noreferrer");
+    });
+  }
+}
+
+FilstreamSiteButton.Factory = class {
+  /**
+   * @param {HTMLElement} rootElement
+   * @param {*} controls
+   */
+  create(rootElement, controls) {
+    return new FilstreamSiteButton(rootElement, controls);
+  }
+};
+
+function registerFilstreamOverflowElement() {
+  if (filstreamOverflowRegistered) return;
+  if (!shaka.ui?.OverflowMenu?.registerElement) return;
+  filstreamOverflowRegistered = true;
+  shaka.ui.OverflowMenu.registerElement("filstream", new FilstreamSiteButton.Factory());
+}
+
+registerFilstreamOverflowElement();
 
 function setStatus(msg, kind) {
   if (!statusEl) return;
@@ -237,6 +308,114 @@ function escapeHtml(s) {
 }
 
 /**
+ * @param {string} s
+ */
+function escapeHtmlAttr(s) {
+  return s.replace(/&/g, "&amp;").replace(/"/g, "&quot;");
+}
+
+/**
+ * Current viewer URL without `embed` (full page).
+ * @returns {string}
+ */
+function buildViewerUrlWithoutEmbed() {
+  const u = new URL(window.location.href);
+  u.searchParams.delete("embed");
+  return u.href;
+}
+
+/**
+ * Public iframe `src`: hosted at `resolveViewerIndexPageUrl()` (not `localhost`).
+ * `meta` is the remote `meta.json` URL — encode with `encodeURIComponent`.
+ * `catalog`, `dataset`, and `embed` are viewer routing for this page — not the same as `meta`;
+ * use `encodeURI` for catalog (readable `https://…`) and plain values for dataset / embed.
+ *
+ * @returns {string}
+ */
+function buildEmbedIframeSnippet() {
+  const base = new URL(resolveViewerIndexPageUrl());
+  const here = new URL(window.location.href);
+  const meta = here.searchParams.get("meta");
+  const catalog = here.searchParams.get("catalog");
+  const dataset = here.searchParams.get("dataset");
+
+  const parts = [];
+  if (meta) parts.push(`meta=${encodeURIComponent(meta)}`);
+  if (catalog) parts.push(`catalog=${encodeURI(catalog)}`);
+  if (dataset !== null && dataset !== "") parts.push(`dataset=${dataset}`);
+  parts.push("embed=true");
+  base.search = parts.join("&");
+  const src = base.href;
+  return `<iframe src="${escapeHtmlAttr(src)}" width="560" height="315" style="border:0" allowfullscreen title="FilStream player"></iframe>`;
+}
+
+/**
+ * @param {string} text
+ */
+async function copyToClipboard(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch {
+    try {
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      ta.setAttribute("readonly", "");
+      ta.style.position = "fixed";
+      ta.style.left = "-9999px";
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand("copy");
+      document.body.removeChild(ta);
+    } catch {
+      /* ignore */
+    }
+  }
+}
+
+function renderShareEmbedButtons() {
+  if (!viewerActionsEl || embedMode) return;
+
+  viewerActionsEl.hidden = false;
+  viewerActionsEl.innerHTML = "";
+
+  const shareBtn = document.createElement("button");
+  shareBtn.type = "button";
+  shareBtn.className = "viewer-action-btn viewer-action-btn--round";
+  shareBtn.title = "Copy link to this page";
+  shareBtn.setAttribute("aria-label", "Copy page URL");
+  shareBtn.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" y1="13.51" x2="15.41" y2="17.49"/><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"/></svg>`;
+  shareBtn.addEventListener("click", () => {
+    void copyToClipboard(window.location.href);
+  });
+
+  const embedSvg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  embedSvg.setAttribute("width", "18");
+  embedSvg.setAttribute("height", "18");
+  embedSvg.setAttribute("viewBox", "0 0 24 24");
+  embedSvg.setAttribute("fill", "none");
+  embedSvg.setAttribute("stroke", "currentColor");
+  embedSvg.setAttribute("stroke-width", "2");
+  embedSvg.setAttribute("aria-hidden", "true");
+  const p1 = document.createElementNS("http://www.w3.org/2000/svg", "polyline");
+  p1.setAttribute("points", "16 18 22 12 16 6");
+  const p2 = document.createElementNS("http://www.w3.org/2000/svg", "polyline");
+  p2.setAttribute("points", "8 6 2 12 8 18");
+  embedSvg.append(p1, p2);
+
+  const embedBtn = document.createElement("button");
+  embedBtn.type = "button";
+  embedBtn.className = "viewer-action-btn viewer-action-btn--round";
+  embedBtn.title = "Copy embed code";
+  embedBtn.setAttribute("aria-label", "Copy iframe embed code");
+  embedBtn.appendChild(embedSvg);
+  embedBtn.addEventListener("click", () => {
+    void copyToClipboard(buildEmbedIframeSnippet());
+  });
+
+  viewerActionsEl.append(shareBtn, embedBtn);
+}
+
+/**
  * Prefer `dataSetId` from loaded catalog JSON; fall back to `?dataset=` (viewer / share links).
  *
  * @param {unknown} doc
@@ -274,9 +453,9 @@ function renderByline(meta, catalogCtx) {
   const showCatalogStrip = !!catalogUrl;
 
   if (!showDonate && !showCatalogStrip) {
-    bylineEl.hidden = true;
     bylineCatalogEl.innerHTML = "";
     donateRootEl.innerHTML = "";
+    bylineEl.hidden = false;
     return;
   }
 
@@ -340,13 +519,21 @@ function renderViewerMeta(meta, catalogCtx) {
   donateBusy = false;
   donateError = "";
   donateTxHash = "";
-  if (!metaSection || !titleEl || !descriptionEl || !donateRootEl) return;
-
-  const ctx = catalogCtx ?? { catalogUrl: null, catalogDoc: null, datasetId: null };
 
   const copy = broadcastCopyFromMeta(meta);
   const title = copy.title.trim() || "Untitled";
   const desc = copy.description.trim();
+
+  if (embedMode) {
+    document.title = `${title} · FilStream`;
+    if (metaSection) metaSection.hidden = true;
+    if (viewerActionsEl) viewerActionsEl.hidden = true;
+    return;
+  }
+
+  if (!metaSection || !titleEl || !descriptionEl || !donateRootEl) return;
+
+  const ctx = catalogCtx ?? { catalogUrl: null, catalogDoc: null, datasetId: null };
 
   titleEl.textContent = title;
   document.title = `${title} · FilStream viewer`;
@@ -380,6 +567,7 @@ function renderViewerMeta(meta, catalogCtx) {
   }
 
   metaSection.hidden = false;
+  renderShareEmbedButtons();
 }
 
 /**
@@ -459,7 +647,6 @@ async function handleViewerDonateClick() {
   }
 }
 
-const params = new URLSearchParams(window.location.search);
 const metaUrl = params.get("meta");
 const catalogUrlRaw = params.get("catalog");
 /** @type {string | null} */
@@ -507,7 +694,7 @@ if (!metaUrl || !/^https?:\/\//i.test(metaUrl)) {
       /** @type {unknown | null} */
       let catalogDocPreload = null;
       let catalogFetchOk = false;
-      if (catalogUrl) {
+      if (catalogUrl && !embedMode) {
         try {
           const cres = await fetch(catalogUrl);
           if (cres.ok) {
@@ -530,8 +717,37 @@ if (!metaUrl || !/^https?:\/\//i.test(metaUrl)) {
       });
       setStatus("");
       shaka.polyfill.installAll();
+      if (!shakaContainerEl || !videoEl) {
+        throw new Error("viewer-shaka-container or viewer-video missing");
+      }
       const player = new shaka.Player();
+      const shakaUi = new shaka.ui.Overlay(
+        player,
+        shakaContainerEl,
+        /** @type {HTMLVideoElement} */ (videoEl),
+      );
       await player.attach(/** @type {HTMLVideoElement} */ (videoEl));
+      player.configure({
+        abr: {
+          enabled: true,
+          useNetworkInformation: false,
+        },
+      });
+      shakaUi.configure({
+        controlPanelElements: [
+          "play_pause",
+          "time_and_duration",
+          "spacer",
+          "mute",
+          "volume",
+          "spacer",
+          "fullscreen",
+          "overflow_menu",
+        ],
+        overflowMenuButtons: ["playback_rate", "quality", "filstream"],
+        playbackRates: [0.25, 0.5, 0.75, 1, 1.25, 1.5, 1.75, 2],
+        enableTooltips: true,
+      });
       try {
         await player.load(master, undefined, "application/x-mpegurl");
       } catch (firstErr) {
@@ -542,7 +758,7 @@ if (!metaUrl || !/^https?:\/\//i.test(metaUrl)) {
         }
       }
 
-      if (catalogUrl) {
+      if (catalogUrl && !embedMode) {
         void renderCatalogSidebar(
           catalogUrl,
           metaUrl,

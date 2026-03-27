@@ -6,6 +6,7 @@
  * Shows catalog identity, creator header, movie list, and (for the editor with a storage session)
  * editing: creator name/poster, movie order, save, and remove movie with PDP piece deletes.
  */
+import "../register-piece-head-sw.mjs";
 import {
   createSynapseForSession,
   deleteAllPiecesForAssetId,
