@@ -2,7 +2,8 @@
 
 /**
  * PDP hosts return 405 for HEAD on piece URLs. Intercept HEAD for `/piece/*`,
- * probe with GET + Range: bytes=0-0, and synthesize a HEAD response (no body).
+ * probe with GET + Range: bytes=0-2 (first three bytes; some PDPs mis-handle
+ * tiny ranges or bytes=0-0 and stream the full piece), and synthesize HEAD.
  */
 self.addEventListener("install", () => {
   self.skipWaiting();
@@ -74,7 +75,7 @@ self.addEventListener("fetch", (event) => {
   event.respondWith(
     (async () => {
       const headers = new Headers(req.headers);
-      headers.set("Range", "bytes=0-0");
+      headers.set("Range", "bytes=0-2");
       try {
         const inner = await fetch(req.url, {
           method: "GET",
