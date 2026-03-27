@@ -666,6 +666,18 @@ h3 {
   gap: 0.85rem;
   margin: 0;
   flex-shrink: 0;
+  text-decoration: none;
+  color: inherit;
+  border-radius: 10px;
+  outline-offset: 2px;
+}
+
+.site-brand:hover .site-brand-name {
+  color: #f1f3f4;
+}
+
+.site-brand:hover .site-brand-tagline {
+  color: #bdc1c6;
 }
 
 .site-brand-mark {

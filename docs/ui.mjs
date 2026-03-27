@@ -1600,6 +1600,13 @@ function handleDisconnectWallet() {
   renderWizard();
 }
 
+/** @returns {string} Public FilStream site (matches `viewBaseUrl`, default GitHub Pages). */
+function projectSiteHref() {
+  const u = getFilstreamStoreConfig().viewBaseUrl.trim();
+  if (u) return u.endsWith("/") ? u : `${u}/`;
+  return "https://curiostorage.github.io/filstream/";
+}
+
 function renderWizard() {
   const root = document.getElementById("wizard-root");
   if (!root) return;
@@ -1618,23 +1625,28 @@ function renderWizard() {
         class=${`wrap layout-main${wizardState.step === 5 ? " layout-main--review-wide" : ""}`}
       >
         <div class="site-top-bar">
-          <header
-            class="site-brand"
-            role="banner"
-            aria-label="FilStream — CalibrationNet edition"
-          >
-            <img
-              class="site-brand-mark"
-              src="favicon.svg"
-              width="40"
-              height="40"
-              alt=""
-              decoding="async"
-            />
-            <div class="site-brand-text">
-              <span class="site-brand-name">FilStream</span>
-              <span class="site-brand-tagline">CalibrationNet edition</span>
-            </div>
+          <header role="banner">
+            <a
+              class="site-brand"
+              href=${projectSiteHref()}
+              target="_blank"
+              rel="noopener noreferrer"
+              title="FilStream — CalibrationNet edition"
+              aria-label="FilStream — CalibrationNet edition (project site)"
+            >
+              <img
+                class="site-brand-mark"
+                src="favicon.svg"
+                width="40"
+                height="40"
+                alt=""
+                decoding="async"
+              />
+              <div class="site-brand-text">
+                <span class="site-brand-name">FilStream</span>
+                <span class="site-brand-tagline">CalibrationNet edition</span>
+              </div>
+            </a>
           </header>
 
           <ol class="wizard-steps" aria-label="Progress">
