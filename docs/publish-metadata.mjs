@@ -155,8 +155,8 @@ export function publishMetadataForm(props) {
             <div class="publish-seek-block">
               <span class="publish-field-label">Poster frame from source video</span>
               <div class="publish-source-seek">${sourceSeekVideoEl}</div>
-              <p class="publish-seek-help" title="Next saves a full-resolution PNG of the current frame.">
-                Scrub, then Next for poster PNG.
+              <p class="publish-seek-help" title="Next saves a full-resolution JPEG poster plus a mini WebP preview (animated from 10s when the clip is long enough; otherwise the first frame).">
+                Scrub, then Next for poster JPEG and preview WebP.
               </p>
             </div>
           `

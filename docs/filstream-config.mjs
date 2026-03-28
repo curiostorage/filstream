@@ -142,6 +142,20 @@ export function buildReviewViewerIframeSrc(metaJsonUrl, catalogJsonUrl, dataSetI
 }
 
 /**
+ * Same as {@link buildReviewViewerIframeSrc} with `embed=true` for Open Graph / Twitter player URLs.
+ *
+ * @param {string} metaJsonUrl
+ * @param {string | null | undefined} catalogJsonUrl
+ * @param {number | null | undefined} dataSetId
+ * @returns {string}
+ */
+export function buildReviewViewerEmbedSrc(metaJsonUrl, catalogJsonUrl, dataSetId) {
+  const u = new URL(buildReviewViewerIframeSrc(metaJsonUrl, catalogJsonUrl, dataSetId));
+  u.searchParams.set("embed", "true");
+  return u.href;
+}
+
+/**
  * Absolute retrieval URL for `meta.json` from finalize output, or the same directory as
  * `manifest.json` / `master-app.m3u8` when the PDP response omits `metaJsonUrl`.
  *

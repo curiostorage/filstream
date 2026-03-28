@@ -12,7 +12,13 @@ import {
   custom,
   privateKeyToAccount,
 } from "./vendor/synapse-browser.mjs";
-import { ensureFilstreamId, getFilstreamStoreConfig } from "./filstream-config.mjs";
+import { computePieceCidFromBytes } from "./piece-cid-from-bytes.mjs";
+import {
+  buildReviewViewerEmbedSrc,
+  buildReviewViewerIframeSrc,
+  ensureFilstreamId,
+  getFilstreamStoreConfig,
+} from "./filstream-config.mjs";
 
 /**
  * @typedef {object} DataSetCandidate
@@ -461,6 +467,17 @@ export async function resolveOrCreateDataSet(input) {
  * @returns {Promise<string | null>}
  */
 export async function getPieceRetrievalUrl(context, pieceCid) {
+  return syncPieceRetrievalUrl(context, pieceCid);
+}
+
+/**
+ * PDP retrieval URL for a piece CID (deterministic from CID + context; same after upload).
+ *
+ * @param {import("@filoz/synapse-sdk/storage").StorageContext} context
+ * @param {PieceCID | string} pieceCid
+ * @returns {string | null}
+ */
+function syncPieceRetrievalUrl(context, pieceCid) {
   if (!context || typeof context.getPieceUrl !== "function") {
     return null;
   }
@@ -1048,6 +1065,7 @@ function defaultMimeForPath(filePath) {
   if (lower.endsWith(".jpg") || lower.endsWith(".jpeg")) return "image/jpeg";
   if (lower.endsWith(".webp")) return "image/webp";
   if (lower.endsWith(".gif")) return "image/gif";
+  if (lower.endsWith(".html") || lower.endsWith(".htm")) return "text/html";
   return "application/octet-stream";
 }
 
@@ -1058,8 +1076,8 @@ function defaultMimeForPath(filePath) {
  * @returns {string}
  */
 function sanitizePosterPath(raw) {
-  const base = raw.split(/[/\\]/).pop() || "poster.png";
-  const cleaned = base.replace(/[^\w.\-]+/g, "_").replace(/^\.+/, "") || "poster.png";
+  const base = raw.split(/[/\\]/).pop() || "poster.jpg";
+  const cleaned = base.replace(/[^\w.\-]+/g, "_").replace(/^\.+/, "") || "poster.jpg";
   return cleaned.slice(0, 200);
 }
 
@@ -1081,9 +1099,10 @@ function parseOptionalJsonObject(raw) {
 
 /**
  * @param {FileMapping[]} files
- * @param {string | null | undefined} posterPath Staged poster file path (e.g. `poster-seek.png`), if any
+ * @param {string | null | undefined} posterPath Staged poster file path (e.g. `poster-seek.jpg`), if any
+ * @param {string | null | undefined} posterAnimPath Staged animated preview path (e.g. `listing-preview.webp`), if any
  */
-function extractPlaybackUrls(files, posterPath) {
+function extractPlaybackUrls(files, posterPath, posterAnimPath) {
   const master = files.find((f) => f.path === "master-app.m3u8");
   const manifest = files.find((f) => f.path === "manifest.json");
   const meta = files.find((f) => f.path === "meta.json");
@@ -1093,12 +1112,19 @@ function extractPlaybackUrls(files, posterPath) {
       : "";
   const poster =
     pNorm !== "" ? files.find((f) => f.path === pNorm) : undefined;
+  const aNorm =
+    typeof posterAnimPath === "string" && posterAnimPath.trim() !== ""
+      ? posterAnimPath.trim()
+      : "";
+  const posterAnim =
+    aNorm !== "" ? files.find((f) => f.path === aNorm) : undefined;
   const catalog = files.find((f) => f.path === "filstream_catalog.json");
   return {
     masterAppUrl: master?.retrievalUrl || null,
     manifestUrl: manifest?.retrievalUrl || null,
     metaJsonUrl: meta?.retrievalUrl || null,
     posterUrl: poster?.retrievalUrl ?? null,
+    posterAnimUrl: posterAnim?.retrievalUrl ?? null,
     catalogJsonUrl: catalog?.retrievalUrl ?? null,
   };
 }
@@ -1116,6 +1142,162 @@ function encodeJsonWithMinPiecePadding(obj) {
     bytes = enc.encode(text);
   }
   return bytes;
+}
+
+/**
+ * @param {string} s
+ * @returns {string}
+ */
+function escapeHtmlAttrMeta(s) {
+  return s
+    .replace(/&/g, "&amp;")
+    .replace(/"/g, "&quot;")
+    .replace(/</g, "&lt;");
+}
+
+/**
+ * @param {string} html
+ * @returns {Uint8Array}
+ */
+function encodeHtmlWithMinPiecePadding(html) {
+  let text = html;
+  const enc = new TextEncoder();
+  let bytes = enc.encode(text);
+  while (bytes.byteLength < SYNAPSE_MIN_PIECE_BYTES) {
+    text += "\n";
+    bytes = enc.encode(text);
+  }
+  return bytes;
+}
+
+/**
+ * Open Graph + Twitter Card HTML that redirects browsers to the viewer. Stored as `share.html`.
+ *
+ * @param {{
+ *   title: string,
+ *   description: string,
+ *   siteName: string,
+ *   posterUrl: string,
+ *   posterW: number,
+ *   posterH: number,
+ *   viewerRedirectUrl: string,
+ *   embedPlayerUrl: string,
+ *   masterVideoUrl: string | null,
+ *   videoW: number,
+ *   videoH: number,
+ * }} p
+ * @returns {Uint8Array}
+ */
+function buildFilstreamShareOgHtmlBytes(p) {
+  const title = escapeHtmlAttrMeta(p.title);
+  const desc = escapeHtmlAttrMeta(p.description);
+  const site = escapeHtmlAttrMeta(p.siteName);
+  const viewerEsc = escapeHtmlAttrMeta(p.viewerRedirectUrl);
+  const embedEsc = escapeHtmlAttrMeta(p.embedPlayerUrl);
+  const posterEsc = escapeHtmlAttrMeta(p.posterUrl);
+  const master = p.masterVideoUrl ? escapeHtmlAttrMeta(p.masterVideoUrl) : "";
+  const imgBlock =
+    p.posterUrl.trim() !== ""
+      ? `
+  <meta property="og:image" content="${posterEsc}" />
+  <meta property="og:image:width" content="${String(p.posterW)}" />
+  <meta property="og:image:height" content="${String(p.posterH)}" />
+  <meta name="twitter:image" content="${posterEsc}" />`
+      : "";
+  const masterBlock =
+    master !== ""
+      ? `
+  <meta property="og:video:url" content="${master}" />`
+      : "";
+
+  const html = `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>${title}</title>
+  <meta http-equiv="refresh" content="0;url=${viewerEsc}" />
+
+  <meta property="og:type" content="video.other" />
+  <meta property="og:title" content="${title}" />
+  <meta property="og:description" content="${desc}" />
+  <meta property="og:site_name" content="${site}" />
+
+  <meta property="og:video" content="${embedEsc}" />
+  <meta property="og:video:secure_url" content="${embedEsc}" />
+  <meta property="og:video:type" content="text/html" />
+  <meta property="og:video:width" content="${String(p.videoW)}" />
+  <meta property="og:video:height" content="${String(p.videoH)}" />
+${imgBlock}
+${masterBlock}
+
+  <meta name="twitter:card" content="player" />
+  <meta name="twitter:title" content="${title}" />
+  <meta name="twitter:description" content="${desc}" />
+  <meta name="twitter:player" content="${embedEsc}" />
+  <meta name="twitter:player:width" content="${String(p.videoW)}" />
+  <meta name="twitter:player:height" content="${String(p.videoH)}" />
+
+  <script>location.replace(${JSON.stringify(p.viewerRedirectUrl)});</script>
+</head>
+<body>
+  <p><a href="${viewerEsc}">Continue to video</a></p>
+</body>
+</html>`;
+  return encodeHtmlWithMinPiecePadding(html);
+}
+
+/**
+ * @param {Record<string, unknown>} publishedMeta
+ * @param {string} viewerRedirectUrl
+ * @param {string} embedPlayerUrl
+ * @param {string | null} masterVideoUrl
+ * @returns {Uint8Array}
+ */
+function buildFilstreamShareOgHtmlBytesFromMeta(
+  publishedMeta,
+  viewerRedirectUrl,
+  embedPlayerUrl,
+  masterVideoUrl,
+) {
+  const m = publishedMeta && typeof publishedMeta === "object" ? publishedMeta : {};
+  const listing =
+    "listing" in m && m.listing && typeof m.listing === "object" && m.listing !== null
+      ? /** @type {Record<string, unknown>} */ (m.listing)
+      : {};
+  const rawTitle = typeof listing.title === "string" ? listing.title.trim() : "";
+  const rawDesc = typeof listing.description === "string" ? listing.description.trim() : "";
+  const pb =
+    "playback" in m && m.playback && typeof m.playback === "object" && m.playback !== null
+      ? /** @type {{ posterUrl?: string }} */ (m.playback)
+      : {};
+  const posterBlock =
+    "poster" in m && m.poster && typeof m.poster === "object" && m.poster !== null
+      ? /** @type {{ url?: string }} */ (m.poster)
+      : {};
+  const posterUrl =
+    typeof posterBlock.url === "string" && posterBlock.url.trim() !== ""
+      ? posterBlock.url.trim()
+      : typeof pb.posterUrl === "string" && pb.posterUrl.trim() !== ""
+        ? pb.posterUrl.trim()
+        : "";
+  const title = rawTitle || "FilStream";
+  const description =
+    rawDesc || "Watch on FilStream.";
+  const siteName = "FilStream";
+  return buildFilstreamShareOgHtmlBytes({
+    title,
+    description,
+    siteName,
+    posterUrl,
+    posterW: 1280,
+    posterH: 720,
+    viewerRedirectUrl,
+    embedPlayerUrl,
+    masterVideoUrl,
+    videoW: 1280,
+    videoH: 720,
+  });
 }
 
 /**
@@ -1145,6 +1327,7 @@ function abandonUncommittedStagingByPath(session, path) {
  *   manifestUrl: string | null,
  *   metaJsonUrl: string | null,
  *   posterUrl: string | null,
+ *   posterAnimUrl: string | null,
  * }} urls
  * @returns {Record<string, unknown>}
  */
@@ -1170,6 +1353,10 @@ function buildPublishedMetaDocument(session, urls) {
     typeof urls.posterUrl === "string" && urls.posterUrl.trim() !== ""
       ? urls.posterUrl.trim()
       : null;
+  const posterAnimUrl =
+    typeof urls.posterAnimUrl === "string" && urls.posterAnimUrl.trim() !== ""
+      ? urls.posterAnimUrl.trim()
+      : null;
   if (!master) {
     throw new StoreError(500, "Cannot publish meta.json: missing master-app.m3u8 retrieval URL.");
   }
@@ -1188,14 +1375,25 @@ function buildPublishedMetaDocument(session, urls) {
       : {};
   const posterOut =
     posterUrl != null ? { ...prevPoster, url: posterUrl } : base.poster;
+  /** @type {Record<string, unknown>} */
+  const prevPosterAnim =
+    typeof base.posterAnim === "object" && base.posterAnim !== null && !Array.isArray(base.posterAnim)
+      ? /** @type {Record<string, unknown>} */ ({ ...base.posterAnim })
+      : {};
+  const posterAnimOut =
+    posterAnimUrl != null
+      ? { ...prevPosterAnim, url: posterAnimUrl }
+      : base.posterAnim;
   return {
     ...base,
     poster: posterOut,
+    ...(posterAnimOut !== undefined ? { posterAnim: posterAnimOut } : {}),
     playback: {
       ...prevPb,
       masterAppUrl: master,
       manifestUrl: manifest,
       ...(posterUrl != null ? { posterUrl } : {}),
+      ...(posterAnimUrl != null ? { posterAnimUrl } : {}),
     },
     filstream: {
       assetId: session.assetId,
@@ -1392,11 +1590,13 @@ async function resolveProviderIdFromDataSetId(synapse, chainId, dataSetId) {
  *   providerId?: number | null,
  *   rpcUrl?: string,
  *   source?: string,
+ *   synapse?: import("@filoz/synapse-sdk").Synapse,
  * }} input
  * @returns {Promise<{ retrievalUrl: string, doc: unknown, catalogVersion: number } | null>}
  */
 export async function fetchLatestCatalogJsonForDataSet(input) {
   const { chainId, dataSetId } = input;
+  const existingSynapse = input.synapse;
   let providerId =
     typeof input.providerId === "number" && Number.isFinite(input.providerId)
       ? input.providerId
@@ -1415,11 +1615,15 @@ export async function fetchLatestCatalogJsonForDataSet(input) {
       : cfg.storeSource;
 
   let synapse;
-  try {
-    synapse = createSynapseForPublicRead({ rpcUrl, chainId, source });
-  } catch (e) {
-    console.warn("[filstream] fetchLatestCatalogJsonForDataSet: synapse init failed", e);
-    return null;
+  if (existingSynapse) {
+    synapse = existingSynapse;
+  } else {
+    try {
+      synapse = createSynapseForPublicRead({ rpcUrl, chainId, source });
+    } catch (e) {
+      console.warn("[filstream] fetchLatestCatalogJsonForDataSet: synapse init failed", e);
+      return null;
+    }
   }
 
   const client = synapse.client;
@@ -1592,6 +1796,25 @@ function posterUrlFromPublishedMetaDoc(doc) {
 }
 
 /**
+ * @param {Record<string, unknown> | null} doc Published `meta.json` object
+ * @returns {string}
+ */
+function posterAnimUrlFromPublishedMetaDoc(doc) {
+  if (!doc) return "";
+  const pa = doc.posterAnim;
+  if (pa && typeof pa === "object" && pa !== null) {
+    const u = /** @type {{ url?: string }} */ (pa).url;
+    if (typeof u === "string" && u.trim() !== "") return u.trim();
+  }
+  const pb = doc.playback;
+  if (pb && typeof pb === "object" && pb !== null) {
+    const u = /** @type {{ posterAnimUrl?: string }} */ (pb).posterAnimUrl;
+    if (typeof u === "string" && u.trim() !== "") return u.trim();
+  }
+  return "";
+}
+
+/**
  * @param {string} addr
  * @returns {string}
  */
@@ -1609,7 +1832,7 @@ function normalizeEditorAddress(addr) {
  * Optional `creatorName` / `creatorPosterUrl` (https URL) are merged from `prevCatalog` when present.
  *
  * @param {BrowserFilstreamUploadSession} session
- * @param {{ title: string, metapath: string, posterUrl?: string }[]} movies
+ * @param {{ title: string, metapath: string, posterUrl?: string, posterAnimUrl?: string }[]} movies
  * @param {Record<string, unknown> | null} prevCatalog Prior catalog (chain), for merging `dataSetId` if session has not committed yet
  * @returns {Record<string, unknown>}
  */
@@ -1653,18 +1876,24 @@ function buildFilstreamCatalogDoc(session, movies, prevCatalog) {
 
 /**
  * @param {BrowserFilstreamUploadSession} session
- * @returns {Promise<{ catalogVersion: number | null, catalogPieceCid: string | null }>}
+ * @returns {Promise<{
+ *   catalogVersion: number | null,
+ *   catalogPieceCid: string | null,
+ *   catalogDoc: Record<string, unknown> | null,
+ * }>}
  */
 async function appendFilstreamCatalogPiece(session) {
   const metaMapping = session.fileMappings.find((f) => f.path === "meta.json");
   const metaUrl = metaMapping?.retrievalUrl ?? null;
   if (!metaUrl || typeof metaUrl !== "string") {
-    return { catalogVersion: null, catalogPieceCid: null };
+    return { catalogVersion: null, catalogPieceCid: null, catalogDoc: null };
   }
 
   let title = "Untitled";
   /** @type {string} */
   let posterUrl = "";
+  /** @type {string} */
+  let posterAnimUrl = "";
   try {
     const metaFile = session.textFiles.get("meta.json");
     if (metaFile) {
@@ -1675,6 +1904,7 @@ async function appendFilstreamCatalogPiece(session) {
           : undefined;
       if (typeof t === "string" && t.trim()) title = t.trim();
       posterUrl = posterUrlFromPublishedMetaDoc(doc);
+      posterAnimUrl = posterAnimUrlFromPublishedMetaDoc(doc);
     }
   } catch {
     /* ignore */
@@ -1685,51 +1915,48 @@ async function appendFilstreamCatalogPiece(session) {
   let movies = [];
   /** @type {Record<string, unknown> | null} */
   let prevCatalog = null;
-  let bestVer = -1;
-  /** @type {unknown} */
-  let bestCid = null;
 
   const dsId = session.dataSetId;
-  if (dsId != null && session.context) {
-    try {
-      for await (const row of session.context.getPieces()) {
-        const kv = await readPieceMetadataKv(session, dsId, row.pieceId);
-        if (kv.FS_NAME === "filstream_catalog.json") {
-          const v = Number.parseInt(kv.FS_VER ?? "0", 10);
-          if (Number.isFinite(v) && v > bestVer) {
-            bestVer = v;
-            bestCid = row.pieceCid;
-          }
-        }
-      }
-    } catch (e) {
-      console.warn("[filstream] catalog scan failed", e);
-    }
-
-    if (bestCid != null && bestVer >= 0) {
+  if (dsId != null && session.synapse) {
+    /** @type {{ retrievalUrl: string, doc: unknown, catalogVersion: number } | null} */
+    let fetched = null;
+    if (session._catalogMergePrefetch) {
       try {
-        const url = session.context.getPieceUrl(bestCid);
-        const res = await fetch(url);
-        if (res.ok) {
-          const prev = await res.json();
-          if (prev && typeof prev === "object" && prev !== null) {
-            prevCatalog = /** @type {Record<string, unknown>} */ (prev);
-          }
-          if (prev && Array.isArray(prev.movies)) {
-            movies = [...prev.movies];
-          }
-        }
-      } catch (e) {
-        console.warn("[filstream] catalog fetch failed", e);
+        fetched = await session._catalogMergePrefetch;
+      } catch {
+        fetched = null;
       }
-      nextVer = bestVer + 1;
+      session._catalogMergePrefetch = null;
+    }
+    if (fetched == null) {
+      try {
+        fetched = await fetchLatestCatalogJsonForDataSet({
+          chainId: session.cfg.chainId,
+          dataSetId: dsId,
+          providerId: session.providerId,
+          synapse: session.synapse,
+        });
+      } catch (e) {
+        console.warn("[filstream] catalog latest fetch failed", e);
+      }
+    }
+    if (fetched && fetched.doc && typeof fetched.doc === "object" && fetched.doc !== null) {
+      prevCatalog = /** @type {Record<string, unknown>} */ (fetched.doc);
+      const doc = fetched.doc;
+      if (Array.isArray(doc.movies)) {
+        movies = [...doc.movies];
+      }
+      nextVer = fetched.catalogVersion + 1;
     }
   }
 
-  /** @type {{ title: string, metapath: string, posterUrl?: string }} */
+  /** @type {{ title: string, metapath: string, posterUrl?: string, posterAnimUrl?: string }} */
   const entry = { title, metapath: metaUrl };
   if (posterUrl !== "") {
     entry.posterUrl = posterUrl;
+  }
+  if (posterAnimUrl !== "") {
+    entry.posterAnimUrl = posterAnimUrl;
   }
   movies.push(entry);
   const doc = buildFilstreamCatalogDoc(session, movies, prevCatalog);
@@ -1742,24 +1969,67 @@ async function appendFilstreamCatalogPiece(session) {
   }
 
   const metadata = catalogPieceMetadata(session.assetId, nextVer);
-  const piece = await session.storePieceBytes({
-    bytes,
+  const catalogPieceCid = String(computePieceCidFromBytes(bytes));
+  session.seedStagedPieceForFinalize({
+    path: "filstream_catalog.json",
+    mimeType: "application/json",
+    data: bytes,
     pieceMetadata: metadata,
     variant: metadata.FS_VAR || "root",
     sequence: null,
   });
-  session.fileMappings.push({
+  return { catalogVersion: nextVer, catalogPieceCid, catalogDoc: doc };
+}
+
+/**
+ * Replace the staged `filstream_catalog.json` piece with the same document plus `share` on the last movie row.
+ *
+ * @param {BrowserFilstreamUploadSession} session
+ * @param {Record<string, unknown>} catalogDoc
+ * @param {string} shareRetrievalUrl
+ * @param {number} previousCatalogVersion `FS_VER` of the catalog piece being superseded
+ * @returns {Promise<{ catalogVersion: number, catalogPieceCid: string }>}
+ */
+async function replaceFilstreamCatalogWithShare(
+  session,
+  catalogDoc,
+  shareRetrievalUrl,
+  previousCatalogVersion,
+) {
+  const movies = catalogDoc.movies;
+  if (!Array.isArray(movies) || movies.length === 0) {
+    throw new StoreError(500, "replaceFilstreamCatalogWithShare: invalid catalog doc");
+  }
+  const last = movies[movies.length - 1];
+  if (!last || typeof last !== "object") {
+    throw new StoreError(500, "replaceFilstreamCatalogWithShare: invalid last movie");
+  }
+  /** @type {Record<string, unknown>} */
+  const lastRow = /** @type {Record<string, unknown>} */ (last);
+  lastRow.share = shareRetrievalUrl;
+
+  abandonUncommittedStagingByPath(session, "filstream_catalog.json");
+
+  const nextVer = previousCatalogVersion + 1;
+  let text = JSON.stringify(catalogDoc, null, 2);
+  const enc = new TextEncoder();
+  let bytes = enc.encode(text);
+  while (bytes.byteLength < SYNAPSE_MIN_PIECE_BYTES) {
+    text += "\n";
+    bytes = enc.encode(text);
+  }
+
+  const metadata = catalogPieceMetadata(session.assetId, nextVer);
+  const catalogPieceCid = String(computePieceCidFromBytes(bytes));
+  session.seedStagedPieceForFinalize({
     path: "filstream_catalog.json",
     mimeType: "application/json",
-    pieceCid: piece.pieceCid,
-    retrievalUrl: piece.retrievalUrl,
-    offset: 0,
-    length: bytes.byteLength,
+    data: bytes,
+    pieceMetadata: metadata,
     variant: metadata.FS_VAR || "root",
     sequence: null,
-    segmentIndex: null,
   });
-  return { catalogVersion: nextVer, catalogPieceCid: piece.pieceCid };
+  return { catalogVersion: nextVer, catalogPieceCid };
 }
 
 /**
@@ -2058,6 +2328,12 @@ export class BrowserFilstreamUploadSession {
      * @type {{ path: string, mimeType: string, data: Uint8Array } | null}
      */
     this.posterStagedFile = null;
+    /**
+     * Optional animated WebP preview (20 frames), uploaded as its own piece during finalize.
+     *
+     * @type {{ path: string, mimeType: string, data: Uint8Array } | null}
+     */
+    this.posterAnimStagedFile = null;
     this.finalized = false;
     /** Concurrent `context.store()` calls (PDP piece uploads). */
     this._pdpUploadsInFlight = 0;
@@ -2079,6 +2355,34 @@ export class BrowserFilstreamUploadSession {
      * @type {(() => void) | null | undefined}
      */
     this.onStagingStateChanged = undefined;
+    /**
+     * During `finalizeUpload`, PDP `store()` calls are queued here and flushed in one parallel batch.
+     *
+     * @type {{ data: Uint8Array, pieceRef: import("@filoz/synapse-sdk").PieceCID }[] | null}
+     */
+    this._finalizePdpFlushJobs = null;
+    /**
+     * Optional prefetch: same chain scan + fetch as `appendFilstreamCatalogPiece` (batched `getActivePieces`).
+     *
+     * @type {Promise<{ retrievalUrl: string, doc: unknown, catalogVersion: number } | null> | null}
+     */
+    this._catalogMergePrefetch = null;
+  }
+
+  /**
+   * Start loading latest `filstream_catalog.json` for merge (safe after `dataSetId` + Synapse exist).
+   * Overlaps with encode/upload so finalize does not wait on chain scan + fetch.
+   */
+  prefetchCatalogMergeForFinalize() {
+    const dsId = this.dataSetId;
+    if (dsId == null || !this.synapse) return;
+    if (this._catalogMergePrefetch) return;
+    this._catalogMergePrefetch = fetchLatestCatalogJsonForDataSet({
+      chainId: this.cfg.chainId,
+      dataSetId: dsId,
+      providerId: this.providerId,
+      synapse: this.synapse,
+    }).catch(() => null);
   }
 
   _notifyStagingStateChanged() {
@@ -2378,6 +2682,7 @@ export class BrowserFilstreamUploadSession {
    *   variant: string,
    *   sequence: number | null,
    *   abandoned?: boolean,
+   *   pieceCid?: import("@filoz/synapse-sdk").PieceCID,
    * }} input
    * @returns {Promise<PieceRecord>}
    */
@@ -2402,7 +2707,10 @@ export class BrowserFilstreamUploadSession {
     session._notifyStagingStateChanged();
     let storeResult;
     try {
-      storeResult = await session.context.store(input.bytes);
+      storeResult = await session.context.store(
+        input.bytes,
+        input.pieceCid != null ? { pieceCid: input.pieceCid } : {},
+      );
     } finally {
       session._pdpUploadsInFlight -= 1;
       session._notifyStagingStateChanged();
@@ -2431,6 +2739,95 @@ export class BrowserFilstreamUploadSession {
     session.piecesByCid.set(record.pieceCid, record);
     session._notifyStagingStateChanged();
     return record;
+  }
+
+  /**
+   * Register a staged file for finalize: CommP + retrieval URL from CID, queue one PDP `store()`.
+   * URLs match post-upload `getPieceUrl` / `getPieceRetrievalUrl`, so manifest/meta can be built
+   * before bytes hit the network.
+   *
+   * @param {{
+   *   path: string,
+   *   mimeType: string,
+   *   data: Uint8Array,
+   *   pieceMetadata: Record<string, string>,
+   *   variant: string,
+   *   sequence: number | null,
+   * }} input
+   */
+  seedStagedPieceForFinalize(input) {
+    if (!this._finalizePdpFlushJobs) {
+      throw new StoreError(500, "finalize PDP batch not active");
+    }
+    if (input.data.byteLength < SYNAPSE_MIN_PIECE_BYTES) {
+      throw new StoreError(
+        400,
+        `Piece payload too small for Synapse store() (${input.data.byteLength} bytes, min ${SYNAPSE_MIN_PIECE_BYTES})`,
+      );
+    }
+    if (input.data.byteLength > SYNAPSE_MAX_PIECE_BYTES) {
+      throw new StoreError(
+        400,
+        `Piece payload too large for Synapse store() (${input.data.byteLength} bytes, max ${SYNAPSE_MAX_PIECE_BYTES})`,
+      );
+    }
+    const pieceRef = computePieceCidFromBytes(input.data);
+    const pieceCid = String(pieceRef);
+    const retrievalUrl = syncPieceRetrievalUrl(this.context, pieceRef);
+    if (!retrievalUrl) {
+      throw new StoreError(500, "getPieceUrl failed for staged piece");
+    }
+    /** @type {PieceRecord} */
+    const record = {
+      pieceRef,
+      pieceCid,
+      retrievalUrl,
+      byteLength: input.data.byteLength,
+      pieceMetadata: input.pieceMetadata,
+      committed: false,
+      abandoned: false,
+      variant: input.variant,
+      sequence: input.sequence,
+      storedAt: new Date().toISOString(),
+    };
+    this.piecesByCid.set(pieceCid, record);
+    this.fileMappings.push({
+      path: input.path,
+      mimeType: input.mimeType,
+      pieceCid,
+      retrievalUrl,
+      offset: 0,
+      length: input.data.byteLength,
+      variant: input.variant,
+      sequence: input.sequence,
+      segmentIndex: null,
+    });
+    this._finalizePdpFlushJobs.push({ data: input.data, pieceRef });
+    this._notifyStagingStateChanged();
+  }
+
+  /**
+   * @param {{ data: Uint8Array, pieceRef: import("@filoz/synapse-sdk").PieceCID }} job
+   */
+  async _pdpStorePrecomputedPiece(job) {
+    if (!this.context || typeof this.context.store !== "function") {
+      throw new StoreError(500, "Storage context.store is unavailable");
+    }
+    this._pdpUploadsInFlight += 1;
+    this._notifyStagingStateChanged();
+    try {
+      await this.context.store(job.data, { pieceCid: job.pieceRef });
+    } finally {
+      this._pdpUploadsInFlight -= 1;
+      this._notifyStagingStateChanged();
+    }
+  }
+
+  async flushFinalizePdpBatch() {
+    const jobs = this._finalizePdpFlushJobs;
+    this._finalizePdpFlushJobs = null;
+    if (!jobs || jobs.length === 0) return;
+    await Promise.all(jobs.map((job) => this._pdpStorePrecomputedPiece(job)));
   }
 
   /**
@@ -2632,6 +3029,7 @@ export class BrowserFilstreamUploadSession {
   async handleListingDetails(detail) {
     this.listingDetailsReceived = true;
     this.posterStagedFile = null;
+    this.posterAnimStagedFile = null;
     if (!detail || typeof detail !== "object") return;
     const d = /** @type {Record<string, unknown>} */ (detail);
     const metaPath =
@@ -2651,7 +3049,7 @@ export class BrowserFilstreamUploadSession {
       const rawName =
         typeof d.posterFileName === "string" && d.posterFileName.trim() !== ""
           ? d.posterFileName.trim()
-          : "poster.png";
+          : "poster.jpg";
       const path = sanitizePosterPath(rawName);
       const mime =
         typeof d.posterMimeType === "string" && d.posterMimeType.trim() !== ""
@@ -2661,6 +3059,23 @@ export class BrowserFilstreamUploadSession {
         path,
         mimeType: mime,
         data: pb,
+      };
+    }
+    const ab = d.posterAnimBytes;
+    if (ab instanceof Uint8Array && ab.byteLength > 0) {
+      const rawAnimName =
+        typeof d.posterAnimFileName === "string" && d.posterAnimFileName.trim() !== ""
+          ? d.posterAnimFileName.trim()
+          : "listing-preview.webp";
+      const animPath = sanitizePosterPath(rawAnimName);
+      const animMime =
+        typeof d.posterAnimMimeType === "string" && d.posterAnimMimeType.trim() !== ""
+          ? d.posterAnimMimeType.trim()
+          : defaultMimeForPath(animPath);
+      this.posterAnimStagedFile = {
+        path: animPath,
+        mimeType: animMime,
+        data: ab,
       };
     }
   }
@@ -2755,13 +3170,18 @@ export class BrowserFilstreamUploadSession {
     const livePieces = [...this.piecesByCid.values()].filter((p) => !p.abandoned);
     const livePieceSet = new Set(livePieces.map((p) => p.pieceCid));
     const files = this.fileMappings.filter((f) => livePieceSet.has(f.pieceCid));
-    const playback = extractPlaybackUrls(files, this.posterStagedFile?.path ?? null);
+    const playback = extractPlaybackUrls(
+      files,
+      this.posterStagedFile?.path ?? null,
+      this.posterAnimStagedFile?.path ?? null,
+    );
     /** @type {Record<string, string>} */
     const playbackOut = {};
     if (playback.masterAppUrl) playbackOut.masterAppUrl = playback.masterAppUrl;
     if (playback.manifestUrl) playbackOut.manifestUrl = playback.manifestUrl;
     if (playback.metaJsonUrl) playbackOut.metaJsonUrl = playback.metaJsonUrl;
     if (playback.posterUrl) playbackOut.posterUrl = playback.posterUrl;
+    if (playback.posterAnimUrl) playbackOut.posterAnimUrl = playback.posterAnimUrl;
     if (playback.catalogJsonUrl) playbackOut.catalogJsonUrl = playback.catalogJsonUrl;
     return {
       version: 1,
@@ -2880,6 +3300,7 @@ export class BrowserFilstreamUploadSession {
    *   manifestUrl: string | null,
    *   metaJsonUrl: string | null,
    *   posterUrl: string | null,
+   *   posterAnimUrl: string | null,
    *   catalogJsonUrl: string | null,
    *   dataSetId: number | null,
    *   catalogVersion: number | null,
@@ -2891,77 +3312,209 @@ export class BrowserFilstreamUploadSession {
     if (this.finalized) {
       throw new StoreError(409, "Upload is already finalized");
     }
-    for (const buffer of this.variantBuffers.values()) {
-      await this.flushVariantBuffer(buffer);
-    }
-    await this._waitForVariantUploadsIdle();
-    this._throwIfVariantUploadFailed();
-    this.rewriteVariantPlaylists();
-    const variantPlaylists = [...this.textFiles.values()].filter((f) =>
-      VARIANT_PLAYLIST_APP_RE.test(f.path),
-    );
-    await Promise.all(variantPlaylists.map((file) => this.storeStagedFile(file)));
-    this.rewriteMasterPlaylistFile();
-    const master = this.textFiles.get("master-app.m3u8");
-    if (master) {
-      await this.storeStagedFile(master);
-    }
-    if (this.posterStagedFile) {
-      await this.storeStagedFile(this.posterStagedFile);
-    }
-    const manifestDraft = this.buildManifest();
-    const manifestDraftText = JSON.stringify(manifestDraft, null, 2);
-    await this.storeStagedFile({
-      path: "manifest.json",
-      mimeType: "application/json",
-      data: new TextEncoder().encode(manifestDraftText),
-    });
-
-    const liveForMetaUrls = this.fileMappings.filter((f) => {
-      const p = this.piecesByCid.get(f.pieceCid);
-      return p != null && !p.abandoned;
-    });
-    const urlsForMeta = extractPlaybackUrls(
-      liveForMetaUrls,
-      this.posterStagedFile?.path ?? null,
-    );
-    const publishedMeta = buildPublishedMetaDocument(this, urlsForMeta);
-    const metaBytes = encodeJsonWithMinPiecePadding(publishedMeta);
-    this.textFiles.set("meta.json", {
-      path: "meta.json",
-      mimeType: "application/json",
-      data: metaBytes,
-    });
-    await this.storeStagedFile({
-      path: "meta.json",
-      mimeType: "application/json",
-      data: metaBytes,
-    });
-
-    abandonUncommittedStagingByPath(this, "manifest.json");
-
-    const manifestFinal = this.buildManifest();
-    const manifestFinalText = JSON.stringify(manifestFinal, null, 2);
-    await this.storeStagedFile({
-      path: "manifest.json",
-      mimeType: "application/json",
-      data: new TextEncoder().encode(manifestFinalText),
-    });
-
+    /** @type {Record<string, unknown> | null} */
+    let publishedMeta = null;
     /** @type {{ catalogVersion: number | null, catalogPieceCid: string | null }} */
     let catalogOut = { catalogVersion: null, catalogPieceCid: null };
+    this._finalizePdpFlushJobs = [];
     try {
-      catalogOut = await appendFilstreamCatalogPiece(this);
-    } catch (e) {
-      console.warn("[filstream] catalog append failed", e);
+      for (const buffer of this.variantBuffers.values()) {
+        await this.flushVariantBuffer(buffer);
+      }
+      await this._waitForVariantUploadsIdle();
+      this._throwIfVariantUploadFailed();
+      this.rewriteVariantPlaylists();
+      const variantPlaylists = [...this.textFiles.values()].filter((f) =>
+        VARIANT_PLAYLIST_APP_RE.test(f.path),
+      );
+      for (const file of variantPlaylists) {
+        const metadata = filePieceMetadata(this.assetId, file.path);
+        this.seedStagedPieceForFinalize({
+          path: file.path,
+          mimeType: file.mimeType,
+          data: file.data,
+          pieceMetadata: metadata,
+          variant: metadata.FS_VAR || "root",
+          sequence: null,
+        });
+      }
+      this.rewriteMasterPlaylistFile();
+      const master = this.textFiles.get("master-app.m3u8");
+      if (master) {
+        const md = filePieceMetadata(this.assetId, master.path);
+        this.seedStagedPieceForFinalize({
+          path: master.path,
+          mimeType: master.mimeType,
+          data: master.data,
+          pieceMetadata: md,
+          variant: md.FS_VAR || "root",
+          sequence: null,
+        });
+      }
+      if (this.posterStagedFile) {
+        const p = this.posterStagedFile;
+        const md = filePieceMetadata(this.assetId, p.path);
+        this.seedStagedPieceForFinalize({
+          path: p.path,
+          mimeType: p.mimeType,
+          data: p.data,
+          pieceMetadata: md,
+          variant: md.FS_VAR || "root",
+          sequence: null,
+        });
+      }
+      if (this.posterAnimStagedFile) {
+        const p = this.posterAnimStagedFile;
+        const md = filePieceMetadata(this.assetId, p.path);
+        this.seedStagedPieceForFinalize({
+          path: p.path,
+          mimeType: p.mimeType,
+          data: p.data,
+          pieceMetadata: md,
+          variant: md.FS_VAR || "root",
+          sequence: null,
+        });
+      }
+
+      const manifestDraft = this.buildManifest();
+      const manifestDraftText = JSON.stringify(manifestDraft, null, 2);
+      const manifestDraftData = new TextEncoder().encode(manifestDraftText);
+      const mdm = filePieceMetadata(this.assetId, "manifest.json");
+      this.seedStagedPieceForFinalize({
+        path: "manifest.json",
+        mimeType: "application/json",
+        data: manifestDraftData,
+        pieceMetadata: mdm,
+        variant: mdm.FS_VAR || "root",
+        sequence: null,
+      });
+
+      const liveForMetaUrls = this.fileMappings.filter((f) => {
+        const p = this.piecesByCid.get(f.pieceCid);
+        return p != null && !p.abandoned;
+      });
+      const urlsForMeta = extractPlaybackUrls(
+        liveForMetaUrls,
+        this.posterStagedFile?.path ?? null,
+        this.posterAnimStagedFile?.path ?? null,
+      );
+      publishedMeta = buildPublishedMetaDocument(this, urlsForMeta);
+      const metaBytes = encodeJsonWithMinPiecePadding(publishedMeta);
+      this.textFiles.set("meta.json", {
+        path: "meta.json",
+        mimeType: "application/json",
+        data: metaBytes,
+      });
+      const metam = filePieceMetadata(this.assetId, "meta.json");
+      this.seedStagedPieceForFinalize({
+        path: "meta.json",
+        mimeType: "application/json",
+        data: metaBytes,
+        pieceMetadata: metam,
+        variant: metam.FS_VAR || "root",
+        sequence: null,
+      });
+
+      abandonUncommittedStagingByPath(this, "manifest.json");
+
+      const manifestFinal = this.buildManifest();
+      const manifestFinalText = JSON.stringify(manifestFinal, null, 2);
+      const manifestFinalData = new TextEncoder().encode(manifestFinalText);
+      const mdm2 = filePieceMetadata(this.assetId, "manifest.json");
+      this.seedStagedPieceForFinalize({
+        path: "manifest.json",
+        mimeType: "application/json",
+        data: manifestFinalData,
+        pieceMetadata: mdm2,
+        variant: mdm2.FS_VAR || "root",
+        sequence: null,
+      });
+
+      try {
+        const catFirst = await appendFilstreamCatalogPiece(this);
+        catalogOut = {
+          catalogVersion: catFirst.catalogVersion,
+          catalogPieceCid: catFirst.catalogPieceCid,
+        };
+        if (
+          catFirst.catalogDoc != null &&
+          catFirst.catalogPieceCid != null &&
+          catFirst.catalogVersion != null
+        ) {
+          const metaMap = this.fileMappings.find((f) => f.path === "meta.json");
+          const catalogMap = this.fileMappings.find((f) => f.path === "filstream_catalog.json");
+          const metaU = typeof metaMap?.retrievalUrl === "string" ? metaMap.retrievalUrl.trim() : "";
+          const catU =
+            typeof catalogMap?.retrievalUrl === "string" ? catalogMap.retrievalUrl.trim() : "";
+          if (metaU !== "" && catU !== "") {
+            const ds =
+              this.dataSetId != null && Number.isFinite(this.dataSetId)
+                ? Number(this.dataSetId)
+                : null;
+            const viewerRedirect = buildReviewViewerIframeSrc(metaU, catU, ds);
+            const embedPlayer = buildReviewViewerEmbedSrc(metaU, catU, ds);
+            const pb =
+              publishedMeta &&
+              typeof publishedMeta === "object" &&
+              publishedMeta !== null &&
+              typeof publishedMeta.playback === "object" &&
+              publishedMeta.playback !== null
+                ? /** @type {{ masterAppUrl?: string }} */ (publishedMeta.playback)
+                : {};
+            const masterVideoUrl =
+              typeof pb.masterAppUrl === "string" && pb.masterAppUrl.trim() !== ""
+                ? pb.masterAppUrl.trim()
+                : null;
+            const htmlBytes = buildFilstreamShareOgHtmlBytesFromMeta(
+              publishedMeta,
+              viewerRedirect,
+              embedPlayer,
+              masterVideoUrl,
+            );
+            const sharePieceMeta = filePieceMetadata(this.assetId, "share.html");
+            this.seedStagedPieceForFinalize({
+              path: "share.html",
+              mimeType: "text/html",
+              data: htmlBytes,
+              pieceMetadata: sharePieceMeta,
+              variant: sharePieceMeta.FS_VAR || "root",
+              sequence: null,
+            });
+            const shareRow = this.fileMappings.find((f) => f.path === "share.html");
+            const shareU =
+              typeof shareRow?.retrievalUrl === "string" ? shareRow.retrievalUrl.trim() : "";
+            if (shareU !== "") {
+              const catSecond = await replaceFilstreamCatalogWithShare(
+                this,
+                catFirst.catalogDoc,
+                shareU,
+                catFirst.catalogVersion,
+              );
+              catalogOut = {
+                catalogVersion: catSecond.catalogVersion,
+                catalogPieceCid: catSecond.catalogPieceCid,
+              };
+            }
+          }
+        }
+      } catch (e) {
+        console.warn("[filstream] catalog append failed", e);
+      }
+    } finally {
+      await this.flushFinalizePdpBatch();
     }
+
     const commit = await this.commitPendingPieces();
     this.finalized = true;
     const liveFiles = this.fileMappings.filter((f) => {
       const p = this.piecesByCid.get(f.pieceCid);
       return p != null && !p.abandoned;
     });
-    const playback = extractPlaybackUrls(liveFiles, this.posterStagedFile?.path ?? null);
+    const playback = extractPlaybackUrls(
+      liveFiles,
+      this.posterStagedFile?.path ?? null,
+      this.posterAnimStagedFile?.path ?? null,
+    );
     return {
       finalized: true,
       committedCount: commit.committedCount,
@@ -2970,6 +3523,7 @@ export class BrowserFilstreamUploadSession {
       manifestUrl: playback.manifestUrl,
       metaJsonUrl: playback.metaJsonUrl,
       posterUrl: playback.posterUrl,
+      posterAnimUrl: playback.posterAnimUrl,
       catalogJsonUrl: playback.catalogJsonUrl,
       dataSetId: this.dataSetId,
       catalogVersion: catalogOut.catalogVersion,

@@ -102,7 +102,7 @@ export function uploadConfigurePanel(props) {
         aria-label="Wallet connected"
       >
         <div class="wallet-injected-block">
-          <div class="wallet-connected-row">
+          <div class="wallet-connected-row wallet-connected-row--fund">
             <p class="wallet-address" title=${walletAddress ?? ""}>
               ${connectedWalletName
                 ? html`<span class="wallet-via">${connectedWalletName}</span> · `
@@ -118,6 +118,11 @@ export function uploadConfigurePanel(props) {
               Disconnect
             </button>
           </div>
+          ${sessionExpiresSummary
+            ? html`<p class="wallet-session-expiry">
+                Session ends ${sessionExpiresSummary}
+              </p>`
+            : null}
         </div>
       </section>
     `;
@@ -150,7 +155,7 @@ export function uploadConfigurePanel(props) {
 
         ${connected
           ? html`
-              <div class="wallet-connected-row">
+              <div class="wallet-connected-row wallet-connected-row--fund">
                 <p class="wallet-address" title=${walletAddress ?? ""}>
                   ${connectedWalletName
                     ? html`<span class="wallet-via">${connectedWalletName}</span> · `
@@ -166,149 +171,154 @@ export function uploadConfigurePanel(props) {
                   Disconnect
                 </button>
               </div>
-              <div class="session-key-block" aria-label="Filecoin session key">
-                <h4 class="configure-section-title">Session key</h4>
-                <p class="configure-section-lead">
-                  <a
-                    href="https://docs.filecoin.cloud/developer-guides/session-keys/"
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    >What is this?</a
-                  >
-                  Registers who may sign uploads — it does not move money.
-                </p>
-                ${sessionAuthBusy
-                  ? html`
-                      <div class="session-auth-progress" role="status" aria-live="polite">
-                        <span class="session-auth-spinner" aria-hidden="true"></span>
-                        <div class="session-auth-progress-copy">
-                          <strong class="session-auth-progress-title">${waitUi.title}</strong>
-                          <p class="session-auth-progress-detail">${waitUi.detail}</p>
-                        </div>
-                      </div>
-                    `
-                  : null}
-                ${!sessionAuthBusy && sessionAuthReady
-                  ? html`
-                      <p class="session-auth-ok">
-                        ${fundingReady
-                          ? "Session key and storage funds are set."
-                          : fundingBusy
-                            ? "Session key done — confirm FilecoinPay in your wallet next."
-                            : "Session key done — your wallet still needs a FilecoinPay step for storage funds."}
-                        ${sessionExpiresSummary
-                          ? html`<span class="session-expiry"
-                              >Session ends <strong>${sessionExpiresSummary}</strong></span
-                            >`
-                          : null}
+              ${sessionAuthReady && sessionExpiresSummary
+                ? html`<p class="wallet-session-expiry">
+                    Session ends ${sessionExpiresSummary}
+                  </p>`
+                : null}
+              ${!sessionAuthReady || sessionAuthBusy
+                ? html`
+                    <div class="session-key-block" aria-label="Filecoin session key">
+                      ${!sessionAuthReady
+                        ? html`
+                            <h4 class="configure-section-title">Session key</h4>
+                            <p class="configure-section-lead">
+                              <a
+                                href="https://docs.filecoin.cloud/developer-guides/session-keys/"
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                >What is this?</a
+                              >
+                              Registers who may sign uploads — it does not move money.
+                            </p>
+                          `
+                        : null}
+                      ${sessionAuthBusy
+                        ? html`
+                            <div class="session-auth-progress" role="status" aria-live="polite">
+                              <span class="session-auth-spinner" aria-hidden="true"></span>
+                              <div class="session-auth-progress-copy">
+                                <strong class="session-auth-progress-title">${waitUi.title}</strong>
+                                <p class="session-auth-progress-detail">${waitUi.detail}</p>
+                              </div>
+                            </div>
+                          `
+                        : null}
+                      ${!sessionAuthBusy && !sessionAuthReady
+                        ? html`
+                            ${typeof onAuthorizeSession === "function"
+                              ? html`
+                                  <div class="session-key-actions">
+                                    <button
+                                      type="button"
+                                      class="btn btn-primary session-authorize-btn"
+                                      ?disabled=${sessionBusy || !canAuthorizeSession}
+                                      @click=${onAuthorizeSession}
+                                    >
+                                      Authorize upload session
+                                    </button>
+                                  </div>
+                                `
+                              : null}
+                          `
+                        : null}
+                      ${sessionAuthError
+                        ? html`<p class="wallet-error" role="alert">${sessionAuthError}</p>`
+                        : null}
+                      ${!sessionAuthReady
+                        ? html`
+                            <p
+                              class="configure-section-lead configure-hint-subtle"
+                              title="Wallet network must match the FilStream store chain (storeChainId in config)."
+                            >
+                              Use the same network as FilStream in your wallet.
+                            </p>
+                          `
+                        : null}
+                    </div>
+                  `
+                : null}
+              ${sessionAuthReady && typeof onRefreshSessionKey === "function" && fundingReady
+                ? html`
+                    <button
+                      type="button"
+                      class="btn btn-secondary btn-session-refresh-inline"
+                      title="New on-chain authorization (~1h). Use after reload if uploads fail."
+                      ?disabled=${sessionBusy || !canAuthorizeSession}
+                      @click=${onRefreshSessionKey}
+                    >
+                      Refresh session key
+                    </button>
+                  `
+                : null}
+              ${sessionAuthReady
+                ? html`
+                    <div class="session-key-block" aria-label="Warm storage funding">
+                      <h4 class="configure-section-title">Storage funds (FilecoinPay)</h4>
+                      <p
+                        class="configure-section-lead configure-hint-subtle"
+                        title="Session key = signing. FilecoinPay = tUSDFC deposit and operator approval for warm storage."
+                      >
+                        One-time operator approval and tUSDFC deposit or top-up if your balance is short.
                       </p>
-                      ${typeof onRefreshSessionKey === "function" && fundingReady
+                      ${fundingBusy
+                        ? html`
+                            <div class="session-auth-progress" role="status" aria-live="polite">
+                              <span class="session-auth-spinner" aria-hidden="true"></span>
+                              <div class="session-auth-progress-copy">
+                                <strong class="session-auth-progress-title">Balance setup</strong>
+                                <p class="session-auth-progress-detail">
+                                  ${fundingSummary || "Checking account funds, lockup, and approvals…"}
+                                </p>
+                              </div>
+                            </div>
+                          `
+                        : null}
+                      ${fundingReady && !fundingBusy
+                        ? html`
+                            <p class="session-auth-ok">
+                              Balance OK.
+                              ${fundingSummary
+                                ? html`<span class="session-expiry"
+                                    ><strong>${fundingSummary}</strong></span
+                                  >`
+                                : null}
+                              ${fundingTxHash
+                                ? html`<span class="session-expiry"
+                                    >Tx: <code>${fundingTxHash}</code></span
+                                  >`
+                                : null}
+                            </p>
+                          `
+                        : null}
+                      ${!fundingReady && !fundingBusy
+                        ? html`
+                            <p
+                              class="configure-section-lead"
+                              title="FilStream may request one upfront top-up: max(5 tUSDFC, 120% of estimated deposit)."
+                            >
+                              Checked automatically before you define the listing.
+                            </p>
+                          `
+                        : null}
+                      ${fundingError
+                        ? html`<p class="wallet-error" role="alert">${fundingError}</p>`
+                        : null}
+                      ${typeof onRetryFundingCheck === "function" && !fundingBusy
                         ? html`
                             <button
                               type="button"
                               class="btn btn-secondary session-refresh-btn"
-                              title="New on-chain authorization (~1h). Use after reload if uploads fail."
-                              ?disabled=${sessionBusy || !canAuthorizeSession}
-                              @click=${onRefreshSessionKey}
+                              ?disabled=${sessionBusy || !connected}
+                              @click=${onRetryFundingCheck}
                             >
-                              Refresh session key
+                              Retry funding check
                             </button>
                           `
                         : null}
-                    `
-                  : null}
-                ${!sessionAuthBusy && !sessionAuthReady
-                  ? html`
-                      ${typeof onAuthorizeSession === "function"
-                        ? html`
-                            <div class="session-key-actions">
-                              <button
-                                type="button"
-                                class="btn btn-primary session-authorize-btn"
-                                ?disabled=${sessionBusy || !canAuthorizeSession}
-                                @click=${onAuthorizeSession}
-                              >
-                                Authorize upload session
-                              </button>
-                            </div>
-                          `
-                        : null}
-                    `
-                  : null}
-                ${sessionAuthError
-                  ? html`<p class="wallet-error" role="alert">${sessionAuthError}</p>`
-                  : null}
-                <p
-                  class="configure-section-lead configure-hint-subtle"
-                  title="Wallet network must match the FilStream store chain (storeChainId in config)."
-                >
-                  Use the same network as FilStream in your wallet.
-                </p>
-              </div>
-              <div class="session-key-block" aria-label="Warm storage funding">
-                <h4 class="configure-section-title">Storage funds (FilecoinPay)</h4>
-                <p
-                  class="configure-section-lead configure-hint-subtle"
-                  title="Session key = signing. FilecoinPay = tUSDFC deposit and operator approval for warm storage."
-                >
-                  Different contract than the session key: FilecoinPay holds tUSDFC and may ask for a one-time operator approval, then a deposit or top-up if your balance is short.
-                </p>
-                ${fundingBusy
-                  ? html`
-                      <div class="session-auth-progress" role="status" aria-live="polite">
-                        <span class="session-auth-spinner" aria-hidden="true"></span>
-                        <div class="session-auth-progress-copy">
-                          <strong class="session-auth-progress-title">Balance setup</strong>
-                          <p class="session-auth-progress-detail">
-                            ${fundingSummary || "Checking account funds, lockup, and approvals…"}
-                          </p>
-                        </div>
-                      </div>
-                    `
-                  : null}
-                ${fundingReady && !fundingBusy
-                  ? html`
-                      <p class="session-auth-ok">
-                        Balance OK.
-                        ${fundingSummary
-                          ? html`<span class="session-expiry"
-                              ><strong>${fundingSummary}</strong></span
-                            >`
-                          : null}
-                        ${fundingTxHash
-                          ? html`<span class="session-expiry"
-                              >Tx: <code>${fundingTxHash}</code></span
-                            >`
-                          : null}
-                      </p>
-                    `
-                  : null}
-                ${!fundingReady && !fundingBusy
-                  ? html`
-                      <p
-                        class="configure-section-lead"
-                        title="FilStream may request one upfront top-up: max(5 tUSDFC, 120% of estimated deposit)."
-                      >
-                        Checked automatically before you define the listing.
-                      </p>
-                    `
-                  : null}
-                ${fundingError
-                  ? html`<p class="wallet-error" role="alert">${fundingError}</p>`
-                  : null}
-                ${typeof onRetryFundingCheck === "function" && !fundingBusy
-                  ? html`
-                      <button
-                        type="button"
-                        class="btn btn-secondary session-refresh-btn"
-                        ?disabled=${sessionBusy || !connected}
-                        @click=${onRetryFundingCheck}
-                      >
-                        Retry funding check
-                      </button>
-                    `
-                  : null}
-              </div>
+                    </div>
+                  `
+                : null}
             `
           : null}
 

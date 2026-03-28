@@ -62,6 +62,36 @@ export function creatorHrefForCatalog(catalogUrl, baseHref, datasetId) {
 }
 
 /**
+ * @param {unknown} meta Parsed `meta.json`
+ * @returns {string | null}
+ */
+export function posterAnimUrlFromMetaJson(meta) {
+  if (
+    meta &&
+    typeof meta === "object" &&
+    meta !== null &&
+    typeof /** @type {{ posterAnim?: { url?: string } }} */ (meta).posterAnim === "object" &&
+    /** @type {{ posterAnim?: { url?: string } | null }} */ (meta).posterAnim !== null
+  ) {
+    const pa = /** @type {{ posterAnim?: { url?: string } }} */ (meta).posterAnim;
+    if (pa && typeof pa.url === "string") {
+      const u = pa.url.trim();
+      if (u) return u;
+    }
+  }
+  const m = meta && typeof meta === "object" && meta !== null ? meta : null;
+  const pb =
+    m &&
+    typeof /** @type {{ playback?: { posterAnimUrl?: string } }} */ (m).playback === "object" &&
+    /** @type {{ playback?: { posterAnimUrl?: string } | null }} */ (m).playback !== null
+      ? /** @type {{ playback?: { posterAnimUrl?: string } }} */ (m).playback
+      : null;
+  const s =
+    pb && typeof pb.posterAnimUrl === "string" ? pb.posterAnimUrl.trim() : "";
+  return s || null;
+}
+
+/**
  * @param {unknown} doc Parsed `filstream_catalog.json`
  * @returns {{ creatorName: string | null, creatorPosterUrl: string | null }}
  */
@@ -79,20 +109,22 @@ export function creatorInfoFromCatalog(doc) {
 }
 
 /**
- * Catalog row: `title`, `metapath` (meta.json URL), optional `posterUrl`.
+ * Catalog row: `title`, `metapath` (meta.json URL), optional `posterUrl`, optional `posterAnimUrl` (animated mini-poster), optional `share` (Open Graph landing page URL).
  *
  * @param {unknown} doc
- * @returns {{ title: string, metapath: string, posterUrl?: string }[]}
+ * @returns {{ title: string, metapath: string, posterUrl?: string, posterAnimUrl?: string, share?: string }[]}
  */
 export function moviesFromCatalog(doc) {
   if (!doc || typeof doc !== "object" || doc === null) return [];
   const movies = /** @type {{ movies?: unknown }} */ (doc).movies;
   if (!Array.isArray(movies)) return [];
-  /** @type {{ title: string, metapath: string, posterUrl?: string }[]} */
+  /** @type {{ title: string, metapath: string, posterUrl?: string, posterAnimUrl?: string, share?: string }[]} */
   const out = [];
   for (const m of movies) {
     if (!m || typeof m !== "object") continue;
-    const row = /** @type {{ title?: unknown, metapath?: unknown, posterUrl?: unknown }} */ (m);
+    const row = /** @type {{ title?: unknown, metapath?: unknown, posterUrl?: unknown, posterAnimUrl?: unknown, share?: unknown }} */ (
+      m
+    );
     const title = typeof row.title === "string" ? row.title.trim() : "";
     const metapath = typeof row.metapath === "string" ? row.metapath.trim() : "";
     if (!metapath) continue;
@@ -100,9 +132,19 @@ export function moviesFromCatalog(doc) {
       typeof row.posterUrl === "string" && row.posterUrl.trim() !== ""
         ? row.posterUrl.trim()
         : undefined;
-    /** @type {{ title: string, metapath: string, posterUrl?: string }} */
+    const pau =
+      typeof row.posterAnimUrl === "string" && row.posterAnimUrl.trim() !== ""
+        ? row.posterAnimUrl.trim()
+        : undefined;
+    const sh =
+      typeof row.share === "string" && row.share.trim() !== "" && /^https?:\/\//i.test(row.share.trim())
+        ? row.share.trim()
+        : undefined;
+    /** @type {{ title: string, metapath: string, posterUrl?: string, posterAnimUrl?: string, share?: string }} */
     const item = { title: title || "Untitled", metapath };
     if (pu) item.posterUrl = pu;
+    if (pau) item.posterAnimUrl = pau;
+    if (sh) item.share = sh;
     out.push(item);
   }
   return out;

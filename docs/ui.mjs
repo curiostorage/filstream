@@ -2,8 +2,8 @@
  * Wizard shell — edit and refresh; no `npm run build`.
  * Wallet/configure: `upload-configure.mjs`. Transcode + preview: `convert-progress.mjs`. Pipeline: `core.mjs`.
  */
-import { whenPieceHeadServiceWorkerReady } from "./register-piece-head-sw.mjs";
 import { html, render } from "https://cdn.jsdelivr.net/npm/lit-html@3.2.1/+esm";
+import { captureListingAnimatedWebp } from "./animated-webp.mjs";
 import {
   createBrowserUploadSession,
   resolveOrCreateDataSet,
@@ -28,8 +28,8 @@ import {
   requestInjectedProviders,
   subscribeInjectedWallets,
 } from "./eip6963.mjs";
-import { broadcastViewTemplate } from "./filstream-broadcast-view.mjs";
 import { filstreamBrandLit } from "./filstream-brand.mjs";
+import { broadcastViewTemplate } from "./filstream-broadcast-view.mjs";
 import {
   buildReviewViewerIframeSrc,
   ensureFilstreamId,
@@ -38,6 +38,7 @@ import {
   resolveMetaJsonUrlFromFinalize,
 } from "./filstream-config.mjs";
 import { publishMetadataForm } from "./publish-metadata.mjs";
+import { whenPieceHeadServiceWorkerReady } from "./register-piece-head-sw.mjs";
 import {
   authorizeSessionKeyForUpload,
   minExpirationSummaryLocal,
@@ -61,6 +62,37 @@ import {
 } from "./vendor/synapse-browser.mjs";
 
 await whenPieceHeadServiceWorkerReady();
+
+/**
+ * Prefer full `Error.message` (viem includes Details) and walk `cause` so RPC / hex errors are visible.
+ * @param {unknown} e
+ * @returns {string}
+ */
+function formatWizardError(e) {
+  if (e == null) return String(e);
+  const parts = [];
+  let x = e;
+  let depth = 0;
+  while (x != null && depth++ < 6) {
+    if (x instanceof Error) {
+      let line = x.message;
+      if (
+        !line &&
+        typeof DOMException !== "undefined" &&
+        x instanceof DOMException
+      ) {
+        line = x.name;
+      }
+      if (line && !parts.some((p) => p === line || p.includes(line))) parts.push(line);
+    } else {
+      parts.push(String(x));
+      break;
+    }
+    const c = x instanceof Error ? x.cause : undefined;
+    x = c instanceof Error ? c : null;
+  }
+  return parts.length > 0 ? parts.join("\n\n") : String(e);
+}
 
 const WIZARD_MAX_STEP = 5;
 
@@ -95,6 +127,7 @@ const STORE_PHASE_FINALIZE_NOTE =
  *   manifestUrl: string | null,
  *   metaJsonUrl: string | null,
  *   posterUrl: string | null,
+ *   posterAnimUrl: string | null,
  *   catalogJsonUrl: string | null,
  *   dataSetId: number | null,
  *   catalogVersion: number | null,
@@ -301,7 +334,9 @@ async function ensureFundingPreparedForCurrentUpload(force = false) {
   const auth = readStoreSessionAuth();
   const clientAddress = wizardState.walletAddress;
   const sourceFile = wizardState.sourceFile;
-  if (!auth || !clientAddress || !sourceFile) return;
+  if (!auth || !clientAddress || !sourceFile) {
+    return;
+  }
   if (fundingPreflightPromise) {
     await fundingPreflightPromise;
     return;
@@ -388,7 +423,7 @@ async function ensureFundingPreparedForCurrentUpload(force = false) {
       wizardState.fundingError = null;
       maybeAutoAdvanceFromFund();
     } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
+      const msg = formatWizardError(e);
       wizardState.fundingReady = false;
       wizardState.fundingError = msg;
       wizardState.fundingSummary = "";
@@ -497,7 +532,7 @@ async function runFinalizeAfterListingDetail(detail) {
     );
     renderWizard();
   } catch (e) {
-    setWizardStatus(e instanceof Error ? e.message : String(e), "err");
+    setWizardStatus(formatWizardError(e), "err");
   } finally {
     wizardState.storageUploadActive = false;
     wizardState.storeUploadPhaseNote = "";
@@ -707,6 +742,9 @@ async function ensureStoreUploadSession() {
     if (!storeRuntime.uploadId || !storeRuntime.session) {
       throw new Error("store init failed: missing upload session");
     }
+    if (typeof storeRuntime.session.prefetchCatalogMergeForFinalize === "function") {
+      storeRuntime.session.prefetchCatalogMergeForFinalize();
+    }
   })();
   try {
     await storeRuntime.initPromise;
@@ -779,12 +817,24 @@ async function augmentListingDetailsForStoreIngest(originalDetail, basePayload) 
   const bytes = new Uint8Array(await poster.arrayBuffer());
   const name = poster instanceof File ? poster.name : "poster";
   const mime = poster.type || "application/octet-stream";
-  return {
+  /** @type {Record<string, unknown>} */
+  const out = {
     ...basePayload,
     posterBytes: bytes,
     posterFileName: name,
     posterMimeType: mime,
   };
+  const posterAnim = src.posterAnim;
+  if (posterAnim instanceof Blob) {
+    const ab = new Uint8Array(await posterAnim.arrayBuffer());
+    const animName =
+      posterAnim instanceof File ? posterAnim.name : "listing-preview.webp";
+    const animMime = posterAnim.type || "image/webp";
+    out.posterAnimBytes = ab;
+    out.posterAnimFileName = animName;
+    out.posterAnimMimeType = animMime;
+  }
+  return out;
 }
 
 function appendToStoreIngestQueue(eventType, detail) {
@@ -1195,14 +1245,21 @@ function tryMergePlaybackIntoPublishedMeta(finalized) {
   const manifest = typeof f.manifestUrl === "string" ? f.manifestUrl.trim() : "";
   const metaUrl = typeof f.metaJsonUrl === "string" ? f.metaJsonUrl.trim() : "";
   const pu = typeof f.posterUrl === "string" ? f.posterUrl.trim() : "";
+  const pau = typeof f.posterAnimUrl === "string" ? f.posterAnimUrl.trim() : "";
+  const posterAnimMeta =
+    typeof m.posterAnim === "object" && m.posterAnim !== null && !Array.isArray(m.posterAnim)
+      ? /** @type {Record<string, unknown>} */ (m.posterAnim)
+      : {};
   if (mu) nextPlayback.masterAppUrl = mu;
   if (manifest) nextPlayback.manifestUrl = manifest;
   if (metaUrl) nextPlayback.metaJsonUrl = metaUrl;
   if (pu) nextPlayback.posterUrl = pu;
+  if (pau) nextPlayback.posterAnimUrl = pau;
   wizardState.publishedMeta = {
     ...m,
     playback: nextPlayback,
     ...(pu ? { poster: { ...posterMeta, url: pu } } : {}),
+    ...(pau ? { posterAnim: { ...posterAnimMeta, url: pau } } : {}),
   };
 }
 
@@ -1356,7 +1413,7 @@ async function handleAuthorizeSession(opts = {}) {
     flushStoreEventBacklog();
     maybeAutoAdvanceFromFund();
   } catch (e) {
-    wizardState.sessionAuthError = e instanceof Error ? e.message : String(e);
+    wizardState.sessionAuthError = formatWizardError(e);
     wizardState.sessionPrivateKey = "";
     wizardState.sessionExpirations = null;
     resetFundingGateState();
@@ -1373,6 +1430,8 @@ async function handleDefineNext() {
 
   /** @type {File | null} */
   let posterFile = null;
+  /** @type {File | null} */
+  let posterAnimFile = null;
 
   if (wizardState.showDonateButton) {
     if (
@@ -1431,19 +1490,25 @@ async function handleDefineNext() {
         canvas.toBlob(
           (b) =>
             b ? resolve(b) : reject(new Error("Could not encode poster image.")),
-          "image/png",
+          "image/jpeg",
+          0.92,
         );
       });
       if (wizardState.posterObjectUrl) {
         URL.revokeObjectURL(wizardState.posterObjectUrl);
       }
       wizardState.posterObjectUrl = URL.createObjectURL(blob);
-      posterFile = new File([blob], "poster-seek.png", {
-        type: "image/png",
+      posterFile = new File([blob], "poster-seek.jpg", {
+        type: "image/jpeg",
       });
       wizardState.posterImageFile = posterFile;
+
+      const animBlob = await captureListingAnimatedWebp(video, w, h);
+      posterAnimFile = new File([animBlob], "listing-preview.webp", {
+        type: "image/webp",
+      });
     } catch (e) {
-      wizardState.defineNextError = e instanceof Error ? e.message : String(e);
+      wizardState.defineNextError = formatWizardError(e);
     } finally {
       wizardState.defineNextBusy = false;
     }
@@ -1466,6 +1531,7 @@ async function handleDefineNext() {
       ? wizardState.donateAmountUsdfc
       : undefined,
     poster: posterFile,
+    ...(posterAnimFile ? { posterAnim: posterAnimFile } : {}),
   });
 
   if (!detail) {
@@ -1609,18 +1675,16 @@ function renderWizard() {
             ? html`
                 <h1>Store your video as streamable on the Filecoin chain.</h1>
                 <p class="hero-price-estimate">
-                  Rough pricing: under 0.01 USDFC per movie hour per year (warm storage).
+                  About 0.01 USDFC per movie-hour annually.
                 </p>
                 <section class="wizard-step hero-dropzone-wrap" aria-labelledby="step1-title">
-                  <p>Recommended browsers: Chromium-class browsers (Chrome, Edge) with MetaMask or Wallet-Class browsers (Brave, Opera)</p>
+                  <p>Use: Chrome (or similar) browser & Metamask</p>
                   <p id="step1-title" class="hint">
-                    Pick a video, such as
+                    Pick a video, (
                     <a
                       href="https://download.blender.org/peach/bigbuckbunny_movies/big_buck_bunny_1080p_h264.mov"
-                      >Big Buck Bunny</a
-                    >. Output uses <strong>H.264 or VP9</strong>, plus <strong>Opus</strong>. Bitrate
-                    rungs include 1080 / 720 / 360 / 144. After you choose a file, encoding and playback
-                    wallet/configure and transcoding appear <strong>below</strong>. Chromium-class browsers work best.
+                      >Ex</a
+                    >). 
                   </p>
                   <div
                     class="dropzone dropzone--hero"
@@ -2013,7 +2077,7 @@ async function onWizardFileChosen(file) {
       renderWizard();
     },
   }).catch((e) => {
-    setWizardStatus(e.message || String(e), "err");
+    setWizardStatus(formatWizardError(e), "err");
   });
 }
 

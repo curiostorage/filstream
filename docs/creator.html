@@ -20,27 +20,24 @@
         <img id="creator-poster" class="creator-hero-poster" alt="" width="168" height="252" hidden />
       </div>
       <div class="creator-hero-text">
-        <h1 class="creator-title" id="creator-title">Catalog</h1>
+        <h1 class="creator-title">
+          <span id="creator-title">Catalog</span>
+          <span class="creator-title-role" id="creator-title-role" aria-live="polite"></span>
+        </h1>
         <p class="creator-dataset-line" id="creator-dataset-label"></p>
-      </div>
-    </section>
-
-    <section
-      id="creator-identity"
-      class="creator-identity"
-      hidden
-      aria-label="Wallet"
-    >
-      <div class="creator-wallet-row" id="creator-wallet-block">
-        <span class="creator-role" id="creator-role-label" aria-live="polite"></span>
+        <div class="creator-hero-actions" id="creator-hero-actions" hidden>
+          <button type="button" id="creator-enable-edit" class="creator-primary-btn" hidden>
+            Sign-in to edit
+          </button>
+          <button type="button" id="creator-hero-poster-upload" class="creator-poster-btn">
+            Upload
+          </button>
+        </div>
       </div>
     </section>
 
     <section id="creator-edit-section" class="creator-edit-section" hidden aria-label="Edit catalog">
       <p class="creator-edit-hint" id="creator-edit-hint"></p>
-      <button type="button" id="creator-enable-edit" class="creator-primary-btn" hidden>
-        Sign in to edit
-      </button>
       <div id="creator-edit-form" class="creator-edit-form" hidden>
         <label class="creator-field">
           <span>Creator / channel name</span>
@@ -64,7 +61,7 @@
           </div>
         </label>
         <div class="creator-movie-editor-head">
-          <span>Movies (order = catalog order, oldest first)</span>
+          <span>Movies (catalog order, oldest first — drag ⋮⋮ to reorder)</span>
           <button type="button" id="creator-save-btn" class="creator-primary-btn">Save catalog</button>
         </div>
         <p class="creator-save-status" id="creator-save-status" aria-live="polite"></p>

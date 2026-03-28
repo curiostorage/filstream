@@ -1,9 +1,43 @@
-# filstream
+# FilStream
 
-A whole movie upload site at [https://curiostorage.github.io/filstream/](https://curiostorage.github.io/filstream/).
-They're your movies. 
-Share movies with the world without a Terms of Service nor a gatekeeper company, and in a company-independent way.
-Requires tUSDFC in a browser-wallet (Metamask).
+**FilStream brings Web3’s freedoms and possibilities to every skill level in the video space.** You get a full, in-browser path from your files to on-chain storage and shareable playback—without surrendering custody to a platform’s terms or a single company’s roadmap. The experience is intentionally approachable: connect a wallet, walk through the upload flow, and ship video the same way you’d expect from a modern web app, while the plumbing underneath is Filecoin Onchain Cloud (FOC), Synapse, and open protocols.
+
+**It also works as a flagship product:** a real, end-to-end app that stress-tests the stack and surfaces concrete needs in the **FOC ecosystem**—storage, payments, sessions, metadata, and UX—so developers and the community can see what “video on FOC” actually requires in practice.
+
+**It runs on modern devices.** The site is a static, responsive front end (`docs/` on GitHub Pages): phones, tablets, and desktops with current browsers can use the upload wizard and the lightweight viewer. No native install; no server-side app code in your path for day-to-day use.
+
+---
+
+Live site: [https://curiostorage.github.io/filstream/](https://curiostorage.github.io/filstream/)
+
+They’re your movies. Share them with the world without a gatekeeper company or a single vendor’s ToS—storage and links are anchored in open, verifiable infrastructure. The demo flow uses **tUSDFC** in a browser wallet (e.g. MetaMask) on Calibration.
+
+---
+
+## What this is (design)
+
+- **Browser-first pipeline:** Transcoding and segmentation run in the page; encoder output feeds an upload session that stages packed media in **IndexedDB** and streams it to Synapse `store()` as a `ReadableStream`. You stay in one tab for encode → fund → store.
+- **Wallet + session model:** The root account is your **client** account; **session keys** sign upload operations with scoped expiry and permissions—so the UX can be smooth without putting long-lived keys in hot paths.
+- **Static + config-driven:** Pages ship as static HTML/JS/CSS; public RPC, chain, provider, and viewer base URL come from **`window.__FILSTREAM_CONFIG__`** (defaults in [`docs/filstream-config.mjs`](docs/filstream-config.mjs)), aligned with Filecoin Calibration.
+- **Shareable playback:** Published links use the static viewer: `viewer.html?meta=<absolute-https-url-to-meta.json>` so anyone with the URL can play back without your app server.
+- **Creator + catalog:** The repo includes a creator flow and shared catalog/metadata helpers so publishing and discovery stay coherent with the upload path.
+
+---
+
+## What this is (implementation map)
+
+| Area | Role |
+|------|------|
+| [`docs/ui.mjs`](docs/ui.mjs) + [`docs/upload-configure.mjs`](docs/upload-configure.mjs) | Upload wizard UI, wallet/EIP-6963 wiring, step flow |
+| [`docs/core.mjs`](docs/core.mjs) | Encode/segment pipeline feeding the store session |
+| [`docs/browser-store.mjs`](docs/browser-store.mjs) | IndexedDB staging, Synapse session, streaming `store()` |
+| [`docs/vendor/synapse-browser.mjs`](docs/vendor/synapse-browser.mjs) | Bundled Synapse SDK for the browser (rebuild via [`bundle-synapse/`](bundle-synapse/)) |
+| [`docs/viewer/`](docs/viewer/) + [`docs/viewer.html`](docs/viewer.html) | Static playback UI |
+| [`docs/filstream-config.mjs`](docs/filstream-config.mjs) | Public upload defaults (`__FILSTREAM_CONFIG__`) |
+| [`docs/env.example`](docs/env.example) | Field names and legacy `STORE_*` mapping |
+| [`main.go`](main.go) | Tiny static file server for local dev (`docs/` → `http://localhost:8080`) |
+
+---
 
 ## Documentation Map
 

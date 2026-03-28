@@ -2,19 +2,25 @@
  * GitHub Pages entry:
  * `viewer.html?meta=<absolute-https-url-to-meta.json>[&catalog=<absolute-url-to-filstream_catalog.json>][&dataset=<pdp-data-set-id>][&embed=true]`
  *
- * Fetches `meta.json` for playback. When `catalog` is present, the viewer always fetches that
- * `filstream_catalog.json` URL for the sidebar and byline. Optional `dataset` is propagated on
- * creator and sibling viewer links so the creator page can resolve the latest catalog on-chain.
+ * Fetches `meta.json` for playback. When `catalog` is present, the viewer fetches that
+ * `filstream_catalog.json` URL for the sidebar and byline. If the row for this `meta` has no `share`
+ * URL (or the catalog request failed) but `dataset` / `dataSetId` is known, the viewer loads the
+ * latest catalog piece from chain (same helper as the creator) and updates `?catalog=` via
+ * `history.replaceState`.
  * The sidebar shows
- * a right column (newest first): poster 168px + title 192px. Catalog rows include `posterUrl` when
- * published by FilStream so the sidebar does not fetch each `meta.json` for posters; legacy
- * catalogs fall back to fetching `meta` per row when `posterUrl` is absent.
+ * a right column (newest first): poster 168px + title 192px. Catalog rows include `posterUrl` and
+ * optional `posterAnimUrl` (mini animated WebP) when published by FilStream so the sidebar avoids
+ * fetching each `meta.json`; legacy catalogs fall back to fetching `meta` per row when URLs are absent.
+ * Hovering a row swaps the still poster for the animation when `posterAnimUrl` is present.
  *
  * Below the player: title, optional upload date, byline (catalog creator + donate when
  * `?catalog=`), description in a panel, and donate from `meta.json` (same data as Review chrome).
  *
  * `?embed=true` shows only the video and Shaka controls (⋯ menu: speed, quality, FilStream);
  * share/embed actions and catalog/meta are omitted.
+ *
+ * When `?catalog=` is present, the Share control is shown only if that catalog row for this `meta`
+ * includes a `share` URL (Open Graph landing page published at finalize).
  *
  */
 import { whenPieceHeadServiceWorkerReady } from "../register-piece-head-sw.mjs";
@@ -27,9 +33,11 @@ import {
   creatorHrefForCatalog,
   creatorInfoFromCatalog,
   moviesFromCatalog,
+  posterAnimUrlFromMetaJson,
   viewerHrefForMeta,
 } from "../filstream-catalog-shared.mjs";
-import { resolveViewerIndexPageUrl } from "../filstream-config.mjs";
+import { fetchLatestCatalogJsonForDataSet } from "../browser-store.mjs";
+import { getFilstreamStoreConfig, resolveViewerIndexPageUrl } from "../filstream-config.mjs";
 import {
   donateConfigFromMeta,
   proposeDonateTransfer,
@@ -138,6 +146,65 @@ function setStatus(msg, kind) {
 }
 
 /**
+ * WebKit-on-Apple (Safari, all iOS browsers). The shaka-player.ui bundle from esm.sh does not
+ * always attach `shaka.util.Platform`, so we do not call into Shaka for this.
+ */
+function isApplePlaybackPlatform() {
+  const v = navigator.vendor;
+  if (typeof v === "string" && v.includes("Apple")) return true;
+  return /iPhone|iPad|iPod/i.test(navigator.userAgent);
+}
+
+/** @param {unknown} err */
+function isShakaVideoError3016(err) {
+  return (
+    err !== null &&
+    typeof err === "object" &&
+    "code" in err &&
+    /** @type {{ code?: number }} */ (err).code === 3016
+  );
+}
+
+/**
+ * @param {import("shaka-player").Player} player
+ * @param {string} uri
+ */
+async function loadMasterWithMimeFallback(player, uri) {
+  try {
+    await player.load(uri, undefined, "application/x-mpegurl");
+  } catch (firstErr) {
+    try {
+      await player.load(uri, undefined, "application/vnd.apple.mpegurl");
+    } catch {
+      throw firstErr;
+    }
+  }
+}
+
+/**
+ * Native HLS on Apple sometimes fails with Shaka 3016 while MSE playback works for H.264+AAC.
+ * @param {import("shaka-player").Player} player
+ * @param {string} uri
+ */
+async function loadMasterWithAppleMseFallback(player, uri) {
+  try {
+    await loadMasterWithMimeFallback(player, uri);
+  } catch (e) {
+    if (!isApplePlaybackPlatform() || !isShakaVideoError3016(e)) {
+      throw e;
+    }
+    await player.unload();
+    player.configure({
+      streaming: {
+        preferNativeHls: false,
+        useNativeHlsOnSafari: false,
+      },
+    });
+    await loadMasterWithMimeFallback(player, uri);
+  }
+}
+
+/**
  * @param {string} a
  * @param {string} b
  */
@@ -147,6 +214,22 @@ function sameMetaUrl(a, b) {
     return new URL(a).href === new URL(b).href;
   } catch {
     return false;
+  }
+}
+
+/**
+ * Resolve catalog row `metapath` against the catalog JSON URL so relative paths fetch the real `meta.json`
+ * (fetch would otherwise resolve against the viewer page and miss `posterAnim`).
+ *
+ * @param {string} metapath
+ * @param {string} catalogBaseUrl Absolute `filstream_catalog.json` URL
+ * @returns {string}
+ */
+function resolveCatalogMetapath(metapath, catalogBaseUrl) {
+  try {
+    return new URL(metapath, catalogBaseUrl).href;
+  } catch {
+    return metapath;
   }
 }
 
@@ -178,17 +261,20 @@ function posterUrlFromMetaJson(meta) {
 }
 
 /**
- * @param {string} metapath
- * @returns {Promise<string | null>}
+ * @param {string} metapath Absolute meta.json URL (use {@link resolveCatalogMetapath} when the catalog row may be relative)
+ * @returns {Promise<{ poster: string | null, posterAnim: string | null }>}
  */
-async function fetchPosterUrlFromMeta(metapath) {
+async function fetchPosterPairFromMeta(metapath) {
   try {
     const res = await fetch(metapath);
-    if (!res.ok) return null;
+    if (!res.ok) return { poster: null, posterAnim: null };
     const meta = await res.json();
-    return posterUrlFromMetaJson(meta);
+    return {
+      poster: posterUrlFromMetaJson(meta),
+      posterAnim: posterAnimUrlFromMetaJson(meta),
+    };
   } catch {
-    return null;
+    return { poster: null, posterAnim: null };
   }
 }
 
@@ -242,15 +328,26 @@ async function renderCatalogSidebar(
 
     const newestFirst = [...chronological].reverse();
 
-    const posterResults = await Promise.all(
-      newestFirst.map((m) => {
-        if (m.posterUrl) {
-          return Promise.resolve(m.posterUrl);
+    const pairResults = await Promise.all(
+      newestFirst.map(async (m) => {
+        const metapathResolved = resolveCatalogMetapath(m.metapath, catalogUrl);
+        const catP = m.posterUrl ?? null;
+        const catA = m.posterAnimUrl ?? null;
+        const same = sameMetaUrl(metapathResolved, currentMetaUrl) && currentMetaDoc != null;
+        if (same) {
+          return {
+            poster: catP ?? posterUrlFromMetaJson(currentMetaDoc),
+            posterAnim: catA ?? posterAnimUrlFromMetaJson(currentMetaDoc),
+          };
         }
-        if (sameMetaUrl(m.metapath, currentMetaUrl) && currentMetaDoc != null) {
-          return Promise.resolve(posterUrlFromMetaJson(currentMetaDoc));
+        if (catP != null && catA != null) {
+          return { poster: catP, posterAnim: catA };
         }
-        return fetchPosterUrlFromMeta(m.metapath);
+        const fetched = await fetchPosterPairFromMeta(metapathResolved);
+        return {
+          poster: catP ?? fetched.poster,
+          posterAnim: catA ?? fetched.posterAnim,
+        };
       }),
     );
 
@@ -263,19 +360,37 @@ async function renderCatalogSidebar(
     catalogAside.appendChild(head);
 
     newestFirst.forEach((m, i) => {
-      const posterUrl = posterResults[i];
+      const metapathResolved = resolveCatalogMetapath(m.metapath, catalogUrl);
+      const posterUrl = pairResults[i].poster;
+      const posterAnimUrl = pairResults[i].posterAnim;
       const a = document.createElement("a");
       a.className = "viewer-catalog-row";
-      if (sameMetaUrl(m.metapath, currentMetaUrl)) {
+      if (sameMetaUrl(metapathResolved, currentMetaUrl)) {
         a.classList.add("viewer-catalog-row--current");
         a.setAttribute("aria-current", "page");
       }
-      a.href = viewerHrefForMeta(m.metapath, catalogParam, undefined, datasetIdForLinks);
+      a.href = viewerHrefForMeta(metapathResolved, catalogParam, undefined, datasetIdForLinks);
       a.title = m.title;
 
       const wrap = document.createElement("div");
       wrap.className = "viewer-catalog-poster-wrap";
-      if (posterUrl) {
+      if (posterUrl && posterAnimUrl) {
+        wrap.classList.add("viewer-catalog-poster-wrap--anim");
+        const imgStill = document.createElement("img");
+        imgStill.className = "viewer-catalog-poster viewer-catalog-poster--still";
+        imgStill.src = posterUrl;
+        imgStill.alt = "";
+        imgStill.loading = "lazy";
+        imgStill.decoding = "async";
+        const imgAnim = document.createElement("img");
+        imgAnim.className = "viewer-catalog-poster viewer-catalog-poster--motion";
+        imgAnim.src = posterAnimUrl;
+        imgAnim.alt = "";
+        imgAnim.loading = "eager";
+        imgAnim.decoding = "async";
+        wrap.appendChild(imgStill);
+        wrap.appendChild(imgAnim);
+      } else if (posterUrl) {
         const img = document.createElement("img");
         img.className = "viewer-catalog-poster";
         img.src = posterUrl;
@@ -376,21 +491,47 @@ async function copyToClipboard(text) {
   }
 }
 
-function renderShareEmbedButtons() {
+/**
+ * @param {unknown} catalogDoc
+ * @param {string} currentMetaUrl
+ * @param {string | null} [catalogBaseUrl] Absolute catalog URL — required to match relative `metapath` rows
+ * @returns {string | null}
+ */
+function shareUrlFromCatalogForMeta(catalogDoc, currentMetaUrl, catalogBaseUrl) {
+  if (!catalogDoc || !currentMetaUrl) return null;
+  const rows = moviesFromCatalog(catalogDoc);
+  for (const m of rows) {
+    const mp =
+      catalogBaseUrl && catalogBaseUrl.trim() !== ""
+        ? resolveCatalogMetapath(m.metapath, catalogBaseUrl)
+        : m.metapath;
+    if (sameMetaUrl(mp, currentMetaUrl) && m.share) {
+      return m.share;
+    }
+  }
+  return null;
+}
+
+/**
+ * @param {string | null} sharePageUrl Open Graph landing page from catalog `share`, or null to hide Share
+ */
+function renderShareEmbedButtons(sharePageUrl) {
   if (!viewerActionsEl || embedMode) return;
 
   viewerActionsEl.hidden = false;
   viewerActionsEl.innerHTML = "";
 
-  const shareBtn = document.createElement("button");
-  shareBtn.type = "button";
-  shareBtn.className = "viewer-action-btn viewer-action-btn--round";
-  shareBtn.title = "Copy link to this page";
-  shareBtn.setAttribute("aria-label", "Copy page URL");
-  shareBtn.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" y1="13.51" x2="15.41" y2="17.49"/><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"/></svg>`;
-  shareBtn.addEventListener("click", () => {
-    void copyToClipboard(window.location.href);
-  });
+  if (sharePageUrl) {
+    const shareLink = document.createElement("a");
+    shareLink.className = "viewer-action-btn viewer-action-btn--round";
+    shareLink.href = sharePageUrl;
+    shareLink.target = "_blank";
+    shareLink.rel = "noopener noreferrer";
+    shareLink.title = "Share this page, Social Media enabled with OpenGraph";
+    shareLink.setAttribute("aria-label", "Share page");
+    shareLink.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" y1="13.51" x2="15.41" y2="17.49"/><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"/></svg>`;
+    viewerActionsEl.appendChild(shareLink);
+  }
 
   const embedSvg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
   embedSvg.setAttribute("width", "18");
@@ -416,7 +557,7 @@ function renderShareEmbedButtons() {
     void copyToClipboard(buildEmbedIframeSnippet());
   });
 
-  viewerActionsEl.append(shareBtn, embedBtn);
+  viewerActionsEl.appendChild(embedBtn);
 }
 
 /**
@@ -440,6 +581,19 @@ function resolveDatasetIdForCatalog(doc, datasetQuery) {
     }
   }
   return null;
+}
+
+/**
+ * @param {string} catalogUrlStr
+ * @param {number | null} dataSetId
+ */
+function replaceViewerCatalogInBrowser(catalogUrlStr, dataSetId) {
+  const u = new URL(window.location.href);
+  u.searchParams.set("catalog", catalogUrlStr);
+  if (dataSetId != null && Number.isFinite(dataSetId) && dataSetId >= 0) {
+    u.searchParams.set("dataset", String(dataSetId));
+  }
+  history.replaceState({}, "", u);
 }
 
 /**
@@ -571,7 +725,11 @@ function renderViewerMeta(meta, catalogCtx) {
   }
 
   metaSection.hidden = false;
-  renderShareEmbedButtons();
+  const sharePageUrl =
+    ctx.catalogDoc && metaUrl
+      ? shareUrlFromCatalogForMeta(ctx.catalogDoc, metaUrl, ctx.catalogUrl)
+      : null;
+  renderShareEmbedButtons(sharePageUrl);
 }
 
 /**
@@ -710,12 +868,54 @@ if (!metaUrl || !/^https?:\/\//i.test(metaUrl)) {
         }
       }
 
-      const resolvedDatasetId = resolveDatasetIdForCatalog(
+      let resolvedDatasetId = resolveDatasetIdForCatalog(
         catalogFetchOk ? catalogDocPreload : null,
         datasetQueryRaw,
       );
+
+      /** @type {string | null} */
+      let displayCatalogUrl = catalogUrl;
+
+      if (!embedMode && resolvedDatasetId != null) {
+        const hasShare =
+          catalogFetchOk &&
+          catalogDocPreload &&
+          shareUrlFromCatalogForMeta(catalogDocPreload, metaUrl, displayCatalogUrl);
+        if (!hasShare) {
+          const cfg = getFilstreamStoreConfig();
+          const doc =
+            catalogDocPreload && typeof catalogDocPreload === "object" && catalogDocPreload !== null
+              ? /** @type {Record<string, unknown>} */ (catalogDocPreload)
+              : {};
+          const chainId =
+            typeof doc.chainId === "number" && Number.isFinite(doc.chainId)
+              ? doc.chainId
+              : cfg.storeChainId;
+          const providerId =
+            typeof doc.providerId === "number" && Number.isFinite(doc.providerId)
+              ? doc.providerId
+              : null;
+          try {
+            const recovered = await fetchLatestCatalogJsonForDataSet({
+              chainId,
+              dataSetId: resolvedDatasetId,
+              providerId,
+            });
+            if (recovered?.doc && typeof recovered.doc === "object") {
+              catalogDocPreload = recovered.doc;
+              catalogFetchOk = true;
+              displayCatalogUrl = recovered.retrievalUrl.trim();
+              replaceViewerCatalogInBrowser(displayCatalogUrl, resolvedDatasetId);
+              resolvedDatasetId = resolveDatasetIdForCatalog(catalogDocPreload, datasetQueryRaw);
+            }
+          } catch (e) {
+            console.warn("[filstream viewer] catalog chain refresh failed", e);
+          }
+        }
+      }
+
       renderViewerMeta(meta, {
-        catalogUrl,
+        catalogUrl: displayCatalogUrl,
         catalogDoc: catalogFetchOk ? catalogDocPreload : null,
         datasetId: resolvedDatasetId,
       });
@@ -731,11 +931,27 @@ if (!metaUrl || !/^https?:\/\//i.test(metaUrl)) {
         /** @type {HTMLVideoElement} */ (videoEl),
       );
       await player.attach(/** @type {HTMLVideoElement} */ (videoEl));
+      const apple = isApplePlaybackPlatform();
+      const reloadStrategy =
+        shaka.config?.CodecSwitchingStrategy?.RELOAD ?? "reload";
       player.configure({
         abr: {
           enabled: true,
           useNetworkInformation: false,
         },
+        ...(apple
+          ? {
+              streaming: {
+                preferNativeHls: true,
+                useNativeHlsOnSafari: true,
+              },
+              mediaSource: {
+                codecSwitchingStrategy: reloadStrategy,
+              },
+              preferredVideoCodecs: ["avc1", "avc3", "hvc1", "hev1"],
+              preferredAudioCodecs: ["mp4a.40.2", "mp4a.40.5"],
+            }
+          : {}),
       });
       shakaUi.configure({
         controlPanelElements: [
@@ -752,21 +968,13 @@ if (!metaUrl || !/^https?:\/\//i.test(metaUrl)) {
         playbackRates: [0.25, 0.5, 0.75, 1, 1.25, 1.5, 1.75, 2],
         enableTooltips: true,
       });
-      try {
-        await player.load(master, undefined, "application/x-mpegurl");
-      } catch (firstErr) {
-        try {
-          await player.load(master, undefined, "application/vnd.apple.mpegurl");
-        } catch {
-          throw firstErr;
-        }
-      }
+      await loadMasterWithAppleMseFallback(player, master);
 
-      if (catalogUrl && !embedMode) {
+      if (displayCatalogUrl && !embedMode) {
         void renderCatalogSidebar(
-          catalogUrl,
+          displayCatalogUrl,
           metaUrl,
-          catalogUrl,
+          displayCatalogUrl,
           resolvedDatasetId,
           meta,
           catalogFetchOk ? catalogDocPreload : null,

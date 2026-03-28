@@ -22,7 +22,7 @@ const FRAGMENT_SECONDS = 5;
 
 /** @see runFilstreamPipeline event target */
 export const SEGMENT_READY_EVENT = "segmentready";
-/** Fired before a VP9 re-encode attempt after a recoverable hardware failure — drop buffered partials for that variant. */
+/** Fired before another H.264 hardware-acceleration attempt after a recoverable encoder failure — drop buffered partials for that variant. */
 export const SEGMENT_FLUSH_EVENT = "segmentflush";
 /** Non-binary artifacts: `init.json`, `*.m3u8`, etc. (`meta.json` is emitted with {@link LISTING_DETAILS_EVENT}). */
 export const FILE_EVENT = "fileEvent";
@@ -34,7 +34,7 @@ export const LISTING_DETAILS_EVENT = "listingDetails";
 /** Max(width,height) must be at least this to include a 1080p-height rung. */
 const MIN_MAJOR_DIM_FOR_1080_RUNG = 1200;
 
-/** Video bitrate ladder (bits per second); used for both VP9 and H.264 rungs. */
+/** Video bitrate ladder (bits per second); used for H.264 ABR rungs. */
 function vp9BitrateForHeight(h) {
   if (h >= 1080) return 2_500_000;
   if (h >= 720) return 1_500_000;
@@ -82,34 +82,18 @@ function buildAvcCodecString(width, height, bitrate) {
   return `avc1.${hexProfile}00${hexLevel}`;
 }
 
-async function canUseAvcHardwareForLadder(srcW, srcH, heights) {
-  if (typeof VideoEncoder === "undefined" || typeof VideoEncoder.isConfigSupported !== "function") {
-    return false;
-  }
-  if (!canEncodeVideo("avc")) return false;
-  const framerate = 30;
-  for (const h of heights) {
-    const w = scaledWidth(srcW, srcH, h);
-    const bitrate = vp9BitrateForHeight(h);
-    const codec = buildAvcCodecString(w, h, bitrate);
-    const r = await VideoEncoder.isConfigSupported({
-      codec,
-      width: w,
-      height: h,
-      bitrate,
-      framerate,
-      hardwareAcceleration: "prefer-hardware",
-    });
-    if (!r.supported || r.config?.hardwareAcceleration !== "prefer-hardware") {
-      return false;
-    }
-  }
-  return true;
-}
-
 /**
- * Rungs: 1080, 720, 360, 144. Drop 1080 if max(w,h) < 1200.
- * Drop any rung taller than the source display height.
+ * Nominal ABR ladder (height targets): 1080, 720, 360, 144.
+ * - Drops 1080 when max(source width, height) is below `MIN_MAJOR_DIM_FOR_1080_RUNG` (1200).
+ * - Drops any rung whose **height** is greater than the source display height (even-rounded).
+ *
+ * This list is the **only** rung set the pipeline encodes: there are no hidden top rungs.
+ * Multivariant master HLS (`buildMasterPlaylist`) is built **solely** from the per-rung encode
+ * results (`encoded`), which has exactly one entry per element returned here (same order:
+ * largest height first).
+ *
+ * @returns {number[]} Non-empty, strictly descending when multiple rungs; if no nominal rung
+ *   fits, falls back to a single entry at the even-rounded source height (see implementation).
  */
 function ladderHeights(sourceW, sourceH) {
   let sh = Math.max(2, sourceH);
@@ -158,8 +142,8 @@ function inputTrackLooksLikeAvc(vt) {
  * Top ABR rung matches source display size (no scale) and input is AVC — Mediabunny can copy
  * packets if we omit `bitrate` and `keyFrameInterval` (both force transcode).
  */
-function canFastRemuxAvcTopRung(vt, srcW, srcH, heights, rungIndex, useAvc) {
-  if (!useAvc || !vt || rungIndex !== 0) return false;
+function canFastRemuxAvcTopRung(vt, srcW, srcH, heights, rungIndex) {
+  if (!vt || rungIndex !== 0) return false;
   if (!inputTrackLooksLikeAvc(vt)) return false;
   const sh = evenDisplayH(srcH);
   if (heights[0] !== sh) return false;
@@ -173,9 +157,9 @@ function bandwidthBits(videoBps, includeAudio) {
   return Math.max(1, Math.round(b));
 }
 
-/** HLS `CODECS=` fragment for Mediabunny audio output (AAC-LC vs Opus). */
-function hlsAudioCodecParam(audioCodec) {
-  return audioCodec === "aac" ? "mp4a.40.2" : "opus";
+/** HLS `CODECS=` AAC-LC fragment (published output is always AAC when audio is present). */
+function hlsAudioCodecParam() {
+  return "mp4a.40.2";
 }
 
 function copyU8(data) {
@@ -231,6 +215,12 @@ function buildMediaPlaylistLocal(durationsSec) {
   return lines.join("\n");
 }
 
+/**
+ * Multivariant master: one `#EXT-X-STREAM-INF` + `v{i}/playlist.m3u8` line **per** entry.
+ * `variants` must be the encoded ladder outputs only (same length and order as `encodeRung` results).
+ *
+ * @param {Array<{ width: number, height: number, bandwidth: number }>} variants
+ */
 function buildMasterPlaylist(variants, includeAudio, videoCodecParam, audioCodecParam) {
   const codecs = includeAudio ? `${videoCodecParam},${audioCodecParam}` : videoCodecParam;
   const lines = [
@@ -248,7 +238,10 @@ function buildMasterPlaylist(variants, includeAudio, videoCodecParam, audioCodec
   return lines.join("\n");
 }
 
-/** Master playlist with `v0/playlist.m3u8`-style lines for local inspection. */
+/**
+ * Same as {@link buildMasterPlaylist} with relative variant URLs (for local / disk layout).
+ * @param {Array<{ width: number, height: number, bandwidth: number }>} variants
+ */
 function buildMasterPlaylistLocal(variants, includeAudio, videoCodecParam, audioCodecParam) {
   const codecs = includeAudio ? `${videoCodecParam},${audioCodecParam}` : videoCodecParam;
   const lines = [
@@ -389,7 +382,7 @@ function isRecoverableVideoHwError(message) {
  */
 
 /**
- * @param {"aac"|"opus"|null} audioCodec `null` = no audio track
+ * @param {"aac"|null} audioCodec `null` = no audio track
  * @param {FragmentReadyHooks | null | undefined} hooks
  * @param {boolean} [tryAvcPacketCopy] H.264 in / H.264 out without `bitrate` or `keyFrameInterval` so Mediabunny may copy samples
  */
@@ -471,7 +464,7 @@ async function convertToFmp4Segments(
       target: new NullTarget(),
     });
 
-    /** Mediabunny probes the encoder inside `Conversion.init`; failures must not reject here or VP9 HW retries never run. */
+    /** Mediabunny probes the encoder inside `Conversion.init`; failures must not reject here or H.264 HW retries never run. */
     let conversion;
     try {
       conversion = await Conversion.init({
@@ -547,10 +540,11 @@ async function convertToFmp4Segments(
     hooks?.onEncodeAttemptReset?.();
   }
 
-  const hwModes =
-    videoCodec === "avc"
-      ? ["prefer-hardware"]
-      : ["prefer-hardware", "no-preference", "prefer-software"];
+  const hwModes = [
+    "prefer-hardware",
+    "no-preference",
+    "prefer-software",
+  ];
   let lastError = null;
 
   for (let attemptIdx = 0; attemptIdx < hwModes.length; attemptIdx++) {
@@ -572,7 +566,7 @@ async function convertToFmp4Segments(
     if (!r.ok && r.phase === "invalid") {
       lastError = new Error(r.reasons);
       if (
-        videoCodec === "vp9" &&
+        (videoCodec === "vp9" || videoCodec === "avc") &&
         hwAccel !== "prefer-software" &&
         isRecoverableVideoHwError(r.reasons)
       ) {
@@ -585,7 +579,7 @@ async function convertToFmp4Segments(
       lastError = r.error;
       const msg = r.error?.message || String(r.error);
       if (
-        videoCodec === "vp9" &&
+        (videoCodec === "vp9" || videoCodec === "avc") &&
         hwAccel !== "prefer-software" &&
         isRecoverableVideoHwError(msg)
       ) {
@@ -622,7 +616,7 @@ async function convertToFmp4Segments(
  * @property {number} variantIndex
  * @property {number} width
  * @property {number} height
- * @property {string} reason e.g. `encode-retry` before another VP9 hardware-acceleration attempt
+ * @property {string} reason e.g. `encode-retry` before another H.264 hardware-acceleration attempt
  */
 
 /**
@@ -650,7 +644,9 @@ async function convertToFmp4Segments(
  * @property {{ title: string, description: string, showDonateButton: boolean, useSeekPosition: boolean, fundWalletAddress?: string | null, donateAmountUsdfc?: number | null }} listing — `fundWalletAddress` is the wallet connected on Fund (step 2); USDFC donate target
  * @property {{ enabled: boolean, recipient?: string, amountHuman?: string, token?: object, chainId?: number }} [donate] normalized viewer donate block in `metaJsonText`
  * @property {{ fileName: string, mimeType: string, size: number, url?: string }} poster metadata (matches `poster` in `metaJsonText`; `url` is set after PDP upload at finalize)
+ * @property {{ fileName: string, mimeType: string, size: number, url?: string } | undefined} [posterAnimInfo] optional animated preview metadata (matches `posterAnim` in `metaJsonText`)
  * @property {File} poster image file (upload or seek capture)
+ * @property {File | undefined} [posterAnim] optional 20-frame animated WebP (`listing-preview.webp`) when captured from source
  * @property {string} metaJsonText pretty-printed JSON: transcodeMeta spread + `listing` + `poster` info + `listingCompletedAt` (no raw image-bytes)
  * @property {string} metaPath always `meta.json`
  */
@@ -730,6 +726,7 @@ function dispatchListingDetailsEvent(ui, detail) {
  *   fundWalletAddress?: string | null,
  *   donateAmountUsdfc?: number,
  *   poster: File | Blob,
+ *   posterAnim?: File | Blob | null,
  * }} listing
  * @returns {ListingDetailsDetail | null} `null` if transcoding has not finished (nothing pending).
  */
@@ -794,10 +791,29 @@ export function emitListingDetailsEvent(ui, listing) {
     size: posterFile.size,
   };
 
+  const posterAnimRaw = listing.posterAnim;
+  const posterAnimFile =
+    posterAnimRaw instanceof File
+      ? posterAnimRaw
+      : posterAnimRaw instanceof Blob
+        ? new File([posterAnimRaw], "listing-preview.webp", {
+            type: posterAnimRaw.type || "image/webp",
+          })
+        : null;
+
+  const posterAnimInfo = posterAnimFile
+    ? {
+        fileName: posterAnimFile.name,
+        mimeType: posterAnimFile.type || "image/webp",
+        size: posterAnimFile.size,
+      }
+    : undefined;
+
   const doc = {
     ...pendingTranscodeMetaForListing,
     listing: listingBlock,
     poster: posterInfo,
+    ...(posterAnimInfo ? { posterAnim: posterAnimInfo } : {}),
     donate,
     listingCompletedAt: new Date().toISOString(),
   };
@@ -809,6 +825,8 @@ export function emitListingDetailsEvent(ui, listing) {
     listing: listingBlock,
     posterInfo,
     poster: posterFile,
+    ...(posterAnimFile ? { posterAnim: posterAnimFile } : {}),
+    ...(posterAnimInfo ? { posterAnimInfo } : {}),
     metaJsonText,
     metaPath: "meta.json",
   };
@@ -1009,7 +1027,7 @@ export async function destroyActivePipelinePlayer() {
  *
  * **Events** (all `CustomEvent` on `filstreamEventTarget ?? segmentReadyTarget` when set):
  * - `SEGMENT_READY_EVENT` / `onSegmentReady` — binary init + media segments as they encode.
- * - `SEGMENT_FLUSH_EVENT` / `onSegmentFlush` — before a VP9 re-attempt; drop partials for that variant.
+ * - `SEGMENT_FLUSH_EVENT` / `onSegmentFlush` — before an H.264 encoder HW retry; drop partials for that variant.
  * - `FILE_EVENT` / `onFileEvent` — text artifacts: per variant `v{n}/init.json`, `v{n}/playlist.m3u8` (local paths), `v{n}/playlist-app.m3u8` (fake-origin media playlist); then `master-local.m3u8`, `master-app.m3u8`.
  * - `TRANSCODE_COMPLETE_EVENT` / `onTranscodeComplete` — when encodes finish and master + variant M3U8 are assembled (before Shaka); see {@link TranscodeCompleteDetail}. Transcode meta is held until {@link emitListingDetailsEvent}.
  * - `LISTING_DETAILS_EVENT` — fired when the UI calls {@link emitListingDetailsEvent} after Listing Details **Next**; listen on the same `filstreamEventTarget` (or pass `onListingDetails` there). Includes full `meta.json` text + poster {@link File}.
@@ -1024,20 +1042,15 @@ export async function runFilstreamPipeline(file, ui) {
   });
   const primaryAudio = await probeInput.getPrimaryAudioTrack();
   const includeAudio = primaryAudio != null;
-  /** Prefer AAC so fMP4+HLS plays in Safari; Opus-in-MP4 is not supported there. */
-  const audioCodec =
-    includeAudio && canEncodeAudio("aac")
-      ? "aac"
-      : includeAudio && canEncodeAudio("opus")
-        ? "opus"
-        : null;
-  if (includeAudio && !audioCodec) {
+  if (includeAudio && !canEncodeAudio("aac")) {
     setStatus(
-      "This browser cannot encode AAC or Opus (WebCodecs). Try a recent Chrome, Edge, or Safari.",
+      "This browser cannot encode AAC (WebCodecs). FilStream publishes H.264 + AAC only. Try a recent Chrome, Edge, or Safari.",
       "err",
     );
     return;
   }
+  /** @type {"aac" | null} */
+  const audioCodec = includeAudio ? "aac" : null;
 
   const vt = await probeInput.getPrimaryVideoTrack();
   const srcH = vt?.displayHeight ?? 720;
@@ -1045,11 +1058,9 @@ export async function runFilstreamPipeline(file, ui) {
   const heights = ladderHeights(srcW, srcH);
   const nVar = heights.length;
 
-  let preferAvc = await canUseAvcHardwareForLadder(srcW, srcH, heights);
-  if (preferAvc && !canEncodeVideo("avc")) preferAvc = false;
-  if (!preferAvc && !canEncodeVideo("vp9")) {
+  if (!canEncodeVideo("avc")) {
     setStatus(
-      "This browser cannot encode VP9 or H.264 (WebCodecs). Try recent Chrome or Edge.",
+      "This browser cannot encode H.264 (WebCodecs). FilStream publishes H.264 + AAC only. Try a recent Chrome, Edge, or Safari.",
       "err",
     );
     return;
@@ -1063,7 +1074,7 @@ export async function runFilstreamPipeline(file, ui) {
 
   const video = getVideoElement();
 
-  async function fullAttempt(useAvc) {
+  async function fullAttempt() {
     if (player) {
       await player.destroy();
       player = null;
@@ -1072,20 +1083,16 @@ export async function runFilstreamPipeline(file, ui) {
     video.removeAttribute("src");
     video.load();
 
-    const videoCodec = useAvc ? "avc" : "vp9";
-    const videoLabel = useAvc ? "H.264 (hardware)" : "VP9";
+    const videoCodec = "avc";
+    const videoLabel = "H.264";
     const maxH = heights[0];
     const maxW = scaledWidth(srcW, srcH, maxH);
     const maxBr = vp9BitrateForHeight(maxH);
-    const masterVideoCodecParam = useAvc
-      ? buildAvcCodecString(maxW, maxH, maxBr)
-      : "vp09.00.41.08";
+    const masterVideoCodecParam = buildAvcCodecString(maxW, maxH, maxBr);
 
-    const mayRemuxTop =
-      useAvc && canFastRemuxAvcTopRung(vt, srcW, srcH, heights, 0, useAvc);
+    const mayRemuxTop = canFastRemuxAvcTopRung(vt, srcW, srcH, heights, 0);
     const remuxOnly = mayRemuxTop && nVar === 1;
-    const audioLabel =
-      audioCodec === "aac" ? "AAC" : audioCodec === "opus" ? "Opus" : "";
+    const audioLabel = audioCodec === "aac" ? "AAC" : "";
     setStatus(
       remuxOnly
         ? includeAudio
@@ -1114,14 +1121,7 @@ export async function runFilstreamPipeline(file, ui) {
       const w = scaledWidth(srcW, srcH, h);
       const br = vp9BitrateForHeight(h);
       const segmentHooks = buildVariantSegmentHooks(ui, i, w, h);
-      const tryAvcPacketCopy = canFastRemuxAvcTopRung(
-        vt,
-        srcW,
-        srcH,
-        heights,
-        i,
-        useAvc,
-      );
+      const tryAvcPacketCopy = canFastRemuxAvcTopRung(vt, srcW, srcH, heights, i);
       const { init, segments, fragmentStartsSec, durationSec } =
         await convertToFmp4Segments(
           file,
@@ -1185,8 +1185,7 @@ export async function runFilstreamPipeline(file, ui) {
       };
     }
 
-    // H.264 path is hardware-only — run all rungs at once. VP9 may use software WebCodecs; cap concurrency at 2.
-    const parallelPerBatch = useAvc ? nVar : Math.min(2, nVar);
+    const parallelPerBatch = nVar;
     const batches = [];
     for (let start = 0; start < nVar; start += parallelPerBatch) {
       const idxs = [];
@@ -1238,7 +1237,13 @@ export async function runFilstreamPipeline(file, ui) {
       }),
     );
 
-    const audioCodecParam = audioCodec ? hlsAudioCodecParam(audioCodec) : "";
+    if (encoded.length !== nVar) {
+      throw new Error(
+        `FilStream: master HLS invariant failed — encoded ${encoded.length} variant(s), ladder expected ${nVar}`,
+      );
+    }
+
+    const audioCodecParam = audioCodec ? hlsAudioCodecParam() : "";
     const masterText = buildMasterPlaylist(
       encoded,
       audioCodec != null,
@@ -1255,7 +1260,7 @@ export async function runFilstreamPipeline(file, ui) {
     const metaPayload = {
       assembledAt: new Date().toISOString(),
       sourceName: file.name,
-      nVar,
+      nVar: encoded.length,
       videoCodec,
       includeAudio: audioCodec != null,
       audioCodec: audioCodec ?? undefined,
@@ -1264,13 +1269,9 @@ export async function runFilstreamPipeline(file, ui) {
     pendingTranscodeMetaForListing = { ...metaPayload };
 
     const segSummary = segmentCountSummary(encoded);
-    const stackHint = useAvc
-      ? includeAudio
-        ? `H.264 + ${audioLabel} in fMP4 (hardware encoder when available).`
-        : "H.264 in fMP4 (hardware encoder when available)."
-      : includeAudio
-        ? `VP9 + ${audioLabel} in fMP4.`
-        : "VP9 in fMP4.";
+    const stackHint = includeAudio
+      ? `H.264 + ${audioLabel} in fMP4 (hardware encoder when available).`
+      : "H.264 in fMP4 (hardware encoder when available).";
     const mediaPlaylistTextsLocal = encoded.map((v) =>
       buildMediaPlaylistLocal(v.dursSec),
     );
@@ -1282,7 +1283,7 @@ export async function runFilstreamPipeline(file, ui) {
       rootM3U8Path: "master-local.m3u8",
       masterAppM3U8Text: masterText,
       mediaPlaylistTextsLocal,
-      nVar,
+      nVar: encoded.length,
       segmentCounts: segSummary,
       stackHint,
     });
@@ -1321,7 +1322,7 @@ export async function runFilstreamPipeline(file, ui) {
     try {
       await player.load(`${FAKE_ORIGIN}/master.m3u8`);
       onPlaybackReady(player, {
-        nVar,
+        nVar: encoded.length,
         segmentCounts: segSummary,
         stackHint,
         rungs: encoded.map((v, variantIndex) => ({
@@ -1340,25 +1341,12 @@ export async function runFilstreamPipeline(file, ui) {
   }
 
   try {
-    await fullAttempt(preferAvc);
+    await fullAttempt();
   } catch (e) {
-    if (preferAvc) {
-      setStatus("Hardware H.264 encode failed; retrying with VP9…", "");
-      try {
-        await fullAttempt(false);
-      } catch (e2) {
-        setStatus(e2.message || String(e2), "err");
-        if (player) {
-          await player.destroy();
-          player = null;
-        }
-      }
-    } else {
-      setStatus(e.message || String(e), "err");
-      if (player) {
-        await player.destroy();
-        player = null;
-      }
+    setStatus(e.message || String(e), "err");
+    if (player) {
+      await player.destroy();
+      player = null;
     }
   }
 }

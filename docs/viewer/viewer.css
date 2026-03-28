@@ -163,6 +163,11 @@ body {
   transition: transform 0.1s ease, box-shadow 0.12s ease;
 }
 
+a.viewer-action-btn--round {
+  text-decoration: none;
+  color: inherit;
+}
+
 .viewer-byline-trailing .viewer-action-btn--round {
   width: var(--viewer-byline-primary-btn-height);
   height: var(--viewer-byline-primary-btn-height);
@@ -456,6 +461,40 @@ body {
   border-radius: 6px;
   overflow: hidden;
   background: #1e2128;
+}
+
+.viewer-catalog-poster-wrap--anim {
+  position: relative;
+}
+
+.viewer-catalog-poster-wrap--anim .viewer-catalog-poster--still,
+.viewer-catalog-poster-wrap--anim .viewer-catalog-poster--motion {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  transition: opacity 0.15s ease;
+}
+
+.viewer-catalog-poster-wrap--anim .viewer-catalog-poster--still {
+  z-index: 0;
+}
+
+.viewer-catalog-poster-wrap--anim .viewer-catalog-poster--motion {
+  z-index: 1;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.viewer-catalog-row:hover .viewer-catalog-poster-wrap--anim .viewer-catalog-poster--motion,
+.viewer-catalog-row:focus-within .viewer-catalog-poster-wrap--anim .viewer-catalog-poster--motion {
+  opacity: 1;
+}
+
+.viewer-catalog-row:hover .viewer-catalog-poster-wrap--anim .viewer-catalog-poster--still,
+.viewer-catalog-row:focus-within .viewer-catalog-poster-wrap--anim .viewer-catalog-poster--still {
+  opacity: 0;
 }
 
 .viewer-catalog-poster {

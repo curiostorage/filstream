@@ -38,9 +38,10 @@ const posterFileInput = document.getElementById("creator-poster-file");
 const posterBrowseBtn = document.getElementById("creator-poster-browse");
 const posterUploadStatus = document.getElementById("creator-poster-status");
 const titleEl = document.getElementById("creator-title");
+const roleLabel = document.getElementById("creator-title-role");
 const datasetLabel = document.getElementById("creator-dataset-label");
-const identityEl = document.getElementById("creator-identity");
-const roleLabel = document.getElementById("creator-role-label");
+const heroActionsEl = document.getElementById("creator-hero-actions");
+const heroPosterUploadBtn = document.getElementById("creator-hero-poster-upload");
 const editSection = document.getElementById("creator-edit-section");
 const editHint = document.getElementById("creator-edit-hint");
 const enableEditBtn = document.getElementById("creator-enable-edit");
@@ -69,7 +70,7 @@ let storageContext = null;
 let catalogUrl = null;
 /** @type {number | null} Parsed non-negative `?dataset=` for links / refresh (optional). */
 let datasetQueryParsed = null;
-/** @type {{ title: string, metapath: string, posterUrl?: string }[]} */
+/** @type {{ title: string, metapath: string, posterUrl?: string, posterAnimUrl?: string, share?: string }[]} */
 let moviesState = [];
 /** @type {Record<string, unknown> | null} */
 let loadedCatalogRoot = null;
@@ -241,28 +242,50 @@ function refreshEditVisibility() {
   const storageReady = Boolean(sessionPrivateKey && synapseRef && storageContext);
   if (!catalogIdentity?.editorAddress) {
     editSection.hidden = true;
+    if (heroActionsEl) heroActionsEl.hidden = true;
     return;
   }
+  if (heroActionsEl) heroActionsEl.hidden = false;
   editSection.hidden = false;
   if (!editor) {
     editHint.textContent =
-      "Use “Sign in to edit” with the wallet that published this catalog (the editor address on-chain).";
+      "Use “Sign-in to edit” with the wallet that published this catalog (the editor address on-chain).";
     if (enableEditBtn) {
       enableEditBtn.hidden = false;
-      enableEditBtn.textContent = "Sign in to edit";
+      enableEditBtn.textContent = "Sign-in to edit";
     }
     editForm.hidden = true;
+    if (heroPosterUploadBtn) heroPosterUploadBtn.disabled = true;
+    if (posterBrowseBtn) posterBrowseBtn.disabled = true;
+    if (!storageReady) {
+      setPosterUploadStatus("");
+    }
     return;
   }
-  editHint.textContent = storageReady
-    ? "Edits are saved as a new on-chain catalog piece. Removing a movie deletes its PDP pieces first, then updates the catalog."
-    : "Next: sign the storage session (same as the upload wizard) so PDP accepts catalog edits.";
-  if (enableEditBtn) {
-    enableEditBtn.textContent = "Sign in to edit";
+  if (!storageReady) {
+    editSection.hidden = true;
+    if (editHint) editHint.textContent = "";
+    if (enableEditBtn) {
+      enableEditBtn.textContent = "Sign-in to edit";
+    }
+    enableEditBtn.hidden = false;
+    editForm.hidden = true;
+    if (posterBrowseBtn) posterBrowseBtn.disabled = true;
+    if (heroPosterUploadBtn) heroPosterUploadBtn.disabled = true;
+    setPosterUploadStatus("");
+    return;
   }
-  enableEditBtn.hidden = storageReady;
-  editForm.hidden = !storageReady;
-  if (storageReady && nameInput && posterUrlInput) {
+  editSection.hidden = false;
+  if (editHint) {
+    editHint.textContent =
+      "Edits are saved as a new on-chain catalog piece. Removing a movie deletes its PDP pieces first, then updates the catalog.";
+  }
+  if (enableEditBtn) {
+    enableEditBtn.textContent = "Sign-in to edit";
+  }
+  enableEditBtn.hidden = true;
+  editForm.hidden = false;
+  if (nameInput && posterUrlInput) {
     const cn = loadedCatalogRoot && /** @type {{ creatorName?: unknown }} */ (loadedCatalogRoot).creatorName;
     const cpu =
       loadedCatalogRoot && /** @type {{ creatorPosterUrl?: unknown }} */ (loadedCatalogRoot).creatorPosterUrl;
@@ -270,10 +293,10 @@ function refreshEditVisibility() {
     posterUrlInput.value = typeof cpu === "string" ? cpu : "";
   }
   if (posterBrowseBtn) {
-    posterBrowseBtn.disabled = !storageReady;
+    posterBrowseBtn.disabled = false;
   }
-  if (!storageReady) {
-    setPosterUploadStatus("");
+  if (heroPosterUploadBtn) {
+    heroPosterUploadBtn.disabled = false;
   }
 }
 
@@ -292,9 +315,11 @@ function buildPublishDoc() {
     kind: "filstream v1",
     editorAddress: ed,
     movies: moviesState.map((m) => {
-      /** @type {{ title: string, metapath: string, posterUrl?: string }} */
+      /** @type {{ title: string, metapath: string, posterUrl?: string, posterAnimUrl?: string, share?: string }} */
       const row = { title: m.title, metapath: m.metapath };
       if (m.posterUrl) row.posterUrl = m.posterUrl;
+      if (m.posterAnimUrl) row.posterAnimUrl = m.posterAnimUrl;
+      if (m.share) row.share = m.share;
       return row;
     }),
   };
@@ -329,7 +354,9 @@ async function handleSaveCatalog() {
     if (newCatalogUrl) {
       catalogUrl = newCatalogUrl;
       if (saveStatus) saveStatus.textContent = "Saved.";
-      navigateCreatorPageToCatalog(newCatalogUrl, catalogIdentity?.dataSetId ?? null);
+      replaceBrowserUrlForCatalog(newCatalogUrl, catalogIdentity?.dataSetId ?? null);
+      renderMovieLists();
+      setStatus("");
       return;
     }
     renderMovieLists();
@@ -398,16 +425,28 @@ async function handleRemoveMovie(index) {
 }
 
 /**
- * @param {number} index
- * @param {number} delta
+ * Move the item at `fromIndex` so it sits before the row that was at `toIndex` (drop target).
+ *
+ * @param {number} fromIndex
+ * @param {number} toIndex
  */
-function moveMovie(index, delta) {
-  const j = index + delta;
-  if (j < 0 || j >= moviesState.length) return;
-  const t = moviesState[index];
-  moviesState[index] = moviesState[j];
-  moviesState[j] = t;
+function reorderMoviesByDrop(fromIndex, toIndex) {
+  if (fromIndex === toIndex) return;
+  const next = [...moviesState];
+  const [item] = next.splice(fromIndex, 1);
+  let insertAt = toIndex;
+  if (fromIndex < toIndex) insertAt = toIndex - 1;
+  next.splice(insertAt, 0, item);
+  moviesState.length = 0;
+  moviesState.push(...next);
   renderMovieLists();
+}
+
+function clearMovieEditDropTargets() {
+  if (!movieEditList) return;
+  movieEditList.querySelectorAll(".creator-movie-edit-row--drop-target").forEach((el) => {
+    el.classList.remove("creator-movie-edit-row--drop-target");
+  });
 }
 
 function renderMovieEditList() {
@@ -423,26 +462,54 @@ function renderMovieEditList() {
     const actions = document.createElement("div");
     actions.className = "creator-movie-edit-actions";
     if (storageReady) {
-      const up = document.createElement("button");
-      up.type = "button";
-      up.className = "creator-row-btn";
-      up.textContent = "Up";
-      up.disabled = i === 0;
-      up.addEventListener("click", () => moveMovie(i, -1));
-      const down = document.createElement("button");
-      down.type = "button";
-      down.className = "creator-row-btn";
-      down.textContent = "Down";
-      down.disabled = i === moviesState.length - 1;
-      down.addEventListener("click", () => moveMovie(i, 1));
+      const drag = document.createElement("span");
+      drag.className = "creator-movie-edit-drag";
+      drag.setAttribute("role", "button");
+      drag.tabIndex = 0;
+      drag.draggable = true;
+      drag.setAttribute("aria-label", "Drag to reorder");
+      drag.title = "Drag to reorder";
+      drag.textContent = "⋮⋮";
+      drag.addEventListener("dragstart", (e) => {
+        e.dataTransfer.effectAllowed = "move";
+        e.dataTransfer.setData("text/plain", String(i));
+        li.classList.add("creator-movie-edit-row--dragging");
+      });
+      drag.addEventListener("dragend", () => {
+        li.classList.remove("creator-movie-edit-row--dragging");
+        clearMovieEditDropTargets();
+      });
       const rm = document.createElement("button");
       rm.type = "button";
       rm.className = "creator-row-btn creator-row-btn--danger";
       rm.textContent = "Remove";
       rm.addEventListener("click", () => void handleRemoveMovie(i));
-      actions.append(up, down, rm);
+      actions.append(rm);
+      li.append(drag, title, actions);
+      li.addEventListener("dragover", (e) => {
+        e.preventDefault();
+        e.dataTransfer.dropEffect = "move";
+        if (movieEditList) {
+          movieEditList.querySelectorAll(".creator-movie-edit-row--drop-target").forEach((el) => {
+            if (el !== li) el.classList.remove("creator-movie-edit-row--drop-target");
+          });
+        }
+        li.classList.add("creator-movie-edit-row--drop-target");
+      });
+      li.addEventListener("dragleave", (e) => {
+        if (e.relatedTarget instanceof Node && li.contains(e.relatedTarget)) return;
+        li.classList.remove("creator-movie-edit-row--drop-target");
+      });
+      li.addEventListener("drop", (e) => {
+        e.preventDefault();
+        clearMovieEditDropTargets();
+        const from = Number.parseInt(e.dataTransfer.getData("text/plain"), 10);
+        if (Number.isNaN(from)) return;
+        reorderMoviesByDrop(from, i);
+      });
+    } else {
+      li.append(title, actions);
     }
-    li.append(title, actions);
     movieEditList.appendChild(li);
   });
 }
@@ -465,7 +532,21 @@ function renderMovieReadonlyList() {
 
     const wrap = document.createElement("div");
     wrap.className = "creator-catalog-poster-wrap";
-    if (m.posterUrl) {
+    if (m.posterUrl && m.posterAnimUrl) {
+      wrap.classList.add("creator-catalog-poster-wrap--anim");
+      const imgStill = document.createElement("img");
+      imgStill.className = "creator-catalog-poster creator-catalog-poster--still";
+      imgStill.src = m.posterUrl;
+      imgStill.alt = "";
+      imgStill.loading = "lazy";
+      const imgAnim = document.createElement("img");
+      imgAnim.className = "creator-catalog-poster creator-catalog-poster--motion";
+      imgAnim.src = m.posterAnimUrl;
+      imgAnim.alt = "";
+      imgAnim.loading = "lazy";
+      wrap.appendChild(imgStill);
+      wrap.appendChild(imgAnim);
+    } else if (m.posterUrl) {
       const img = document.createElement("img");
       img.className = "creator-catalog-poster";
       img.src = m.posterUrl;
@@ -538,16 +619,20 @@ function applyCatalogIdentity(doc) {
 
   if (doc == null) {
     catalogIdentity = null;
-    if (identityEl) identityEl.hidden = true;
+    if (heroActionsEl) heroActionsEl.hidden = true;
+    if (roleLabel) roleLabel.textContent = "";
+    refreshEditVisibility();
     return;
   }
 
   catalogIdentity = parseCatalogIdentity(doc);
-  if (identityEl) identityEl.hidden = false;
 
   if (!catalogIdentity) {
     datasetLabel.textContent =
       "This catalog has no dataSetId, providerId, chainId, or editorAddress fields.";
+    if (heroActionsEl) heroActionsEl.hidden = true;
+    if (roleLabel) roleLabel.textContent = "";
+    refreshEditVisibility();
     return;
   }
 
@@ -600,32 +685,27 @@ function replaceBrowserUrlForCatalog(catalogUrlStr, dataSetId) {
 }
 
 /**
- * Full navigation to `creator.html` with the saved catalog piece URL (reloads so the page matches the new `?catalog=`).
- *
- * @param {string} catalogUrlStr
- * @param {number | null} dataSetId
- */
-function navigateCreatorPageToCatalog(catalogUrlStr, dataSetId) {
-  const u = new URL(window.location.href);
-  u.searchParams.set("catalog", catalogUrlStr);
-  if (dataSetId != null && Number.isFinite(dataSetId) && dataSetId >= 0) {
-    u.searchParams.set("dataset", String(dataSetId));
-  }
-  window.location.replace(u.href);
-}
-
-/**
  * If the loaded URL points at an old piece but a newer catalog exists on-chain, switch to it.
+ * Old catalog JSON may omit `chainId`; we use the app store config chain (same as viewer recovery).
  * Always re-renders movie links last so `?catalog=` on viewer URLs matches the current piece URL.
  */
 async function upgradeCatalogFromChainIfNewer() {
   try {
-    if (catalogIdentity?.dataSetId == null || catalogIdentity.chainId == null) {
+    if (catalogIdentity?.dataSetId == null) {
+      return;
+    }
+    const cfg = getFilstreamStoreConfig();
+    const chainId =
+      catalogIdentity.chainId != null && Number.isFinite(catalogIdentity.chainId)
+        ? catalogIdentity.chainId
+        : cfg.storeChainId;
+    if (!Number.isFinite(chainId)) {
       return;
     }
     const refreshed = await fetchLatestCatalogJsonForDataSet({
-      chainId: catalogIdentity.chainId,
+      chainId,
       dataSetId: catalogIdentity.dataSetId,
+      providerId: catalogIdentity.providerId,
     });
     if (!refreshed?.doc || typeof refreshed.doc !== "object") {
       return;
@@ -685,7 +765,7 @@ async function handleSignInToEdit() {
     if (!sameEthAddress(connectedAddress, catalogIdentity.editorAddress)) {
       if (saveStatus) {
         saveStatus.textContent =
-          "This wallet is not the catalog editor. Switch accounts in your wallet, then try Sign in to edit again.";
+          "This wallet is not the catalog editor. Switch accounts in your wallet, then try Sign-in to edit again.";
       }
       return;
     }
@@ -723,7 +803,7 @@ async function handleSignInToEdit() {
   } finally {
     if (enableEditBtn) {
       enableEditBtn.disabled = false;
-      enableEditBtn.textContent = "Sign in to edit";
+      enableEditBtn.textContent = "Sign-in to edit";
     }
     refreshWalletRole();
     refreshEditVisibility();
@@ -749,7 +829,7 @@ function wireEditControls() {
  */
 async function handleCreatorPosterFileSelected(file) {
   if (!storageContext || !synapseRef || !catalogIdentity?.dataSetId) {
-    setPosterUploadStatus("Sign in to edit first (wallet + storage session).");
+    setPosterUploadStatus("Sign-in to edit first (wallet + storage session).");
     return;
   }
   if (!file.type.startsWith("image/")) {
@@ -802,11 +882,23 @@ async function handleCreatorPosterFileSelected(file) {
 }
 
 function wirePosterControls() {
+  const triggerPosterFile = () => {
+    if (!posterFileInput) return;
+    posterFileInput.click();
+  };
   if (posterBrowseBtn && posterFileInput) {
     posterBrowseBtn.addEventListener("click", () => {
       if (posterBrowseBtn.disabled) return;
-      posterFileInput.click();
+      triggerPosterFile();
     });
+  }
+  if (heroPosterUploadBtn && posterFileInput) {
+    heroPosterUploadBtn.addEventListener("click", () => {
+      if (heroPosterUploadBtn.disabled) return;
+      triggerPosterFile();
+    });
+  }
+  if (posterFileInput) {
     posterFileInput.addEventListener("change", () => {
       const f = posterFileInput.files?.[0];
       posterFileInput.value = "";
