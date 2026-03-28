@@ -3,6 +3,7 @@
  * Media bytes are not held as a chunk list in JS heap; each segment is written to IDB and
  * streamed to Synapse via ReadableStream, deleting each IDB record after it is read.
  */
+import { CATALOG_JSON_VERSION_KEY } from "./filstream-catalog-shared.mjs";
 import {
   buildReviewViewerEmbedSrc,
   buildReviewViewerIframeSrc,
@@ -19,6 +20,8 @@ import {
   getChain,
   privateKeyToAccount,
 } from "./vendor/synapse-browser.mjs";
+
+export { CATALOG_JSON_VERSION_KEY };
 
 /**
  * @typedef {object} DataSetCandidate
@@ -557,6 +560,7 @@ export async function openDataSetContextForCatalog(input) {
 
 /**
  * Store and commit a new `filstream_catalog.json` piece (next `FS_VER`).
+ * The written JSON always includes {@link CATALOG_JSON_VERSION_KEY} from a chain scan (highest + 1), not from the caller.
  *
  * @param {{
  *   context: import("@filoz/synapse-sdk/storage").StorageContext,
@@ -597,7 +601,11 @@ export async function publishFilstreamCatalogJson(input) {
     chainId,
     dataSetId,
   });
-  let text = JSON.stringify(catalogDoc, null, 2);
+  const body = {
+    ...catalogDoc,
+    [CATALOG_JSON_VERSION_KEY]: nextVersion,
+  };
+  let text = JSON.stringify(body, null, 2);
   const enc = new TextEncoder();
   let bytes = enc.encode(text);
   while (bytes.byteLength < SYNAPSE_MIN_PIECE_BYTES) {
@@ -1944,9 +1952,10 @@ function normalizeEditorAddress(addr) {
  * @param {BrowserFilstreamUploadSession} session
  * @param {{ title: string, metapath: string, posterUrl?: string, posterAnimUrl?: string }[]} movies
  * @param {Record<string, unknown> | null} prevCatalog Prior catalog (chain), for merging `dataSetId` if session has not committed yet
+ * @param {number} catalogVersion PDP `FS_VER` for this document (matches {@link CATALOG_JSON_VERSION_KEY})
  * @returns {Record<string, unknown>}
  */
-function buildFilstreamCatalogDoc(session, movies, prevCatalog) {
+function buildFilstreamCatalogDoc(session, movies, prevCatalog, catalogVersion) {
   const editorAddress = normalizeEditorAddress(session.clientAddress);
   let dataSetId = session.dataSetId != null ? session.dataSetId : null;
   if (dataSetId == null && prevCatalog) {
@@ -1981,6 +1990,7 @@ function buildFilstreamCatalogDoc(session, movies, prevCatalog) {
       doc.creatorPosterUrl = cpu.trim();
     }
   }
+  doc[CATALOG_JSON_VERSION_KEY] = catalogVersion;
   return doc;
 }
 
@@ -2069,7 +2079,7 @@ async function appendFilstreamCatalogPiece(session) {
     entry.posterAnimUrl = posterAnimUrl;
   }
   movies.push(entry);
-  const doc = buildFilstreamCatalogDoc(session, movies, prevCatalog);
+  const doc = buildFilstreamCatalogDoc(session, movies, prevCatalog, nextVer);
   let text = JSON.stringify(doc, null, 2);
   const enc = new TextEncoder();
   let bytes = enc.encode(text);
@@ -2121,6 +2131,7 @@ async function replaceFilstreamCatalogWithShare(
   abandonUncommittedStagingByPath(session, "filstream_catalog.json");
 
   const nextVer = previousCatalogVersion + 1;
+  catalogDoc[CATALOG_JSON_VERSION_KEY] = nextVer;
   let text = JSON.stringify(catalogDoc, null, 2);
   const enc = new TextEncoder();
   let bytes = enc.encode(text);

@@ -17,6 +17,7 @@ import {
   publishCreatorPosterImage,
   publishFilstreamCatalogJson,
 } from "../browser-store.mjs";
+import { CATALOG_JSON_VERSION_KEY } from "../filstream-catalog-shared.mjs";
 import { mountFilstreamBrand } from "../filstream-brand.mjs";
 import {
   moviesFromCatalog,
@@ -420,13 +421,13 @@ async function handleSaveCatalog() {
       typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
         ? crypto.randomUUID()
         : `cat_${Date.now()}_${Math.random().toString(16).slice(2)}`;
-    const { pieceCid } = await publishFilstreamCatalogJson({
+    const { pieceCid, catalogVersion: publishedRevision } = await publishFilstreamCatalogJson({
       context: storageContext,
       synapse: synapseRef,
       assetId,
       catalogDoc: doc,
     });
-    loadedCatalogRoot = doc;
+    loadedCatalogRoot = { ...doc, [CATALOG_JSON_VERSION_KEY]: publishedRevision };
     const newCatalogUrl = await getPieceRetrievalUrl(storageContext, pieceCid);
     if (newCatalogUrl) {
       catalogUrl = newCatalogUrl;

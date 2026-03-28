@@ -2,6 +2,22 @@
  * Shared catalog helpers for viewer.html and creator.html (URLs + row parsing).
  */
 
+/** Top-level field in `filstream_catalog.json`: matches PDP piece `FS_VER` for that document. */
+export const CATALOG_JSON_VERSION_KEY = "catalogVersion";
+
+/**
+ * Monotonic revision for comparison (same number as metadata `FS_VER` when published by FilStream).
+ *
+ * @param {unknown} doc Parsed `filstream_catalog.json`
+ * @returns {number | null}
+ */
+export function catalogRevisionFromDoc(doc) {
+  if (!doc || typeof doc !== "object" || doc === null) return null;
+  const v = /** @type {Record<string, unknown>} */ (doc)[CATALOG_JSON_VERSION_KEY];
+  if (typeof v === "number" && Number.isFinite(v)) return v;
+  return null;
+}
+
 /**
  * @param {string} metapath
  * @param {string | null} catalogParam
