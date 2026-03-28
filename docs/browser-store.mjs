@@ -553,45 +553,6 @@ export async function openDataSetContextForCatalog(input) {
 }
 
 /**
- * Highest `FS_VER` among `filstream_catalog.json` pieces on the data set, and the version to use for the next catalog piece.
- *
- * @param {{
- *   context: import("@filoz/synapse-sdk/storage").StorageContext,
- *   synapse: import("@filoz/synapse-sdk").Synapse,
- *   chainId: number,
- *   dataSetId: number,
- * }} input
- * @returns {Promise<{ latestVersion: number, nextVersion: number }>}
- */
-export async function findLatestCatalogVersion(input) {
-  const { context, synapse, chainId, dataSetId } = input;
-  if (!context || typeof context.getPieces !== "function") {
-    throw new StoreError(500, "Storage context.getPieces is unavailable");
-  }
-  let bestVer = -1;
-  try {
-    for await (const row of context.getPieces()) {
-      const kv = await readPieceMetadataKvPublic({
-        synapse,
-        chainId,
-        dataSetId,
-        pieceId: row.pieceId,
-      });
-      if (kv.FS_NAME === "filstream_catalog.json") {
-        const v = Number.parseInt(kv.FS_VER ?? "0", 10);
-        if (Number.isFinite(v) && v > bestVer) {
-          bestVer = v;
-        }
-      }
-    }
-  } catch (e) {
-    console.warn("[filstream] findLatestCatalogVersion scan failed", e);
-  }
-  const nextVersion = bestVer < 0 ? 0 : bestVer + 1;
-  return { latestVersion: bestVer < 0 ? -1 : bestVer, nextVersion };
-}
-
-/**
  * Store and commit a new `filstream_catalog.json` piece (next `FS_VER`).
  *
  * @param {{
@@ -629,7 +590,6 @@ export async function publishFilstreamCatalogJson(input) {
     throw new StoreError(500, "Invalid storeChainId in config");
   }
   const { nextVersion } = await findLatestCatalogVersion({
-    context,
     synapse,
     chainId,
     dataSetId,
@@ -1577,6 +1537,103 @@ function parseGetActivePiecesResult(data) {
 /** Larger than Synapse default (100n) to cut `getActivePieces` round-trips when scanning a data set. */
 const FETCH_LATEST_CATALOG_GET_ACTIVE_PIECES_LIMIT = 500n;
 
+/**
+ * Highest-`FS_VER` `filstream_catalog.json` among PDP `getActivePieces` (same enumeration as
+ * {@link fetchLatestCatalogJsonForDataSet}).
+ *
+ * @param {{
+ *   synapse: import("@filoz/synapse-sdk").Synapse,
+ *   chainId: number,
+ *   dataSetId: number,
+ * }} input
+ * @returns {Promise<{ bestVer: number, bestPieceId: bigint | null } | null>}
+ * `null` if the chain scan failed. When no catalog piece exists, `bestVer` is `-1` and `bestPieceId` is `null`.
+ */
+async function findHighestFilstreamCatalogOnActivePieces(input) {
+  const { synapse, chainId, dataSetId } = input;
+  const client = synapse.client;
+  const chain = getChain(chainId);
+  let bestVer = -1;
+  /** @type {bigint | null} */
+  let bestPieceId = null;
+  try {
+    let offset = 0n;
+    const limit = FETCH_LATEST_CATALOG_GET_ACTIVE_PIECES_LIMIT;
+    let hasMore = true;
+    while (hasMore) {
+      const raw = await client.readContract({
+        address: chain.contracts.pdp.address,
+        abi: chain.contracts.pdp.abi,
+        functionName: "getActivePieces",
+        args: [BigInt(dataSetId), offset, limit],
+      });
+      const { pieces, pieceIds, hasMore: more } = parseGetActivePiecesResult(raw);
+      hasMore = more;
+      const n = Math.min(pieces.length, pieceIds.length);
+      offset += BigInt(n);
+      /** @type {bigint[]} */
+      const ids = [];
+      for (let i = 0; i < n; i++) {
+        const pieceIdRaw = pieceIds[i];
+        const pieceId =
+          typeof pieceIdRaw === "bigint"
+            ? pieceIdRaw
+            : pieceIdRaw != null
+              ? BigInt(pieceIdRaw)
+              : null;
+        if (pieceId != null) ids.push(pieceId);
+      }
+      const kvs = await readPieceMetadataKvPublicBatch({
+        synapse,
+        chainId,
+        dataSetId,
+        pieceIds: ids,
+      });
+      for (let j = 0; j < ids.length; j++) {
+        const kv = kvs[j];
+        const pieceId = ids[j];
+        if (kv.FS_NAME !== "filstream_catalog.json") continue;
+        const v = Number.parseInt(kv.FS_VER ?? "0", 10);
+        if (Number.isFinite(v) && v > bestVer) {
+          bestVer = v;
+          bestPieceId = pieceId;
+        }
+      }
+      if (!hasMore) break;
+    }
+    return { bestVer, bestPieceId };
+  } catch (e) {
+    console.warn("[filstream] findHighestFilstreamCatalogOnActivePieces: chain scan failed", e);
+    return null;
+  }
+}
+
+/**
+ * Highest `FS_VER` among `filstream_catalog.json` pieces on the data set (via `getActivePieces`), and
+ * the version to use for the next catalog piece. Matches the upload wizard / recovery path.
+ *
+ * @param {{
+ *   synapse: import("@filoz/synapse-sdk").Synapse,
+ *   chainId: number,
+ *   dataSetId: number,
+ * }} input
+ * @returns {Promise<{ latestVersion: number, nextVersion: number }>}
+ */
+export async function findLatestCatalogVersion(input) {
+  const { synapse, chainId, dataSetId } = input;
+  if (!synapse?.client) {
+    throw new StoreError(500, "Synapse client is unavailable");
+  }
+  const scan = await findHighestFilstreamCatalogOnActivePieces({ synapse, chainId, dataSetId });
+  if (scan == null) {
+    console.warn("[filstream] findLatestCatalogVersion: chain scan failed");
+    return { latestVersion: -1, nextVersion: 0 };
+  }
+  const bestVer = scan.bestVer;
+  const nextVersion = bestVer < 0 ? 0 : bestVer + 1;
+  return { latestVersion: bestVer < 0 ? -1 : bestVer, nextVersion };
+}
+
 /** Max calldata bytes per Multicall3 `aggregate3` chunk inside each `multicall` (half of prior 256 KiB). */
 const FETCH_LATEST_CATALOG_METADATA_MULTICALL_BATCH_BYTES = 131_072;
 
@@ -1745,59 +1802,12 @@ export async function fetchLatestCatalogJsonForDataSet(input) {
     return null;
   }
 
-  let bestVer = -1;
-  /** @type {bigint | null} */
-  let bestPieceId = null;
-
-  try {
-    let offset = 0n;
-    const limit = FETCH_LATEST_CATALOG_GET_ACTIVE_PIECES_LIMIT;
-    let hasMore = true;
-    while (hasMore) {
-      const raw = await client.readContract({
-        address: chain.contracts.pdp.address,
-        abi: chain.contracts.pdp.abi,
-        functionName: "getActivePieces",
-        args: [BigInt(dataSetId), offset, limit],
-      });
-      const { pieces, pieceIds, hasMore: more } = parseGetActivePiecesResult(raw);
-      hasMore = more;
-      const n = Math.min(pieces.length, pieceIds.length);
-      offset += BigInt(n);
-      /** @type {bigint[]} */
-      const ids = [];
-      for (let i = 0; i < n; i++) {
-        const pieceIdRaw = pieceIds[i];
-        const pieceId =
-          typeof pieceIdRaw === "bigint"
-            ? pieceIdRaw
-            : pieceIdRaw != null
-              ? BigInt(pieceIdRaw)
-              : null;
-        if (pieceId != null) ids.push(pieceId);
-      }
-      const kvs = await readPieceMetadataKvPublicBatch({
-        synapse,
-        chainId,
-        dataSetId,
-        pieceIds: ids,
-      });
-      for (let j = 0; j < ids.length; j++) {
-        const kv = kvs[j];
-        const pieceId = ids[j];
-        if (kv.FS_NAME !== "filstream_catalog.json") continue;
-        const v = Number.parseInt(kv.FS_VER ?? "0", 10);
-        if (Number.isFinite(v) && v > bestVer) {
-          bestVer = v;
-          bestPieceId = pieceId;
-        }
-      }
-      if (!hasMore) break;
-    }
-  } catch (e) {
-    console.warn("[filstream] fetchLatestCatalogJsonForDataSet: chain scan failed", e);
+  const scan = await findHighestFilstreamCatalogOnActivePieces({ synapse, chainId, dataSetId });
+  if (scan == null) {
+    console.warn("[filstream] fetchLatestCatalogJsonForDataSet: chain scan failed");
     return null;
   }
+  const { bestVer, bestPieceId } = scan;
 
   if (bestPieceId == null || bestVer < 0) {
     return null;

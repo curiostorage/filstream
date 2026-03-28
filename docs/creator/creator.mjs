@@ -411,7 +411,6 @@ function buildPublishDoc() {
 
 async function handleSaveCatalog() {
   if (!storageContext || !synapseRef || !catalogIdentity?.dataSetId || saveBusy) return;
-  const cfg = getFilstreamStoreConfig();
   saveBusy = true;
   if (saveStatus) saveStatus.textContent = "Saving…";
   if (saveBtn) saveBtn.disabled = true;

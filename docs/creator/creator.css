@@ -309,6 +309,13 @@ body {
   color: var(--fg);
 }
 
+.creator-field-hint {
+  font-size: 0.78rem;
+  line-height: 1.4;
+  color: var(--muted);
+  max-width: 42rem;
+}
+
 .creator-poster-row {
   display: flex;
   flex-wrap: wrap;
