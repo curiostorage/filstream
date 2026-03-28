@@ -13,7 +13,10 @@
   </script>
   <div id="root" class="creator-layout">
     <header id="creator-brand-mount" class="creator-brand" role="banner"></header>
-    <p class="creator-status" id="creator-status">Loading…</p>
+    <div class="creator-status-line">
+      <span id="creator-page-spinner" class="creator-spinner-slot" hidden aria-hidden="true"></span>
+      <p class="creator-status" id="creator-status">Loading…</p>
+    </div>
 
     <section class="creator-hero" id="creator-hero" hidden>
       <div class="creator-hero-poster-wrap">
@@ -61,7 +64,10 @@
           <span>Movies (catalog order, oldest first — drag ⋮⋮ to reorder)</span>
           <button type="button" id="creator-save-btn" class="creator-primary-btn">Save catalog</button>
         </div>
-        <p class="creator-save-status" id="creator-save-status" aria-live="polite"></p>
+        <div class="creator-save-status-row">
+          <span id="creator-save-spinner-mount" class="creator-spinner-slot" hidden aria-hidden="true"></span>
+          <p class="creator-save-status" id="creator-save-status" aria-live="polite"></p>
+        </div>
         <ul id="creator-movie-edit-list" class="creator-movie-edit-list"></ul>
         <div class="creator-dev-paste-box" id="creator-dev-paste-box">
           <p class="creator-dev-paste-heading">for development only</p>

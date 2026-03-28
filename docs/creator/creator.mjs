@@ -26,6 +26,7 @@ import {
 } from "../filstream-catalog-shared.mjs";
 import { getFilstreamStoreConfig } from "../filstream-config.mjs";
 import { authorizeSessionKeyForUpload } from "../session-key-bootstrap.mjs";
+import { createSpinnerElement } from "../spinner.mjs";
 
 const brandMount = document.getElementById("creator-brand-mount");
 if (brandMount) {
@@ -33,6 +34,8 @@ if (brandMount) {
 }
 
 const statusEl = document.getElementById("creator-status");
+const pageSpinnerMount = document.getElementById("creator-page-spinner");
+const saveSpinnerMount = document.getElementById("creator-save-spinner-mount");
 const heroEl = document.getElementById("creator-hero");
 const posterImg = document.getElementById("creator-poster");
 const posterUrlInput = document.getElementById("creator-poster-url");
@@ -104,6 +107,26 @@ function setStatus(msg, kind) {
   statusEl.className = `creator-status${kind === "err" ? " err" : ""}`;
 }
 
+function showPageLoadSpinner() {
+  if (!pageSpinnerMount) return;
+  pageSpinnerMount.hidden = false;
+  if (!pageSpinnerMount.querySelector(".filstream-spinner")) {
+    pageSpinnerMount.appendChild(createSpinnerElement({ size: "sm" }));
+  }
+}
+
+function hidePageLoadSpinner() {
+  if (pageSpinnerMount) pageSpinnerMount.hidden = true;
+}
+
+function setSaveSpinnerVisible(on) {
+  if (!saveSpinnerMount) return;
+  saveSpinnerMount.hidden = !on;
+  if (on && !saveSpinnerMount.querySelector(".filstream-spinner")) {
+    saveSpinnerMount.appendChild(createSpinnerElement({ size: "sm" }));
+  }
+}
+
 function setDevPasteStatus(msg) {
   if (devPasteStatus) devPasteStatus.textContent = msg;
 }
@@ -172,12 +195,21 @@ function handleAddPastedMovie() {
   renderMovieLists();
 }
 
-/** Clears top status, save line, poster upload line; releases stuck Save state. */
-function resetTransientCreatorUi() {
+/**
+ * Clears top status, save line, poster upload line; releases stuck Save state.
+ *
+ * @param {{ keepPageLoadSpinner?: boolean }} [opts]
+ */
+function resetTransientCreatorUi(opts = {}) {
+  const keepPageLoadSpinner = opts.keepPageLoadSpinner === true;
   if (saveStatus) saveStatus.textContent = "";
   setDevPasteStatus("");
   setPosterUploadStatus("");
   setStatus("");
+  if (!keepPageLoadSpinner) {
+    hidePageLoadSpinner();
+  }
+  setSaveSpinnerVisible(false);
   if (saveBusy) {
     saveBusy = false;
     if (saveBtn) saveBtn.disabled = false;
@@ -410,10 +442,22 @@ function buildPublishDoc() {
   return doc;
 }
 
+/**
+ * Ends the PDP upload session so the creator page returns to the non-edit state (hero “Sign-in to edit”);
+ * in-memory catalog and `?catalog=` are unchanged. Wallet may stay connected.
+ */
+function clearCreatorStorageSession() {
+  sessionPrivateKey = null;
+  sessionExpirations = null;
+  synapseRef = null;
+  storageContext = null;
+}
+
 async function handleSaveCatalog() {
   if (!storageContext || !synapseRef || !catalogIdentity?.dataSetId || saveBusy) return;
   saveBusy = true;
   if (saveStatus) saveStatus.textContent = "Saving…";
+  setSaveSpinnerVisible(true);
   if (saveBtn) saveBtn.disabled = true;
   try {
     const doc = buildPublishDoc();
@@ -429,26 +473,22 @@ async function handleSaveCatalog() {
     });
     loadedCatalogRoot = { ...doc, [CATALOG_JSON_VERSION_KEY]: publishedRevision };
     const newCatalogUrl = await getPieceRetrievalUrl(storageContext, pieceCid);
+    clearCreatorStorageSession();
     if (newCatalogUrl) {
       catalogUrl = newCatalogUrl;
-      if (saveStatus) saveStatus.textContent = "Saved.";
       replaceBrowserUrlForCatalog(newCatalogUrl, catalogIdentity?.dataSetId ?? null);
-      await applyHeroFromDoc(loadedCatalogRoot ?? {});
-      refreshEditVisibility();
-      renderMovieLists();
-      setStatus("");
-      return;
     }
+    if (saveStatus) saveStatus.textContent = "Saved.";
     await applyHeroFromDoc(loadedCatalogRoot ?? {});
     refreshEditVisibility();
     renderMovieLists();
-    if (saveStatus) saveStatus.textContent = "Saved.";
     setStatus("");
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     if (saveStatus) saveStatus.textContent = `Save failed: ${msg}`;
   } finally {
     saveBusy = false;
+    setSaveSpinnerVisible(false);
     if (saveBtn) saveBtn.disabled = false;
   }
 }
@@ -472,6 +512,7 @@ async function handleRemoveMovie(index) {
   const cfg = getFilstreamStoreConfig();
   saveBusy = true;
   if (saveStatus) saveStatus.textContent = "Removing…";
+  setSaveSpinnerVisible(true);
   try {
     const res = await fetch(row.metapath);
     if (!res.ok) {
@@ -503,6 +544,7 @@ async function handleRemoveMovie(index) {
     if (saveStatus) saveStatus.textContent = `Remove failed: ${msg}`;
   } finally {
     saveBusy = false;
+    setSaveSpinnerVisible(false);
   }
 }
 
@@ -752,7 +794,7 @@ async function applyLoadedCatalogDoc(doc, url) {
   applyCatalogIdentity(doc);
   await applyHeroFromDoc(loadedCatalogRoot ?? {});
   if (catalogSection) catalogSection.hidden = moviesState.length === 0;
-  resetTransientCreatorUi();
+  resetTransientCreatorUi({ keepPageLoadSpinner: true });
   renderMovieLists();
 }
 
@@ -774,8 +816,11 @@ function replaceBrowserUrlForCatalog(catalogUrlStr, dataSetId) {
  * Old catalog JSON may omit `chainId`; we use the app store config chain (same as viewer recovery).
  * Clears transient status/save/upload lines, reapplies identity + hero + address bar, awaits wallet
  * account refresh (editor vs viewer), then re-renders lists in `finally` so viewer links use the new `?catalog=`.
+ *
+ * @param {{ quiet?: boolean }} [opts] If `quiet`, do not set status text (initial load keeps the page spinner only).
  */
-async function upgradeCatalogFromChainIfNewer() {
+async function upgradeCatalogFromChainIfNewer(opts = {}) {
+  const quiet = opts.quiet === true;
   try {
     if (catalogIdentity?.dataSetId == null) {
       return;
@@ -788,7 +833,9 @@ async function upgradeCatalogFromChainIfNewer() {
     if (!Number.isFinite(chainId)) {
       return;
     }
-    setStatus("Checking for newer catalog on-chain…");
+    if (!quiet) {
+      setStatus("Checking for newer catalog on-chain…");
+    }
     const refreshed = await fetchLatestCatalogJsonForDataSet({
       chainId,
       dataSetId: catalogIdentity.dataSetId,
@@ -802,7 +849,7 @@ async function upgradeCatalogFromChainIfNewer() {
     if (!nextUrl || nextUrl === prevUrl) {
       return;
     }
-    resetTransientCreatorUi();
+    resetTransientCreatorUi({ keepPageLoadSpinner: true });
     catalogUrl = nextUrl;
     loadedCatalogRoot =
       refreshed.doc && typeof refreshed.doc === "object" && refreshed.doc !== null
@@ -833,9 +880,10 @@ async function handleSignInToEdit() {
     return;
   }
 
+  const initialWaitLabel = connectedAddress ? "Authorizing…" : "Connecting…";
   if (enableEditBtn) {
     enableEditBtn.disabled = true;
-    enableEditBtn.textContent = connectedAddress ? "Authorizing…" : "Connecting…";
+    enableEditBtn.textContent = initialWaitLabel;
   }
   if (saveStatus) saveStatus.textContent = "";
 
@@ -846,6 +894,9 @@ async function handleSignInToEdit() {
       );
       connectedAddress = accounts?.[0] ?? null;
       refreshWalletRole();
+      if (connectedAddress && enableEditBtn) {
+        enableEditBtn.textContent = "Authorizing…";
+      }
     }
 
     if (!connectedAddress) {
@@ -1031,6 +1082,7 @@ if (!catalogUrl && datasetQueryParsed == null) {
   );
 } else {
   void (async () => {
+    showPageLoadSpinner();
     /** @type {Error | null} */
     let loadError = null;
 
@@ -1051,7 +1103,11 @@ if (!catalogUrl && datasetQueryParsed == null) {
               "[filstream creator] ?dataset= does not match catalog dataSetId; using catalog identity.",
             );
           }
-          await upgradeCatalogFromChainIfNewer();
+          try {
+            await upgradeCatalogFromChainIfNewer({ quiet: true });
+          } finally {
+            hidePageLoadSpinner();
+          }
           return;
         }
       } catch (e) {
@@ -1069,7 +1125,11 @@ if (!catalogUrl && datasetQueryParsed == null) {
         await applyLoadedCatalogDoc(recovered.doc, recovered.retrievalUrl.trim());
         const ds = catalogIdentity?.dataSetId ?? datasetQueryParsed;
         replaceBrowserUrlForCatalog(catalogUrl, ds);
-        await upgradeCatalogFromChainIfNewer();
+        try {
+          await upgradeCatalogFromChainIfNewer({ quiet: true });
+        } finally {
+          hidePageLoadSpinner();
+        }
         if (loadError) {
           console.warn(
             "[filstream creator] Recovered using on-chain catalog (catalog URL was missing or failed):",
@@ -1087,6 +1147,7 @@ if (!catalogUrl && datasetQueryParsed == null) {
       datasetQueryParsed != null
         ? " On-chain recovery failed (wrong network: set window.__FILSTREAM_CONFIG__ storeRpcUrl / storeChainId to match this data set)."
         : "";
+    hidePageLoadSpinner();
     setStatus(
       `Could not load catalog${loadError ? `: ${loadError.message}` : ""}.${hint}`,
       "err",

@@ -3,6 +3,7 @@
  * Edit and refresh.
  */
 import { html } from "https://cdn.jsdelivr.net/npm/lit-html@3.2.1/+esm";
+import { spinnerLit } from "./spinner.mjs";
 
 /**
  * @param {import("shaka-player").Player | null} player
@@ -173,7 +174,7 @@ export function convertProgressPanel(props) {
           : "Playback preview";
 
   const awaitingStatusInner = html`
-    <div class="convert-awaiting-spinner" aria-hidden="true"></div>
+    ${spinnerLit({ size: "lg" })}
     <p class="convert-awaiting-title">Waiting for stream</p>
     <p class="convert-awaiting-sub">
       ${statusMsg}

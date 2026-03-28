@@ -2,6 +2,7 @@
  * Injected wallet UI via EIP-6963 discovery + `window.ethereum` fallback.
  */
 import { html } from "https://cdn.jsdelivr.net/npm/lit-html@3.2.1/+esm";
+import { spinnerLit } from "./spinner.mjs";
 
 function shortAddress(addr) {
   if (!addr || addr.length < 12) return addr || "";
@@ -196,7 +197,7 @@ export function uploadConfigurePanel(props) {
                       ${sessionAuthBusy
                         ? html`
                             <div class="session-auth-progress" role="status" aria-live="polite">
-                              <span class="session-auth-spinner" aria-hidden="true"></span>
+                              ${spinnerLit({ size: "sm" })}
                               <div class="session-auth-progress-copy">
                                 <strong class="session-auth-progress-title">${waitUi.title}</strong>
                                 <p class="session-auth-progress-detail">${waitUi.detail}</p>
@@ -264,7 +265,7 @@ export function uploadConfigurePanel(props) {
                       ${fundingBusy
                         ? html`
                             <div class="session-auth-progress" role="status" aria-live="polite">
-                              <span class="session-auth-spinner" aria-hidden="true"></span>
+                              ${spinnerLit({ size: "sm" })}
                               <div class="session-auth-progress-copy">
                                 <strong class="session-auth-progress-title">Balance setup</strong>
                                 <p class="session-auth-progress-detail">

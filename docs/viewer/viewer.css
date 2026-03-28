@@ -186,7 +186,11 @@ body {
 
 a.viewer-action-btn--round {
   text-decoration: none;
-  color: inherit;
+  color: #202124;
+}
+
+button.viewer-action-btn--round {
+  color: #202124;
 }
 
 .viewer-byline-trailing .viewer-action-btn--round {
@@ -301,7 +305,7 @@ a.viewer-action-btn--round {
 }
 
 .viewer-creator-avatar-link:hover {
-  box-shadow: 0 0 0 1px rgb(138 180 248 / 0.55);
+  box-shadow: 0 0 0 1px rgb(24 200 255 / 0.55);
 }
 
 .viewer-creator-avatar {
@@ -331,7 +335,7 @@ a.viewer-action-btn--round {
 }
 
 .viewer-creator-name:hover {
-  color: #8ab4f8;
+  color: #18C8FF;
   text-decoration: underline;
 }
 
@@ -377,14 +381,14 @@ a.viewer-action-btn--round {
 }
 
 .btn-primary {
-  background: #8ab4f8;
+  background: #18C8FF;
   color: #0f1115;
   border-color: transparent;
   font-weight: 500;
 }
 
 .btn-primary:hover:not(:disabled) {
-  background: #aec9ff;
+  background: #5dd8ff;
   border-color: transparent;
 }
 
@@ -467,7 +471,7 @@ a.viewer-action-btn--round {
 }
 
 .viewer-catalog-row:focus-visible {
-  outline: 2px solid #8ab4f8;
+  outline: 2px solid #18C8FF;
   outline-offset: 2px;
 }
 
