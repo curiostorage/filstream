@@ -38,7 +38,6 @@ import {
   resolveMetaJsonUrlFromFinalize,
 } from "./filstream-config.mjs";
 import { publishMetadataForm } from "./publish-metadata.mjs";
-import { whenPieceHeadServiceWorkerReady } from "./register-piece-head-sw.mjs";
 import {
   authorizeSessionKeyForUpload,
   minExpirationSummaryLocal,
@@ -60,8 +59,6 @@ import {
   getChain,
   Synapse,
 } from "./vendor/synapse-browser.mjs";
-
-await whenPieceHeadServiceWorkerReady();
 
 /**
  * Prefer full `Error.message` (viem includes Details) and walk `cause` so RPC / hex errors are visible.

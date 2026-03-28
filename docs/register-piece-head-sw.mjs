@@ -2,6 +2,9 @@
  * Registers the piece HEAD → ranged-GET service worker (see `piece-head-sw.js`).
  * Await {@link whenPieceHeadServiceWorkerReady} before playback or any PDP `piece/*` HEAD
  * traffic so interceptors are active (avoids 405 from hosts that disallow HEAD).
+ *
+ * Not wired from app entry points (`ui.mjs`, `viewer/viewer.mjs`, `creator/creator.mjs`) right now;
+ * import and `await whenPieceHeadServiceWorkerReady()` there to re-enable.
  */
 const swUrl = new URL("./piece-head-sw.js", import.meta.url);
 const scopeUrl = new URL("./", import.meta.url);

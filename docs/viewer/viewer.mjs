@@ -23,7 +23,6 @@
  * includes a `share` URL (Open Graph landing page published at finalize).
  *
  */
-import { whenPieceHeadServiceWorkerReady } from "../register-piece-head-sw.mjs";
 import {
   broadcastCopyFromMeta,
   formatUploadDateLabel,
@@ -44,7 +43,6 @@ import {
   resolveViewerProvider,
 } from "../filstream-viewer-donate.mjs";
 
-await whenPieceHeadServiceWorkerReady();
 const shaka = (
   await import("https://esm.sh/shaka-player@4.7.11/dist/shaka-player.ui.js")
 ).default;
