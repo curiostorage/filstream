@@ -38,7 +38,6 @@ const titleEl = document.getElementById("creator-title");
 const roleLabel = document.getElementById("creator-title-role");
 const datasetLabel = document.getElementById("creator-dataset-label");
 const heroActionsEl = document.getElementById("creator-hero-actions");
-const heroPosterUploadBtn = document.getElementById("creator-hero-poster-upload");
 const editSection = document.getElementById("creator-edit-section");
 const editHint = document.getElementById("creator-edit-hint");
 const enableEditBtn = document.getElementById("creator-enable-edit");
@@ -263,7 +262,6 @@ function refreshEditVisibility() {
       enableEditBtn.textContent = "Sign-in to edit";
     }
     editForm.hidden = true;
-    if (heroPosterUploadBtn) heroPosterUploadBtn.disabled = true;
     if (posterBrowseBtn) posterBrowseBtn.disabled = true;
     if (!storageReady) {
       setPosterUploadStatus("");
@@ -279,7 +277,6 @@ function refreshEditVisibility() {
     enableEditBtn.hidden = false;
     editForm.hidden = true;
     if (posterBrowseBtn) posterBrowseBtn.disabled = true;
-    if (heroPosterUploadBtn) heroPosterUploadBtn.disabled = true;
     setPosterUploadStatus("");
     return;
   }
@@ -293,6 +290,7 @@ function refreshEditVisibility() {
   }
   enableEditBtn.hidden = true;
   editForm.hidden = false;
+  if (heroActionsEl) heroActionsEl.hidden = true;
   if (nameInput && posterUrlInput) {
     const cn = loadedCatalogRoot && /** @type {{ creatorName?: unknown }} */ (loadedCatalogRoot).creatorName;
     const cpu =
@@ -302,9 +300,6 @@ function refreshEditVisibility() {
   }
   if (posterBrowseBtn) {
     posterBrowseBtn.disabled = false;
-  }
-  if (heroPosterUploadBtn) {
-    heroPosterUploadBtn.disabled = false;
   }
 }
 
@@ -756,6 +751,7 @@ async function handleSignInToEdit() {
   }
 
   if (sessionPrivateKey && synapseRef && storageContext) {
+    await upgradeCatalogFromChainIfNewer();
     refreshEditVisibility();
     return;
   }
@@ -786,6 +782,8 @@ async function handleSignInToEdit() {
       }
       return;
     }
+
+    await upgradeCatalogFromChainIfNewer();
 
     const auth = await authorizeSessionKeyForUpload(eth, connectedAddress, {});
     sessionPrivateKey = auth.sessionPrivateKey;
@@ -906,12 +904,6 @@ function wirePosterControls() {
   if (posterBrowseBtn && posterFileInput) {
     posterBrowseBtn.addEventListener("click", () => {
       if (posterBrowseBtn.disabled) return;
-      triggerPosterFile();
-    });
-  }
-  if (heroPosterUploadBtn && posterFileInput) {
-    heroPosterUploadBtn.addEventListener("click", () => {
-      if (heroPosterUploadBtn.disabled) return;
       triggerPosterFile();
     });
   }
