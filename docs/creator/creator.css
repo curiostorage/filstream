@@ -449,3 +449,68 @@ body {
   opacity: 0.45;
   cursor: not-allowed;
 }
+
+.creator-dev-paste-box {
+  margin-top: 1.25rem;
+  padding: 0.85rem 1rem;
+  border-radius: 8px;
+  border: 1px dashed rgb(154 160 166 / 0.45);
+  background: rgb(255 255 255 / 0.03);
+}
+
+.creator-dev-paste-heading {
+  margin: 0 0 0.35rem;
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.creator-dev-paste-desc {
+  margin: 0 0 0.6rem;
+  font-size: 0.82rem;
+  color: var(--muted);
+  line-height: 1.4;
+}
+
+.creator-dev-paste-desc code {
+  font-size: 0.88em;
+  padding: 0.05em 0.3em;
+  border-radius: 4px;
+  background: rgb(255 255 255 / 0.06);
+}
+
+.creator-dev-paste-textarea {
+  display: block;
+  width: 100%;
+  min-height: 7rem;
+  margin: 0 0 0.6rem;
+  padding: 0.55rem 0.65rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 0.78rem;
+  line-height: 1.4;
+  color: var(--fg);
+  background: rgb(0 0 0 / 0.35);
+  border: 1px solid rgb(255 255 255 / 0.12);
+  border-radius: 6px;
+  resize: vertical;
+}
+
+.creator-dev-paste-textarea::placeholder {
+  color: rgb(154 160 166 / 0.65);
+}
+
+.creator-dev-paste-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.creator-dev-paste-status {
+  margin: 0.5rem 0 0;
+  font-size: 0.82rem;
+  color: var(--muted);
+  min-height: 1.2em;
+}

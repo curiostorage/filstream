@@ -63,6 +63,26 @@
         </div>
         <p class="creator-save-status" id="creator-save-status" aria-live="polite"></p>
         <ul id="creator-movie-edit-list" class="creator-movie-edit-list"></ul>
+        <div class="creator-dev-paste-box" id="creator-dev-paste-box">
+          <p class="creator-dev-paste-heading">for development only</p>
+          <p class="creator-dev-paste-desc">
+            Paste a catalog <code>movies[]</code> object (JSON), then add it to the list. Use Save catalog to publish.
+          </p>
+          <textarea
+            id="creator-dev-paste-json"
+            class="creator-dev-paste-textarea"
+            rows="8"
+            spellcheck="false"
+            autocomplete="off"
+            placeholder='{ "title": "…", "metapath": "https://…/meta.json" }'
+          ></textarea>
+          <div class="creator-dev-paste-actions">
+            <button type="button" id="creator-dev-paste-add" class="creator-row-btn">
+              Add pasted movie
+            </button>
+          </div>
+          <p class="creator-dev-paste-status" id="creator-dev-paste-status" aria-live="polite"></p>
+        </div>
       </div>
     </section>
 

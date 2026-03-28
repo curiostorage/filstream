@@ -4,21 +4,21 @@
  * streamed to Synapse via ReadableStream, deleting each IDB record after it is read.
  */
 import {
-  Synapse,
-  getChain,
-  DefaultFwssPermissions,
-  fromSecp256k1,
-  getAddress,
-  custom,
-  privateKeyToAccount,
-} from "./vendor/synapse-browser.mjs";
-import { computePieceCidFromBytes } from "./piece-cid-from-bytes.mjs";
-import {
   buildReviewViewerEmbedSrc,
   buildReviewViewerIframeSrc,
   ensureFilstreamId,
   getFilstreamStoreConfig,
 } from "./filstream-config.mjs";
+import { computePieceCidFromBytes } from "./piece-cid-from-bytes.mjs";
+import {
+  DefaultFwssPermissions,
+  Synapse,
+  custom,
+  fromSecp256k1,
+  getAddress,
+  getChain,
+  privateKeyToAccount,
+} from "./vendor/synapse-browser.mjs";
 
 /**
  * @typedef {object} DataSetCandidate
@@ -1438,6 +1438,88 @@ export async function readPieceMetadataKvPublic(input) {
 }
 
 /**
+ * Same as {@link readPieceMetadataKvPublic}, but batches many pieces into Multicall3 `aggregate3`
+ * RPC round-trips (far fewer HTTP requests than one `eth_call` per piece). Splits the id list across
+ * {@link FETCH_LATEST_CATALOG_METADATA_MULTICALL_PARALLEL} concurrent `multicall` requests.
+ *
+ * @param {{
+ *   synapse: import("@filoz/synapse-sdk").Synapse,
+ *   chainId: number,
+ *   dataSetId: number,
+ *   pieceIds: bigint[],
+ * }} input
+ * @returns {Promise<Record<string, string>[]>} One KV map per `pieceIds` index (empty object on failure)
+ */
+export async function readPieceMetadataKvPublicBatch(input) {
+  const { synapse, chainId, dataSetId, pieceIds } = input;
+  if (!synapse?.client) {
+    throw new StoreError(500, "Synapse client is unavailable");
+  }
+  if (pieceIds.length === 0) return [];
+  const chain = getChain(chainId);
+  const client = synapse.client;
+  const fwss = chain.contracts.fwssView;
+  const ds = BigInt(dataSetId);
+  try {
+    const stride = Math.ceil(pieceIds.length / FETCH_LATEST_CATALOG_METADATA_MULTICALL_PARALLEL);
+    /** @type {bigint[][]} */
+    const shards = [];
+    for (let i = 0; i < pieceIds.length; i += stride) {
+      shards.push(pieceIds.slice(i, i + stride));
+    }
+    const partials = await Promise.all(
+      shards.map((shard) =>
+        client.multicall({
+          contracts: shard.map((pieceId) => ({
+            address: fwss.address,
+            abi: fwss.abi,
+            functionName: "getAllPieceMetadata",
+            args: [ds, pieceId],
+          })),
+          allowFailure: true,
+          batchSize: FETCH_LATEST_CATALOG_METADATA_MULTICALL_BATCH_BYTES,
+        }),
+      ),
+    );
+    const raw = partials.flat();
+    /** @type {Record<string, string>[]} */
+    const out = [];
+    for (let i = 0; i < raw.length; i++) {
+      const r = /** @type {{ status?: string, result?: unknown }} */ (raw[i]);
+      if (!r || r.status !== "success" || r.result == null) {
+        out.push({});
+        continue;
+      }
+      const tuple = r.result;
+      if (!Array.isArray(tuple) || tuple.length < 2) {
+        out.push({});
+        continue;
+      }
+      const keys = tuple[0];
+      const values = tuple[1];
+      if (!Array.isArray(keys) || !Array.isArray(values)) {
+        out.push({});
+        continue;
+      }
+      /** @type {Record<string, string>} */
+      const rec = {};
+      for (let j = 0; j < keys.length; j++) {
+        rec[keys[j]] = values[j];
+      }
+      out.push(rec);
+    }
+    return out;
+  } catch (e) {
+    console.warn("[filstream] readPieceMetadataKvPublicBatch multicall failed, falling back", e);
+    return Promise.all(
+      pieceIds.map((pieceId) =>
+        readPieceMetadataKvPublic({ synapse, chainId, dataSetId, pieceId }),
+      ),
+    );
+  }
+}
+
+/**
  * Read-only Synapse client for public PDP / FWSS view calls (no session key).
  *
  * @param {{ rpcUrl: string, chainId: number, source: string }} cfg
@@ -1491,6 +1573,15 @@ function parseGetActivePiecesResult(data) {
   }
   return { pieces: [], pieceIds: [], hasMore: false };
 }
+
+/** Larger than Synapse default (100n) to cut `getActivePieces` round-trips when scanning a data set. */
+const FETCH_LATEST_CATALOG_GET_ACTIVE_PIECES_LIMIT = 500n;
+
+/** Max calldata bytes per Multicall3 `aggregate3` chunk inside each `multicall` (half of prior 256 KiB). */
+const FETCH_LATEST_CATALOG_METADATA_MULTICALL_BATCH_BYTES = 131_072;
+
+/** Concurrent top-level `multicall` RPCs (each uses {@link FETCH_LATEST_CATALOG_METADATA_MULTICALL_BATCH_BYTES}). */
+const FETCH_LATEST_CATALOG_METADATA_MULTICALL_PARALLEL = 2;
 
 /**
  * @param {unknown} cidStruct
@@ -1660,7 +1751,7 @@ export async function fetchLatestCatalogJsonForDataSet(input) {
 
   try {
     let offset = 0n;
-    const limit = 100n;
+    const limit = FETCH_LATEST_CATALOG_GET_ACTIVE_PIECES_LIMIT;
     let hasMore = true;
     while (hasMore) {
       const raw = await client.readContract({
@@ -1671,8 +1762,10 @@ export async function fetchLatestCatalogJsonForDataSet(input) {
       });
       const { pieces, pieceIds, hasMore: more } = parseGetActivePiecesResult(raw);
       hasMore = more;
-      offset += limit;
       const n = Math.min(pieces.length, pieceIds.length);
+      offset += BigInt(n);
+      /** @type {bigint[]} */
+      const ids = [];
       for (let i = 0; i < n; i++) {
         const pieceIdRaw = pieceIds[i];
         const pieceId =
@@ -1681,13 +1774,17 @@ export async function fetchLatestCatalogJsonForDataSet(input) {
             : pieceIdRaw != null
               ? BigInt(pieceIdRaw)
               : null;
-        if (pieceId == null) continue;
-        const kv = await readPieceMetadataKvPublic({
-          synapse,
-          chainId,
-          dataSetId,
-          pieceId,
-        });
+        if (pieceId != null) ids.push(pieceId);
+      }
+      const kvs = await readPieceMetadataKvPublicBatch({
+        synapse,
+        chainId,
+        dataSetId,
+        pieceIds: ids,
+      });
+      for (let j = 0; j < ids.length; j++) {
+        const kv = kvs[j];
+        const pieceId = ids[j];
         if (kv.FS_NAME !== "filstream_catalog.json") continue;
         const v = Number.parseInt(kv.FS_VER ?? "0", 10);
         if (Number.isFinite(v) && v > bestVer) {

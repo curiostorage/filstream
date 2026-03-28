@@ -109,6 +109,40 @@ export function creatorInfoFromCatalog(doc) {
 }
 
 /**
+ * One catalog `movies[]` entry: same shape as rows produced by {@link moviesFromCatalog}.
+ *
+ * @param {unknown} m
+ * @returns {{ title: string, metapath: string, posterUrl?: string, posterAnimUrl?: string, share?: string } | null}
+ */
+export function parseCatalogMovieRow(m) {
+  if (!m || typeof m !== "object") return null;
+  const row = /** @type {{ title?: unknown, metapath?: unknown, posterUrl?: unknown, posterAnimUrl?: unknown, share?: unknown }} */ (
+    m
+  );
+  const title = typeof row.title === "string" ? row.title.trim() : "";
+  const metapath = typeof row.metapath === "string" ? row.metapath.trim() : "";
+  if (!metapath) return null;
+  const pu =
+    typeof row.posterUrl === "string" && row.posterUrl.trim() !== ""
+      ? row.posterUrl.trim()
+      : undefined;
+  const pau =
+    typeof row.posterAnimUrl === "string" && row.posterAnimUrl.trim() !== ""
+      ? row.posterAnimUrl.trim()
+      : undefined;
+  const sh =
+    typeof row.share === "string" && row.share.trim() !== "" && /^https?:\/\//i.test(row.share.trim())
+      ? row.share.trim()
+      : undefined;
+  /** @type {{ title: string, metapath: string, posterUrl?: string, posterAnimUrl?: string, share?: string }} */
+  const item = { title: title || "Untitled", metapath };
+  if (pu) item.posterUrl = pu;
+  if (pau) item.posterAnimUrl = pau;
+  if (sh) item.share = sh;
+  return item;
+}
+
+/**
  * Catalog row: `title`, `metapath` (meta.json URL), optional `posterUrl`, optional `posterAnimUrl` (animated mini-poster), optional `share` (Open Graph landing page URL).
  *
  * @param {unknown} doc
@@ -121,31 +155,8 @@ export function moviesFromCatalog(doc) {
   /** @type {{ title: string, metapath: string, posterUrl?: string, posterAnimUrl?: string, share?: string }[]} */
   const out = [];
   for (const m of movies) {
-    if (!m || typeof m !== "object") continue;
-    const row = /** @type {{ title?: unknown, metapath?: unknown, posterUrl?: unknown, posterAnimUrl?: unknown, share?: unknown }} */ (
-      m
-    );
-    const title = typeof row.title === "string" ? row.title.trim() : "";
-    const metapath = typeof row.metapath === "string" ? row.metapath.trim() : "";
-    if (!metapath) continue;
-    const pu =
-      typeof row.posterUrl === "string" && row.posterUrl.trim() !== ""
-        ? row.posterUrl.trim()
-        : undefined;
-    const pau =
-      typeof row.posterAnimUrl === "string" && row.posterAnimUrl.trim() !== ""
-        ? row.posterAnimUrl.trim()
-        : undefined;
-    const sh =
-      typeof row.share === "string" && row.share.trim() !== "" && /^https?:\/\//i.test(row.share.trim())
-        ? row.share.trim()
-        : undefined;
-    /** @type {{ title: string, metapath: string, posterUrl?: string, posterAnimUrl?: string, share?: string }} */
-    const item = { title: title || "Untitled", metapath };
-    if (pu) item.posterUrl = pu;
-    if (pau) item.posterAnimUrl = pau;
-    if (sh) item.share = sh;
-    out.push(item);
+    const item = parseCatalogMovieRow(m);
+    if (item) out.push(item);
   }
   return out;
 }

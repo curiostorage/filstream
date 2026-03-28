@@ -17,8 +17,12 @@ import {
   publishCreatorPosterImage,
   publishFilstreamCatalogJson,
 } from "../browser-store.mjs";
-import { moviesFromCatalog, viewerHrefForMeta } from "../filstream-catalog-shared.mjs";
 import { mountFilstreamBrand } from "../filstream-brand.mjs";
+import {
+  moviesFromCatalog,
+  parseCatalogMovieRow,
+  viewerHrefForMeta,
+} from "../filstream-catalog-shared.mjs";
 import { getFilstreamStoreConfig } from "../filstream-config.mjs";
 import { authorizeSessionKeyForUpload } from "../session-key-bootstrap.mjs";
 
@@ -46,6 +50,9 @@ const nameInput = document.getElementById("creator-name-input");
 const saveBtn = document.getElementById("creator-save-btn");
 const saveStatus = document.getElementById("creator-save-status");
 const movieEditList = document.getElementById("creator-movie-edit-list");
+const devPasteJson = document.getElementById("creator-dev-paste-json");
+const devPasteAddBtn = document.getElementById("creator-dev-paste-add");
+const devPasteStatus = document.getElementById("creator-dev-paste-status");
 const catalogSection = document.getElementById("creator-catalog-section");
 const movieListEl = document.getElementById("creator-movie-list");
 
@@ -96,9 +103,78 @@ function setStatus(msg, kind) {
   statusEl.className = `creator-status${kind === "err" ? " err" : ""}`;
 }
 
+function setDevPasteStatus(msg) {
+  if (devPasteStatus) devPasteStatus.textContent = msg;
+}
+
+/**
+ * Parses pasted JSON: one movie object, or an array of movie objects (e.g. a `movies` slice).
+ *
+ * @param {unknown} parsed
+ * @returns {{ title: string, metapath: string, posterUrl?: string, posterAnimUrl?: string, share?: string }[]}
+ */
+function catalogMovieRowsFromParsedJson(parsed) {
+  if (
+    parsed &&
+    typeof parsed === "object" &&
+    !Array.isArray(parsed) &&
+    Array.isArray(/** @type {{ movies?: unknown }} */ (parsed).movies)
+  ) {
+    return catalogMovieRowsFromParsedJson(
+      /** @type {{ movies: unknown[] }} */ (parsed).movies,
+    );
+  }
+  if (Array.isArray(parsed)) {
+    /** @type {{ title: string, metapath: string, posterUrl?: string, posterAnimUrl?: string, share?: string }[]} */
+    const out = [];
+    for (const el of parsed) {
+      const row = parseCatalogMovieRow(el);
+      if (row) out.push(row);
+    }
+    return out;
+  }
+  const one = parseCatalogMovieRow(parsed);
+  return one ? [one] : [];
+}
+
+/**
+ * Parses pasted JSON as catalog movie object(s) and appends to the in-memory list.
+ */
+function handleAddPastedMovie() {
+  if (!devPasteJson) return;
+  const raw = devPasteJson.value.trim();
+  if (!raw) {
+    setDevPasteStatus("Paste JSON first.");
+    return;
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (e) {
+    setDevPasteStatus(`Invalid JSON: ${e instanceof Error ? e.message : String(e)}`);
+    return;
+  }
+  const rows = catalogMovieRowsFromParsedJson(parsed);
+  if (rows.length === 0) {
+    setDevPasteStatus(
+      "No valid movie rows: need object(s) with a string metapath (and optional title, posterUrl, …).",
+    );
+    return;
+  }
+  moviesState.push(...rows);
+  devPasteJson.value = "";
+  const label =
+    rows.length === 1
+      ? `Added “${rows[0].title}”. Save catalog to publish.`
+      : `Added ${rows.length} movies. Save catalog to publish.`;
+  setDevPasteStatus(label);
+  renderMovieLists();
+}
+
 /** Clears top status, save line, poster upload line; releases stuck Save state. */
 function resetTransientCreatorUi() {
   if (saveStatus) saveStatus.textContent = "";
+  setDevPasteStatus("");
   setPosterUploadStatus("");
   setStatus("");
   if (saveBusy) {
@@ -290,7 +366,6 @@ function refreshEditVisibility() {
   }
   enableEditBtn.hidden = true;
   editForm.hidden = false;
-  if (heroActionsEl) heroActionsEl.hidden = true;
   if (nameInput && posterUrlInput) {
     const cn = loadedCatalogRoot && /** @type {{ creatorName?: unknown }} */ (loadedCatalogRoot).creatorName;
     const cpu =
@@ -678,6 +753,7 @@ async function applyLoadedCatalogDoc(doc, url) {
   await applyHeroFromDoc(loadedCatalogRoot ?? {});
   if (catalogSection) catalogSection.hidden = moviesState.length === 0;
   resetTransientCreatorUi();
+  renderMovieLists();
 }
 
 /**
@@ -712,6 +788,7 @@ async function upgradeCatalogFromChainIfNewer() {
     if (!Number.isFinite(chainId)) {
       return;
     }
+    setStatus("Checking for newer catalog on-chain…");
     const refreshed = await fetchLatestCatalogJsonForDataSet({
       chainId,
       dataSetId: catalogIdentity.dataSetId,
@@ -740,6 +817,7 @@ async function upgradeCatalogFromChainIfNewer() {
     }
     await refreshConnectedAccount();
   } finally {
+    setStatus("");
     renderMovieLists();
   }
 }
@@ -751,7 +829,6 @@ async function handleSignInToEdit() {
   }
 
   if (sessionPrivateKey && synapseRef && storageContext) {
-    await upgradeCatalogFromChainIfNewer();
     refreshEditVisibility();
     return;
   }
@@ -782,8 +859,6 @@ async function handleSignInToEdit() {
       }
       return;
     }
-
-    await upgradeCatalogFromChainIfNewer();
 
     const auth = await authorizeSessionKeyForUpload(eth, connectedAddress, {});
     sessionPrivateKey = auth.sessionPrivateKey;
@@ -831,6 +906,9 @@ function wireEditControls() {
   }
   if (saveBtn) {
     saveBtn.addEventListener("click", () => void handleSaveCatalog());
+  }
+  if (devPasteAddBtn) {
+    devPasteAddBtn.addEventListener("click", () => handleAddPastedMovie());
   }
   if (nameInput) {
     nameInput.addEventListener("input", () => {
