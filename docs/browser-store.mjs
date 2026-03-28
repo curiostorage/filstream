@@ -1299,6 +1299,7 @@ function abandonUncommittedStagingByPath(session, path) {
  *   metaJsonUrl: string | null,
  *   posterUrl: string | null,
  *   posterAnimUrl: string | null,
+ *   catalogJsonUrl: string | null,
  * }} urls
  * @returns {Record<string, unknown>}
  */
@@ -1327,6 +1328,14 @@ function buildPublishedMetaDocument(session, urls) {
   const posterAnimUrl =
     typeof urls.posterAnimUrl === "string" && urls.posterAnimUrl.trim() !== ""
       ? urls.posterAnimUrl.trim()
+      : null;
+  const metaJson =
+    typeof urls.metaJsonUrl === "string" && urls.metaJsonUrl.trim() !== ""
+      ? urls.metaJsonUrl.trim()
+      : null;
+  const catalogJson =
+    typeof urls.catalogJsonUrl === "string" && urls.catalogJsonUrl.trim() !== ""
+      ? urls.catalogJsonUrl.trim()
       : null;
   if (!master) {
     throw new StoreError(500, "Cannot publish meta.json: missing master-app.m3u8 retrieval URL.");
@@ -1363,6 +1372,8 @@ function buildPublishedMetaDocument(session, urls) {
       ...prevPb,
       masterAppUrl: master,
       manifestUrl: manifest,
+      ...(metaJson != null ? { metaJsonUrl: metaJson } : {}),
+      ...(catalogJson != null ? { catalogJsonUrl: catalogJson } : {}),
       ...(posterUrl != null ? { posterUrl } : {}),
       ...(posterAnimUrl != null ? { posterAnimUrl } : {}),
     },
@@ -1567,8 +1578,6 @@ async function findHighestFilstreamCatalogOnActivePieces(input) {
   let bestVer = -1;
   /** @type {bigint | null} */
   let bestPieceId = null;
-  let catalogNamedCount = 0;
-  let totalPiecesScanned = 0;
   try {
     let offset = 0n;
     const limit = FETCH_LATEST_CATALOG_GET_ACTIVE_PIECES_LIMIT;
@@ -1583,7 +1592,6 @@ async function findHighestFilstreamCatalogOnActivePieces(input) {
       const { pieces, pieceIds, hasMore: more } = parseGetActivePiecesResult(raw);
       hasMore = more;
       const n = Math.min(pieces.length, pieceIds.length);
-      totalPiecesScanned += n;
       offset += BigInt(n);
       /** @type {bigint[]} */
       const ids = [];
@@ -1607,7 +1615,6 @@ async function findHighestFilstreamCatalogOnActivePieces(input) {
         const kv = kvs[j];
         const pieceId = ids[j];
         if (kv.FS_NAME !== "filstream_catalog.json") continue;
-        catalogNamedCount += 1;
         const v = Number.parseInt(kv.FS_VER ?? "0", 10);
         if (Number.isFinite(v) && v > bestVer) {
           bestVer = v;
@@ -1616,54 +1623,9 @@ async function findHighestFilstreamCatalogOnActivePieces(input) {
       }
       if (!hasMore) break;
     }
-    // #region agent log
-    fetch("http://127.0.0.1:7633/ingest/7d7c4be0-eed8-4a57-baec-1bad87d28ccf", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-Debug-Session-Id": "310c49",
-      },
-      body: JSON.stringify({
-        sessionId: "310c49",
-        location: "browser-store.mjs:findHighestFilstreamCatalogOnActivePieces",
-        message: "chain scan done",
-        data: {
-          hypothesisId: "C2",
-          chainId,
-          dataSetId,
-          bestVer,
-          bestPieceId: bestPieceId != null ? bestPieceId.toString() : null,
-          catalogNamedCount,
-          totalPiecesScanned,
-        },
-        timestamp: Date.now(),
-      }),
-    }).catch(() => {});
-    // #endregion
     return { bestVer, bestPieceId };
   } catch (e) {
     console.warn("[filstream] findHighestFilstreamCatalogOnActivePieces: chain scan failed", e);
-    // #region agent log
-    fetch("http://127.0.0.1:7633/ingest/7d7c4be0-eed8-4a57-baec-1bad87d28ccf", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-Debug-Session-Id": "310c49",
-      },
-      body: JSON.stringify({
-        sessionId: "310c49",
-        location: "browser-store.mjs:findHighestFilstreamCatalogOnActivePieces",
-        message: "chain scan threw",
-        data: {
-          hypothesisId: "C2",
-          chainId,
-          dataSetId,
-          err: e instanceof Error ? e.message : String(e),
-        },
-        timestamp: Date.now(),
-      }),
-    }).catch(() => {});
-    // #endregion
     return null;
   }
 }
@@ -1865,57 +1827,11 @@ export async function fetchLatestCatalogJsonForDataSet(input) {
   const scan = await findHighestFilstreamCatalogOnActivePieces({ synapse, chainId, dataSetId });
   if (scan == null) {
     console.warn("[filstream] fetchLatestCatalogJsonForDataSet: chain scan failed");
-    // #region agent log
-    fetch("http://127.0.0.1:7633/ingest/7d7c4be0-eed8-4a57-baec-1bad87d28ccf", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-Debug-Session-Id": "310c49",
-      },
-      body: JSON.stringify({
-        sessionId: "310c49",
-        location: "browser-store.mjs:fetchLatestCatalogJsonForDataSet",
-        message: "fetch aborted",
-        data: {
-          hypothesisId: "C2",
-          reason: "scan_returned_null",
-          chainId,
-          dataSetId,
-          providerId,
-        },
-        timestamp: Date.now(),
-      }),
-    }).catch(() => {});
-    // #endregion
     return null;
   }
   const { bestVer, bestPieceId } = scan;
 
   if (bestPieceId == null || bestVer < 0) {
-    // #region agent log
-    fetch("http://127.0.0.1:7633/ingest/7d7c4be0-eed8-4a57-baec-1bad87d28ccf", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-Debug-Session-Id": "310c49",
-      },
-      body: JSON.stringify({
-        sessionId: "310c49",
-        location: "browser-store.mjs:fetchLatestCatalogJsonForDataSet",
-        message: "fetch aborted",
-        data: {
-          hypothesisId: "C2",
-          reason: "no_catalog_piece_with_fs_metadata",
-          chainId,
-          dataSetId,
-          providerId,
-          bestVer,
-          bestPieceId: bestPieceId != null ? bestPieceId.toString() : null,
-        },
-        timestamp: Date.now(),
-      }),
-    }).catch(() => {});
-    // #endregion
     return null;
   }
 
@@ -1969,60 +1885,8 @@ export async function fetchLatestCatalogJsonForDataSet(input) {
     }
   }
   if (doc == null) {
-    // #region agent log
-    fetch("http://127.0.0.1:7633/ingest/7d7c4be0-eed8-4a57-baec-1bad87d28ccf", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-Debug-Session-Id": "310c49",
-      },
-      body: JSON.stringify({
-        sessionId: "310c49",
-        location: "browser-store.mjs:fetchLatestCatalogJsonForDataSet",
-        message: "fetch aborted",
-        data: {
-          hypothesisId: "C3",
-          reason: "http_json_fetch_failed",
-          chainId,
-          dataSetId,
-          providerId,
-          retrievalUrl,
-        },
-        timestamp: Date.now(),
-      }),
-    }).catch(() => {});
-    // #endregion
     return null;
   }
-  // #region agent log
-  {
-    const m =
-      doc && typeof doc === "object" && doc !== null && "movies" in doc && Array.isArray(doc.movies)
-        ? doc.movies.length
-        : null;
-    fetch("http://127.0.0.1:7633/ingest/7d7c4be0-eed8-4a57-baec-1bad87d28ccf", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-Debug-Session-Id": "310c49",
-      },
-      body: JSON.stringify({
-        sessionId: "310c49",
-        location: "browser-store.mjs:fetchLatestCatalogJsonForDataSet",
-        message: "catalog json loaded",
-        data: {
-          hypothesisId: "C4",
-          chainId,
-          dataSetId,
-          providerId,
-          catalogVersion: bestVer,
-          movieRowCount: m,
-        },
-        timestamp: Date.now(),
-      }),
-    }).catch(() => {});
-  }
-  // #endregion
   return { retrievalUrl, doc, catalogVersion: bestVer };
 }
 
@@ -2039,6 +1903,65 @@ async function readPieceMetadataKv(session, dataSetId, pieceId) {
     dataSetId,
     pieceId,
   });
+}
+
+/**
+ * Latest `filstream_catalog.json` from the PDP storage session (legacy merge path before chain-only
+ * fetch). Scans `context.getPieces()` and picks the highest `FS_VER` among catalog pieces.
+ *
+ * @param {BrowserFilstreamUploadSession} session
+ * @param {number} dataSetId
+ * @returns {Promise<{ retrievalUrl: string, doc: unknown, catalogVersion: number } | null>}
+ */
+async function fetchLatestCatalogFromSessionContext(session, dataSetId) {
+  if (!session.context) return null;
+  let bestVer = -1;
+  /** @type {unknown} */
+  let bestCid = null;
+  try {
+    for await (const row of session.context.getPieces()) {
+      const kv = await readPieceMetadataKv(session, dataSetId, row.pieceId);
+      if (kv.FS_NAME === "filstream_catalog.json") {
+        const v = Number.parseInt(kv.FS_VER ?? "0", 10);
+        if (Number.isFinite(v) && v > bestVer) {
+          bestVer = v;
+          bestCid = row.pieceCid;
+        }
+      }
+    }
+  } catch (e) {
+    console.warn("[filstream] catalog session scan failed", e);
+    return null;
+  }
+  if (bestCid == null || bestVer < 0) return null;
+  try {
+    const url = session.context.getPieceUrl(bestCid);
+    const res = await fetch(url);
+    if (!res.ok) return null;
+    const doc = await res.json();
+    return { retrievalUrl: url, doc, catalogVersion: bestVer };
+  } catch (e) {
+    console.warn("[filstream] catalog session fetch failed", e);
+    return null;
+  }
+}
+
+/**
+ * Prefer the newer catalog when both session and chain scans succeed (tie → session).
+ *
+ * @param {{ retrievalUrl: string, doc: unknown, catalogVersion: number } | null} sessionFetch
+ * @param {{ retrievalUrl: string, doc: unknown, catalogVersion: number } | null} chainFetch
+ * @returns {{ retrievalUrl: string, doc: unknown, catalogVersion: number } | null}
+ */
+function pickHigherCatalogFetch(sessionFetch, chainFetch) {
+  if (sessionFetch && !chainFetch) return sessionFetch;
+  if (chainFetch && !sessionFetch) return chainFetch;
+  if (!sessionFetch && !chainFetch) return null;
+  if (sessionFetch && chainFetch) {
+    if (chainFetch.catalogVersion > sessionFetch.catalogVersion) return chainFetch;
+    return sessionFetch;
+  }
+  return null;
 }
 
 /**
@@ -2156,13 +2079,16 @@ function buildFilstreamCatalogDoc(session, movies, prevCatalog, catalogVersion) 
 
 /**
  * @param {BrowserFilstreamUploadSession} session
+ * @param {string | null | undefined} [shareRetrievalUrl] Optional `share.html` retrieval URL for the new
+ *   catalog row (`movies[].share`). When set, one catalog piece is written with prior entries + meta +
+ *   share in a single update.
  * @returns {Promise<{
  *   catalogVersion: number | null,
  *   catalogPieceCid: string | null,
  *   catalogDoc: Record<string, unknown> | null,
  * }>}
  */
-async function appendFilstreamCatalogPiece(session) {
+async function appendFilstreamCatalogPiece(session, shareRetrievalUrl) {
   const metaMapping = session.fileMappings.find((f) => f.path === "meta.json");
   const metaUrl = metaMapping?.retrievalUrl ?? null;
   if (!metaUrl || typeof metaUrl !== "string") {
@@ -2197,37 +2123,45 @@ async function appendFilstreamCatalogPiece(session) {
   let prevCatalog = null;
 
   const dsId = session.dataSetId;
-  if (dsId != null && session.synapse) {
+  if (dsId != null) {
     /** @type {{ retrievalUrl: string, doc: unknown, catalogVersion: number } | null} */
-    let fetched = null;
-    const hadPrefetchPending = !!session._catalogMergePrefetch;
-    let prefetchRejected = false;
-    if (session._catalogMergePrefetch) {
-      try {
-        fetched = await session._catalogMergePrefetch;
-      } catch {
-        fetched = null;
-        prefetchRejected = true;
-      }
-      session._catalogMergePrefetch = null;
-    }
-    let fetchAttempts = 0;
-    if (fetched == null) {
-      /** Resolve provider from chain for this data set — session.config providerId can drift from on-chain PDP. */
-      const fetchInput = {
-        chainId: session.cfg.chainId,
-        dataSetId: dsId,
-        synapse: session.synapse,
-      };
-      for (let attempt = 0; attempt < 3 && fetched == null; attempt++) {
-        fetchAttempts += 1;
+    let chainFetched = null;
+    if (session.synapse) {
+      if (session._catalogMergePrefetch) {
         try {
-          fetched = await fetchLatestCatalogJsonForDataSet(fetchInput);
-        } catch (e) {
-          console.warn("[filstream] catalog latest fetch failed", attempt, e);
+          chainFetched = await session._catalogMergePrefetch;
+        } catch {
+          chainFetched = null;
+        }
+        session._catalogMergePrefetch = null;
+      }
+      if (chainFetched == null) {
+        const fetchInput = {
+          chainId: session.cfg.chainId,
+          dataSetId: dsId,
+          synapse: session.synapse,
+        };
+        for (let attempt = 0; attempt < 3 && chainFetched == null; attempt++) {
+          try {
+            chainFetched = await fetchLatestCatalogJsonForDataSet(fetchInput);
+          } catch (e) {
+            console.warn("[filstream] catalog latest fetch failed", attempt, e);
+          }
         }
       }
     }
+
+    /** @type {{ retrievalUrl: string, doc: unknown, catalogVersion: number } | null} */
+    let sessionFetched = null;
+    if (session.context) {
+      try {
+        sessionFetched = await fetchLatestCatalogFromSessionContext(session, dsId);
+      } catch (e) {
+        console.warn("[filstream] catalog session merge failed", e);
+      }
+    }
+
+    const fetched = pickHigherCatalogFetch(sessionFetched, chainFetched);
     if (fetched && fetched.doc && typeof fetched.doc === "object" && fetched.doc !== null) {
       prevCatalog = /** @type {Record<string, unknown>} */ (fetched.doc);
       const doc = fetched.doc;
@@ -2236,62 +2170,6 @@ async function appendFilstreamCatalogPiece(session) {
       }
       nextVer = fetched.catalogVersion + 1;
     }
-    // #region agent log
-    fetch("http://127.0.0.1:7633/ingest/7d7c4be0-eed8-4a57-baec-1bad87d28ccf", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-Debug-Session-Id": "310c49",
-      },
-      body: JSON.stringify({
-        sessionId: "310c49",
-        location: "browser-store.mjs:appendFilstreamCatalogPiece",
-        message: "catalog merge state before new row",
-        data: {
-          hypothesisId: "C1",
-          dataSetId: dsId,
-          chainId: session.cfg?.chainId,
-          hadPrefetchPending,
-          prefetchRejected,
-          fetchAttemptsAfterPrefetch: fetchAttempts,
-          mergedFromChain: !!(
-            fetched &&
-            fetched.doc &&
-            typeof fetched.doc === "object" &&
-            fetched.doc !== null
-          ),
-          chainCatalogVersion: fetched?.catalogVersion ?? null,
-          moviesCarriedCount: movies.length,
-          nextFsVer: nextVer,
-        },
-        timestamp: Date.now(),
-      }),
-    }).catch(() => {});
-    // #endregion
-  } else {
-    // #region agent log
-    fetch("http://127.0.0.1:7633/ingest/7d7c4be0-eed8-4a57-baec-1bad87d28ccf", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-Debug-Session-Id": "310c49",
-      },
-      body: JSON.stringify({
-        sessionId: "310c49",
-        location: "browser-store.mjs:appendFilstreamCatalogPiece",
-        message: "catalog merge skipped (no dataSetId or no synapse)",
-        data: {
-          hypothesisId: "C1",
-          dataSetId: dsId,
-          hasSynapse: !!session.synapse,
-          chainId: session.cfg?.chainId,
-          nextFsVerStays: 0,
-          moviesCarriedCount: 0,
-        },
-        timestamp: Date.now(),
-      }),
-    }).catch(() => {});
-    // #endregion
   }
 
   /** @type {{ title: string, metapath: string, posterUrl?: string, posterAnimUrl?: string }} */
@@ -2303,6 +2181,12 @@ async function appendFilstreamCatalogPiece(session) {
     entry.posterAnimUrl = posterAnimUrl;
   }
   movies.push(entry);
+  if (typeof shareRetrievalUrl === "string" && shareRetrievalUrl.trim() !== "") {
+    const last = movies[movies.length - 1];
+    if (last && typeof last === "object") {
+      /** @type {Record<string, unknown>} */ (last).share = shareRetrievalUrl.trim();
+    }
+  }
   const doc = buildFilstreamCatalogDoc(session, movies, prevCatalog, nextVer);
   let text = JSON.stringify(doc, null, 2);
   const enc = new TextEncoder();
@@ -2323,58 +2207,6 @@ async function appendFilstreamCatalogPiece(session) {
     sequence: null,
   });
   return { catalogVersion: nextVer, catalogPieceCid, catalogDoc: doc };
-}
-
-/**
- * Replace the staged `filstream_catalog.json` piece with the same document plus `share` on the last movie row.
- *
- * @param {BrowserFilstreamUploadSession} session
- * @param {Record<string, unknown>} catalogDoc
- * @param {string} shareRetrievalUrl
- * @param {number} previousCatalogVersion `FS_VER` of the catalog piece being superseded
- * @returns {Promise<{ catalogVersion: number, catalogPieceCid: string }>}
- */
-async function replaceFilstreamCatalogWithShare(
-  session,
-  catalogDoc,
-  shareRetrievalUrl,
-  previousCatalogVersion,
-) {
-  const movies = catalogDoc.movies;
-  if (!Array.isArray(movies) || movies.length === 0) {
-    throw new StoreError(500, "replaceFilstreamCatalogWithShare: invalid catalog doc");
-  }
-  const last = movies[movies.length - 1];
-  if (!last || typeof last !== "object") {
-    throw new StoreError(500, "replaceFilstreamCatalogWithShare: invalid last movie");
-  }
-  /** @type {Record<string, unknown>} */
-  const lastRow = /** @type {Record<string, unknown>} */ (last);
-  lastRow.share = shareRetrievalUrl;
-
-  abandonUncommittedStagingByPath(session, "filstream_catalog.json");
-
-  const nextVer = previousCatalogVersion + 1;
-  catalogDoc[CATALOG_JSON_VERSION_KEY] = nextVer;
-  let text = JSON.stringify(catalogDoc, null, 2);
-  const enc = new TextEncoder();
-  let bytes = enc.encode(text);
-  while (bytes.byteLength < SYNAPSE_MIN_PIECE_BYTES) {
-    text += "\n";
-    bytes = enc.encode(text);
-  }
-
-  const metadata = catalogPieceMetadata(session.assetId, nextVer);
-  const catalogPieceCid = String(computePieceCidFromBytes(bytes));
-  session.seedStagedPieceForFinalize({
-    path: "filstream_catalog.json",
-    mimeType: "application/json",
-    data: bytes,
-    pieceMetadata: metadata,
-    variant: metadata.FS_VAR || "root",
-    sequence: null,
-  });
-  return { catalogVersion: nextVer, catalogPieceCid };
 }
 
 /**
@@ -3761,89 +3593,74 @@ export class BrowserFilstreamUploadSession {
 
       abandonUncommittedStagingByPath(this, "manifest.json");
 
-      const manifestFinal = this.buildManifest();
-      const manifestFinalText = JSON.stringify(manifestFinal, null, 2);
-      const manifestFinalData = new TextEncoder().encode(manifestFinalText);
-      const mdm2 = filePieceMetadata(this.assetId, "manifest.json");
-      this.seedStagedPieceForFinalize({
-        path: "manifest.json",
-        mimeType: "application/json",
-        data: manifestFinalData,
-        pieceMetadata: mdm2,
-        variant: mdm2.FS_VAR || "root",
-        sequence: null,
-      });
-
       try {
-        const catFirst = await appendFilstreamCatalogPiece(this);
+        /** `share.html` is staged before the new catalog piece exists. Viewer links use the prior `catalogJsonUrl` already merged into `publishedMeta.playback` from listing (draft) so the sidebar shows the existing index; the new title is not in that URL yet, which matches “already watching this video.” */
+        let shareU = "";
+        const metaMap = this.fileMappings.find((f) => f.path === "meta.json");
+        const metaU = typeof metaMap?.retrievalUrl === "string" ? metaMap.retrievalUrl.trim() : "";
+        if (metaU !== "" && publishedMeta) {
+          const ds =
+            this.dataSetId != null && Number.isFinite(this.dataSetId)
+              ? Number(this.dataSetId)
+              : null;
+          const pb =
+            typeof publishedMeta.playback === "object" &&
+            publishedMeta.playback !== null &&
+            !Array.isArray(publishedMeta.playback)
+              ? /** @type {Record<string, unknown>} */ (publishedMeta.playback)
+              : {};
+          const priorCatalogUrl =
+            typeof pb.catalogJsonUrl === "string" && pb.catalogJsonUrl.trim() !== ""
+              ? pb.catalogJsonUrl.trim()
+              : null;
+          const viewerRedirect = buildReviewViewerIframeSrc(metaU, priorCatalogUrl, ds);
+          const embedPlayer = buildReviewViewerEmbedSrc(metaU, priorCatalogUrl, ds);
+          const masterVideoUrl =
+            typeof pb.masterAppUrl === "string" && pb.masterAppUrl.trim() !== ""
+              ? pb.masterAppUrl.trim()
+              : null;
+          const htmlBytes = buildFilstreamShareOgHtmlBytesFromMeta(
+            publishedMeta,
+            viewerRedirect,
+            embedPlayer,
+            masterVideoUrl,
+          );
+          const sharePieceMeta = filePieceMetadata(this.assetId, "share.html");
+          this.seedStagedPieceForFinalize({
+            path: "share.html",
+            mimeType: "text/html",
+            data: htmlBytes,
+            pieceMetadata: sharePieceMeta,
+            variant: sharePieceMeta.FS_VAR || "root",
+            sequence: null,
+          });
+          const shareRow = this.fileMappings.find((f) => f.path === "share.html");
+          shareU =
+            typeof shareRow?.retrievalUrl === "string" ? shareRow.retrievalUrl.trim() : "";
+        }
+
+        const catFirst = await appendFilstreamCatalogPiece(this, shareU !== "" ? shareU : null);
         catalogOut = {
           catalogVersion: catFirst.catalogVersion,
           catalogPieceCid: catFirst.catalogPieceCid,
         };
-        if (
-          catFirst.catalogDoc != null &&
-          catFirst.catalogPieceCid != null &&
-          catFirst.catalogVersion != null
-        ) {
-          const metaMap = this.fileMappings.find((f) => f.path === "meta.json");
-          const catalogMap = this.fileMappings.find((f) => f.path === "filstream_catalog.json");
-          const metaU = typeof metaMap?.retrievalUrl === "string" ? metaMap.retrievalUrl.trim() : "";
-          const catU =
-            typeof catalogMap?.retrievalUrl === "string" ? catalogMap.retrievalUrl.trim() : "";
-          if (metaU !== "" && catU !== "") {
-            const ds =
-              this.dataSetId != null && Number.isFinite(this.dataSetId)
-                ? Number(this.dataSetId)
-                : null;
-            const viewerRedirect = buildReviewViewerIframeSrc(metaU, catU, ds);
-            const embedPlayer = buildReviewViewerEmbedSrc(metaU, catU, ds);
-            const pb =
-              publishedMeta &&
-              typeof publishedMeta === "object" &&
-              publishedMeta !== null &&
-              typeof publishedMeta.playback === "object" &&
-              publishedMeta.playback !== null
-                ? /** @type {{ masterAppUrl?: string }} */ (publishedMeta.playback)
-                : {};
-            const masterVideoUrl =
-              typeof pb.masterAppUrl === "string" && pb.masterAppUrl.trim() !== ""
-                ? pb.masterAppUrl.trim()
-                : null;
-            const htmlBytes = buildFilstreamShareOgHtmlBytesFromMeta(
-              publishedMeta,
-              viewerRedirect,
-              embedPlayer,
-              masterVideoUrl,
-            );
-            const sharePieceMeta = filePieceMetadata(this.assetId, "share.html");
-            this.seedStagedPieceForFinalize({
-              path: "share.html",
-              mimeType: "text/html",
-              data: htmlBytes,
-              pieceMetadata: sharePieceMeta,
-              variant: sharePieceMeta.FS_VAR || "root",
-              sequence: null,
-            });
-            const shareRow = this.fileMappings.find((f) => f.path === "share.html");
-            const shareU =
-              typeof shareRow?.retrievalUrl === "string" ? shareRow.retrievalUrl.trim() : "";
-            if (shareU !== "") {
-              const catSecond = await replaceFilstreamCatalogWithShare(
-                this,
-                catFirst.catalogDoc,
-                shareU,
-                catFirst.catalogVersion,
-              );
-              catalogOut = {
-                catalogVersion: catSecond.catalogVersion,
-                catalogPieceCid: catSecond.catalogPieceCid,
-              };
-            }
-          }
-        }
       } catch (e) {
         console.warn("[filstream] catalog append failed", e);
       }
+
+      abandonUncommittedStagingByPath(this, "manifest.json");
+      const manifestAfterCatalog = this.buildManifest();
+      const manifestAfterCatalogText = JSON.stringify(manifestAfterCatalog, null, 2);
+      const manifestAfterCatalogData = new TextEncoder().encode(manifestAfterCatalogText);
+      const mdmAfterCat = filePieceMetadata(this.assetId, "manifest.json");
+      this.seedStagedPieceForFinalize({
+        path: "manifest.json",
+        mimeType: "application/json",
+        data: manifestAfterCatalogData,
+        pieceMetadata: mdmAfterCat,
+        variant: mdmAfterCat.FS_VAR || "root",
+        sequence: null,
+      });
     } finally {
       await this.flushFinalizePdpBatch();
     }
