@@ -100,6 +100,17 @@ function setStatus(msg, kind) {
   statusEl.className = `creator-status${kind === "err" ? " err" : ""}`;
 }
 
+/** Clears top status, save line, poster upload line; releases stuck Save state. */
+function resetTransientCreatorUi() {
+  if (saveStatus) saveStatus.textContent = "";
+  setPosterUploadStatus("");
+  setStatus("");
+  if (saveBusy) {
+    saveBusy = false;
+    if (saveBtn) saveBtn.disabled = false;
+  }
+}
+
 /**
  * @param {unknown} doc
  * @returns {{ editorAddress: string | null, dataSetId: number | null, chainId: number | null, providerId: number | null } | null}
@@ -355,10 +366,14 @@ async function handleSaveCatalog() {
       catalogUrl = newCatalogUrl;
       if (saveStatus) saveStatus.textContent = "Saved.";
       replaceBrowserUrlForCatalog(newCatalogUrl, catalogIdentity?.dataSetId ?? null);
+      await applyHeroFromDoc(loadedCatalogRoot ?? {});
+      refreshEditVisibility();
       renderMovieLists();
       setStatus("");
       return;
     }
+    await applyHeroFromDoc(loadedCatalogRoot ?? {});
+    refreshEditVisibility();
     renderMovieLists();
     if (saveStatus) saveStatus.textContent = "Saved.";
     setStatus("");
@@ -599,8 +614,11 @@ async function applyHeroFromDoc(doc) {
   }
 
   titleEl.textContent = title;
+  document.title =
+    title && title !== "Catalog" ? `${title} · FilStream catalog` : "FilStream catalog · creator";
   if (posterImg) {
     if (poster) {
+      posterImg.removeAttribute("src");
       posterImg.src = poster;
       posterImg.hidden = false;
     } else {
@@ -667,8 +685,7 @@ async function applyLoadedCatalogDoc(doc, url) {
   applyCatalogIdentity(doc);
   await applyHeroFromDoc(loadedCatalogRoot ?? {});
   if (catalogSection) catalogSection.hidden = moviesState.length === 0;
-  setStatus("");
-  document.title = "FilStream catalog · creator";
+  resetTransientCreatorUi();
 }
 
 /**
@@ -687,7 +704,8 @@ function replaceBrowserUrlForCatalog(catalogUrlStr, dataSetId) {
 /**
  * If the loaded URL points at an old piece but a newer catalog exists on-chain, switch to it.
  * Old catalog JSON may omit `chainId`; we use the app store config chain (same as viewer recovery).
- * Always re-renders movie links last so `?catalog=` on viewer URLs matches the current piece URL.
+ * Clears transient status/save/upload lines, reapplies identity + hero + address bar, awaits wallet
+ * account refresh (editor vs viewer), then re-renders lists in `finally` so viewer links use the new `?catalog=`.
  */
 async function upgradeCatalogFromChainIfNewer() {
   try {
@@ -715,6 +733,7 @@ async function upgradeCatalogFromChainIfNewer() {
     if (!nextUrl || nextUrl === prevUrl) {
       return;
     }
+    resetTransientCreatorUi();
     catalogUrl = nextUrl;
     loadedCatalogRoot =
       refreshed.doc && typeof refreshed.doc === "object" && refreshed.doc !== null
@@ -727,6 +746,7 @@ async function upgradeCatalogFromChainIfNewer() {
     if (catalogIdentity.dataSetId != null) {
       replaceBrowserUrlForCatalog(catalogUrl, catalogIdentity.dataSetId);
     }
+    await refreshConnectedAccount();
   } finally {
     renderMovieLists();
   }
