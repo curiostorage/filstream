@@ -16,23 +16,34 @@ import {
 } from "https://esm.sh/mediabunny";
 import shaka from "https://esm.sh/shaka-player";
 import { USDFC_DONATE_TOKEN } from "./filstream-chain-config.mjs";
+import {
+  AVC_LEVEL_TABLE as SHARED_AVC_LEVEL_TABLE,
+  CORE_FRAGMENT_SECONDS,
+  FILE_EVENT as SHARED_FILE_EVENT,
+  FILSTREAM_FAKE_ORIGIN as SHARED_FILSTREAM_FAKE_ORIGIN,
+  LISTING_DETAILS_EVENT as SHARED_LISTING_DETAILS_EVENT,
+  MIN_MAJOR_DIM_FOR_1080_RUNG as SHARED_MIN_MAJOR_DIM_FOR_1080_RUNG,
+  SEGMENT_FLUSH_EVENT as SHARED_SEGMENT_FLUSH_EVENT,
+  SEGMENT_READY_EVENT as SHARED_SEGMENT_READY_EVENT,
+  TRANSCODE_COMPLETE_EVENT as SHARED_TRANSCODE_COMPLETE_EVENT,
+} from "./filstream-constants.mjs";
 
-const FAKE_ORIGIN = "https://filstream.invalid";
-const FRAGMENT_SECONDS = 5;
+const FAKE_ORIGIN = SHARED_FILSTREAM_FAKE_ORIGIN;
+const FRAGMENT_SECONDS = CORE_FRAGMENT_SECONDS;
 
 /** @see runFilstreamPipeline event target */
-export const SEGMENT_READY_EVENT = "segmentready";
+export const SEGMENT_READY_EVENT = SHARED_SEGMENT_READY_EVENT;
 /** Fired before another H.264 hardware-acceleration attempt after a recoverable encoder failure — drop buffered partials for that variant. */
-export const SEGMENT_FLUSH_EVENT = "segmentflush";
-/** Non-binary artifacts: `init.json`, `*.m3u8`, etc. (`meta.json` is emitted with {@link LISTING_DETAILS_EVENT}). */
-export const FILE_EVENT = "fileEvent";
+export const SEGMENT_FLUSH_EVENT = SHARED_SEGMENT_FLUSH_EVENT;
+/** Non-binary artifacts: `init.json`, `*.m3u8`, etc. (listing JSON is emitted with {@link LISTING_DETAILS_EVENT}). */
+export const FILE_EVENT = SHARED_FILE_EVENT;
 /** Encodes finished; HLS master + variant playlists are ready (before Shaka attach/load). Transcode meta is finalized in {@link LISTING_DETAILS_EVENT}. */
-export const TRANSCODE_COMPLETE_EVENT = "transcodeComplete";
-/** After Listing Details **Next**: full `meta.json` document (text + poster blob) with transcode fields + listing form. */
-export const LISTING_DETAILS_EVENT = "listingDetails";
+export const TRANSCODE_COMPLETE_EVENT = SHARED_TRANSCODE_COMPLETE_EVENT;
+/** After Listing Details **Next**: full listing JSON document (text + poster blob) with transcode fields + listing form. */
+export const LISTING_DETAILS_EVENT = SHARED_LISTING_DETAILS_EVENT;
 
 /** Max(width,height) must be at least this to include a 1080p-height rung. */
-const MIN_MAJOR_DIM_FOR_1080_RUNG = 1200;
+const MIN_MAJOR_DIM_FOR_1080_RUNG = SHARED_MIN_MAJOR_DIM_FOR_1080_RUNG;
 
 /** Video bitrate ladder (bits per second); used for H.264 ABR rungs. */
 function vp9BitrateForHeight(h) {
@@ -44,27 +55,7 @@ function vp9BitrateForHeight(h) {
 }
 
 /** @see mediabunny `AVC_LEVEL_TABLE` / `buildVideoCodecString('avc', …)` */
-const AVC_LEVEL_TABLE = [
-  { maxMacroblocks: 99, maxBitrate: 64000, level: 0x0a },
-  { maxMacroblocks: 396, maxBitrate: 192000, level: 0x0b },
-  { maxMacroblocks: 396, maxBitrate: 384000, level: 0x0c },
-  { maxMacroblocks: 396, maxBitrate: 768000, level: 0x0d },
-  { maxMacroblocks: 396, maxBitrate: 2000000, level: 0x14 },
-  { maxMacroblocks: 792, maxBitrate: 4000000, level: 0x15 },
-  { maxMacroblocks: 1620, maxBitrate: 4000000, level: 0x16 },
-  { maxMacroblocks: 1620, maxBitrate: 10000000, level: 0x1e },
-  { maxMacroblocks: 3600, maxBitrate: 14000000, level: 0x1f },
-  { maxMacroblocks: 5120, maxBitrate: 20000000, level: 0x20 },
-  { maxMacroblocks: 8192, maxBitrate: 20000000, level: 0x28 },
-  { maxMacroblocks: 8192, maxBitrate: 50000000, level: 0x29 },
-  { maxMacroblocks: 8704, maxBitrate: 50000000, level: 0x2a },
-  { maxMacroblocks: 22080, maxBitrate: 135000000, level: 0x32 },
-  { maxMacroblocks: 36864, maxBitrate: 240000000, level: 0x33 },
-  { maxMacroblocks: 36864, maxBitrate: 240000000, level: 0x34 },
-  { maxMacroblocks: 139264, maxBitrate: 240000000, level: 0x3c },
-  { maxMacroblocks: 139264, maxBitrate: 480000000, level: 0x3d },
-  { maxMacroblocks: 139264, maxBitrate: 800000000, level: 0x3e },
-];
+const AVC_LEVEL_TABLE = SHARED_AVC_LEVEL_TABLE;
 
 function last(arr) {
   return arr[arr.length - 1];
@@ -717,7 +708,7 @@ async function convertToFmp4Segments(
  */
 
 /**
- * Payload for {@link LISTING_DETAILS_EVENT} / {@link emitListingDetailsEvent} (full logical `meta.json`).
+ * Payload for {@link LISTING_DETAILS_EVENT} / {@link emitListingDetailsEvent} (full logical listing JSON).
  * @typedef {object} ListingDetailsDetail
  * @property {object} transcodeMeta shallow copy of transcode fields (assembledAt, sourceName, nVar, …)
  * @property {{ title: string, description: string, showDonateButton: boolean, useSeekPosition: boolean, fundWalletAddress?: string | null, donateAmountUsdfc?: number | null }} listing — `fundWalletAddress` is the wallet connected on Fund (step 2); USDFC donate target
@@ -727,7 +718,6 @@ async function convertToFmp4Segments(
  * @property {File} poster image file (upload or seek capture)
  * @property {File | undefined} [posterAnim] optional 20-frame animated WebP (`listing-preview.webp`) when captured from source
  * @property {string} metaJsonText pretty-printed JSON: transcodeMeta spread + `listing` + `poster` info + `listingCompletedAt` (no raw image-bytes)
- * @property {string} metaPath always `meta.json`
  */
 
 /**
@@ -907,7 +897,6 @@ export function emitListingDetailsEvent(ui, listing) {
     ...(posterAnimFile ? { posterAnim: posterAnimFile } : {}),
     ...(posterAnimInfo ? { posterAnimInfo } : {}),
     metaJsonText,
-    metaPath: "meta.json",
   };
 
   dispatchListingDetailsEvent(ui, detail);
@@ -1028,7 +1017,7 @@ let player = null;
 const revokeList = [];
 
 /**
- * Transcode-only `meta.json` fields; cleared when listing completes or pipeline resets.
+ * Transcode-only listing fields; cleared when listing completes or pipeline resets.
  * @type {{
  *   assembledAt: string,
  *   sourceName: string,
@@ -1109,7 +1098,7 @@ export async function destroyActivePipelinePlayer() {
  * - `SEGMENT_FLUSH_EVENT` / `onSegmentFlush` — before an H.264 encoder HW retry; drop partials for that variant.
  * - `FILE_EVENT` / `onFileEvent` — text artifacts: per variant `v{n}/init.json`, `v{n}/playlist.m3u8` (local paths), `v{n}/playlist-app.m3u8` (fake-origin media playlist); then `master-local.m3u8`, `master-app.m3u8`.
  * - `TRANSCODE_COMPLETE_EVENT` / `onTranscodeComplete` — when encodes finish and master + variant M3U8 are assembled (before Shaka); see {@link TranscodeCompleteDetail}. Transcode meta is held until {@link emitListingDetailsEvent}.
- * - `LISTING_DETAILS_EVENT` — fired when the UI calls {@link emitListingDetailsEvent} after Listing Details **Next**; listen on the same `filstreamEventTarget` (or pass `onListingDetails` there). Includes full `meta.json` text + poster {@link File}.
+ * - `LISTING_DETAILS_EVENT` — fired when the UI calls {@link emitListingDetailsEvent} after Listing Details **Next**; listen on the same `filstreamEventTarget` (or pass `onListingDetails` there). Includes full listing JSON text + poster {@link File}.
  */
 export async function runFilstreamPipeline(file, ui) {
   const { setStatus, setProgress, getVideoElement, onPlaybackReady } = ui;

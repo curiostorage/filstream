@@ -303,16 +303,15 @@ h3 {
 
 .site-top-bar {
   display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: space-between;
-  gap: 0.75rem 1.25rem;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0.75rem;
   margin: 0 0 1.5rem;
 }
 
 .site-top-bar .wizard-steps {
-  margin-left: auto;
-  justify-content: flex-end;
+  margin-left: 0;
+  justify-content: flex-start;
 }
 
 .sr-only {
@@ -707,6 +706,59 @@ h3 {
   font-size: 0.78rem;
   color: #9aa0a6;
   font-weight: 500;
+}
+
+.site-header-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem 1rem;
+}
+
+.site-header-nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+  align-items: center;
+  margin-left: auto;
+}
+
+.site-header-link {
+  display: inline-flex;
+  align-items: center;
+  min-height: 2rem;
+  padding: 0.3rem 0.7rem;
+  border-radius: 999px;
+  border: 1px solid #3c4043;
+  background: #171a21;
+  color: #bdc1c6;
+  text-decoration: none;
+  font-size: 0.82rem;
+  font-weight: 500;
+  line-height: 1;
+}
+
+.site-header-link:hover {
+  background: #1e232d;
+  border-color: #5f6368;
+  color: #e8eaed;
+}
+
+.site-header-link.is-active {
+  border-color: #18c8ff;
+  color: #0f1115;
+  background: #18c8ff;
+}
+
+@media (max-width: 760px) {
+  .site-header-bar {
+    flex-wrap: wrap;
+  }
+
+  .site-header-nav {
+    width: 100%;
+    margin-left: 0;
+  }
 }
 
 .hero-stage {
@@ -1548,9 +1600,6 @@ h3 {
 }
 
 .landing-brand {
-  display: flex;
-  align-items: center;
-  gap: 0.85rem;
   margin: 0 0 2rem;
 }
 

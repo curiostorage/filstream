@@ -1,6 +1,6 @@
 /**
  * Final published layout: video + poster + title + description + download + viewer donate.
- * Consumes parsed `meta.json` plus playback/download URLs; intended for local preview or Review.
+ * Consumes parsed listing/manifest metadata plus playback/download URLs; intended for local preview or Review.
  * When `reviewIframeSrc` is set (Review embed), only the iframe is rendered — title/description/donate
  * live in `viewer.html`.
  */

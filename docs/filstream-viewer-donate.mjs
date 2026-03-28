@@ -1,5 +1,5 @@
 /**
- * Viewer-side donate control (not the uploader). Reads `donate` from published meta.json;
+ * Viewer-side donate control (not the uploader). Reads `donate` from published listing/manifest metadata;
  * connects a wallet and proposes an ERC-20 `transfer` to the creator’s Fund-step wallet (`meta.listing.fundWalletAddress` / `meta.donate.recipient`).
  */
 import { html } from "https://cdn.jsdelivr.net/npm/lit-html@3.2.1/+esm";
@@ -37,7 +37,7 @@ export function encodeErc20Transfer(toAddress, amountWei) {
 }
 
 /**
- * @param {unknown} meta parsed meta.json
+ * @param {unknown} meta parsed listing/manifest metadata
  * @returns {{ enabled: true, recipient: string, amountHuman: string, token: { symbol: string, address: string, decimals: number }, chainId: number } | { enabled: false }}
  */
 export function donateConfigFromMeta(meta) {
@@ -126,7 +126,7 @@ export async function proposeDonateTransfer(provider, cfg) {
 
   const tokenAddress = cfg.token.address;
   if (!tokenAddress || !/^0x[a-fA-F0-9]{40}$/i.test(tokenAddress)) {
-    throw new Error("meta.json is missing a valid token contract address");
+    throw new Error("Listing metadata is missing a valid token contract address");
   }
 
   await ensureChain(provider, cfg.chainId, USDFC_DONATE_TOKEN.chainName);

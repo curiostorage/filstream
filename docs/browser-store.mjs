@@ -3,13 +3,29 @@
  * Media bytes are not held as a chunk list in JS heap; each segment is written to IDB and
  * streamed to Synapse via ReadableStream, deleting each IDB record after it is read.
  */
-import { CATALOG_JSON_VERSION_KEY } from "./filstream-catalog-shared.mjs";
 import {
-  buildReviewViewerEmbedSrc,
-  buildReviewViewerIframeSrc,
+  buildViewerUrlForVideoId,
   ensureFilstreamId,
   getFilstreamStoreConfig,
 } from "./filstream-config.mjs";
+import {
+  CREATOR_POSTER_FS_NAME,
+  DEFERRED_PIECE_DELETE_STORAGE_KEY,
+  FETCH_METADATA_MULTICALL_BATCH_BYTES as FETCH_LATEST_CATALOG_METADATA_MULTICALL_BATCH_BYTES,
+  FETCH_METADATA_MULTICALL_PARALLEL as FETCH_LATEST_CATALOG_METADATA_MULTICALL_PARALLEL,
+  FILSTREAM_FAKE_ORIGIN as FAKE_ORIGIN,
+  MAX_COMMIT_BATCH_PIECES,
+  MAX_PARALLEL_PDP_UPLOADS,
+  SYNAPSE_MAX_PIECE_BYTES,
+  SYNAPSE_MIN_PIECE_BYTES,
+  UPLOAD_DB_VERSION as DB_VERSION,
+  UPLOAD_SEGMENTS_STORE as SEGMENTS_STORE,
+  VARIANT_PLAYLIST_APP_RE,
+} from "./filstream-constants.mjs";
+import {
+  addCatalogEntryWithSessionKey,
+  isCatalogConfigured,
+} from "./filstream-catalog-chain.mjs";
 import { computePieceCidFromBytes } from "./piece-cid-from-bytes.mjs";
 import {
   DefaultFwssPermissions,
@@ -20,8 +36,6 @@ import {
   getChain,
   privateKeyToAccount,
 } from "./vendor/synapse-browser.mjs";
-
-export { CATALOG_JSON_VERSION_KEY };
 
 /**
  * @typedef {object} DataSetCandidate
@@ -61,15 +75,6 @@ export { CATALOG_JSON_VERSION_KEY };
 /**
  * @typedef {import("@filoz/synapse-sdk").PieceCID} PieceCID
  */
-
-const SYNAPSE_MIN_PIECE_BYTES = 127;
-const SYNAPSE_MAX_PIECE_BYTES = 200 * 1024 * 1024;
-const MAX_COMMIT_BATCH_PIECES = 32;
-const MAX_PARALLEL_PDP_UPLOADS = 4;
-const VARIANT_PLAYLIST_APP_RE = /^v\d+\/playlist-app\.m3u8$/;
-const FAKE_ORIGIN = "https://filstream.invalid";
-const SEGMENTS_STORE = "segments";
-const DB_VERSION = 1;
 
 export class StoreError extends Error {
   /**
@@ -528,109 +533,6 @@ export async function terminateDataSet(context) {
 }
 
 /**
- * Open an existing PDP data set for the catalog `providerId` / `dataSetId`.
- * `catalogChainId` must match `getFilstreamStoreConfig().storeChainId` (or omit when absent).
- *
- * @param {{
- *   synapse: import("@filoz/synapse-sdk").Synapse,
- *   providerId: number,
- *   dataSetId: number,
- *   catalogChainId?: number | null,
- * }} input
- * @returns {Promise<import("@filoz/synapse-sdk/storage").StorageContext>}
- */
-export async function openDataSetContextForCatalog(input) {
-  const { synapse, providerId, dataSetId, catalogChainId } = input;
-  if (!synapse?.storage) {
-    throw new StoreError(500, "Synapse storage manager is unavailable");
-  }
-  const cfg = getFilstreamStoreConfig();
-  if (
-    catalogChainId != null &&
-    Number.isFinite(catalogChainId) &&
-    catalogChainId !== cfg.storeChainId
-  ) {
-    throw new StoreError(
-      400,
-      "Catalog chainId does not match FilStream store config (set window.__FILSTREAM_CONFIG__.storeChainId)",
-    );
-  }
-  return createExistingDataSetContext(synapse.storage, providerId, dataSetId);
-}
-
-/**
- * Store and commit a new `filstream_catalog.json` piece (next `FS_VER`).
- * The written JSON always includes {@link CATALOG_JSON_VERSION_KEY} from a chain scan (highest + 1), not from the caller.
- *
- * @param {{
- *   context: import("@filoz/synapse-sdk/storage").StorageContext,
- *   synapse: import("@filoz/synapse-sdk").Synapse,
- *   assetId: string,
- *   catalogDoc: Record<string, unknown>,
- * }} input
- * @returns {Promise<{ pieceCid: string, catalogVersion: number }>}
- */
-export async function publishFilstreamCatalogJson(input) {
-  const { context, synapse, assetId, catalogDoc } = input;
-  if (!context || typeof context.store !== "function") {
-    throw new StoreError(500, "Storage context.store is unavailable");
-  }
-  if (!synapse?.client) {
-    throw new StoreError(500, "Synapse client is unavailable");
-  }
-  if (!assetId || typeof assetId !== "string") {
-    throw new StoreError(400, "assetId is required for catalog piece metadata");
-  }
-  const dataSetIdRaw = context.dataSetId;
-  const dataSetId =
-    dataSetIdRaw != null
-      ? parseSafeNonNegativeInt(
-          typeof dataSetIdRaw === "bigint" ? Number(dataSetIdRaw) : dataSetIdRaw,
-        )
-      : null;
-  if (dataSetId == null) {
-    throw new StoreError(500, "Storage context has no dataSetId");
-  }
-  const cfg = getFilstreamStoreConfig();
-  const chainId = cfg.storeChainId;
-  if (!chainId || !Number.isFinite(chainId)) {
-    throw new StoreError(500, "Invalid storeChainId in config");
-  }
-  const { nextVersion } = await findLatestCatalogVersion({
-    synapse,
-    chainId,
-    dataSetId,
-  });
-  const body = {
-    ...catalogDoc,
-    [CATALOG_JSON_VERSION_KEY]: nextVersion,
-  };
-  let text = JSON.stringify(body, null, 2);
-  const enc = new TextEncoder();
-  let bytes = enc.encode(text);
-  while (bytes.byteLength < SYNAPSE_MIN_PIECE_BYTES) {
-    text += "\n";
-    bytes = enc.encode(text);
-  }
-  const storeResult = await context.store(bytes);
-  const pieceRef = storeResult?.pieceCid;
-  if (!pieceRef) {
-    throw new StoreError(500, "store() response is missing pieceCid");
-  }
-  const pieceCid = String(pieceRef);
-  const metadata = catalogPieceMetadata(assetId, nextVersion);
-  if (typeof context.commit !== "function") {
-    throw new StoreError(500, "Storage context.commit is unavailable");
-  }
-  await context.commit({
-    pieces: [{ pieceCid: pieceRef, pieceMetadata: metadata }],
-  });
-  return { pieceCid, catalogVersion: nextVersion };
-}
-
-const CREATOR_POSTER_FS_NAME = "filstream_creator_poster";
-
-/**
  * @param {string} assetId
  */
 function creatorPosterPieceMetadata(assetId) {
@@ -695,8 +597,6 @@ export async function publishCreatorPosterImage(input) {
   }
   return { pieceCid: String(pieceRef), retrievalUrl };
 }
-
-const DEFERRED_PIECE_DELETE_STORAGE_KEY = "filstream_deferred_piece_delete_v1";
 
 /**
  * @returns {{ dataSetId: number, pieceCid: string, notBeforeMs: number }[]}
@@ -799,7 +699,7 @@ export async function flushDeferredPieceDeletions(input) {
 }
 
 /**
- * Schedule PDP deletion for every piece with `FS_ASSET === assetId`, except `filstream_catalog.json` catalog pieces.
+ * Schedule PDP deletion for every piece with `FS_ASSET === assetId`.
  *
  * @param {{
  *   context: import("@filoz/synapse-sdk/storage").StorageContext,
@@ -828,9 +728,6 @@ export async function deleteAllPiecesForAssetId(input) {
         dataSetId,
         pieceId: row.pieceId,
       });
-      if (kv.FS_NAME === "filstream_catalog.json") {
-        continue;
-      }
       if (kv.FS_ASSET !== assetId) {
         continue;
       }
@@ -1069,6 +966,32 @@ function parseOptionalJsonObject(raw) {
 }
 
 /**
+ * Listing metadata captured on Define step (in-memory listing payload prior to finalize).
+ *
+ * @param {BrowserFilstreamUploadSession} session
+ * @returns {Record<string, unknown> | null}
+ */
+function listingDocFromSession(session) {
+  const doc = session.listingDoc;
+  return doc && typeof doc === "object" && !Array.isArray(doc)
+    ? /** @type {Record<string, unknown>} */ (doc)
+    : null;
+}
+
+/**
+ * @param {Record<string, unknown> | null} doc
+ * @returns {string}
+ */
+function titleFromListingDoc(doc) {
+  const listing =
+    doc && typeof doc.listing === "object" && doc.listing !== null
+      ? /** @type {{ title?: unknown }} */ (doc.listing)
+      : null;
+  const title = typeof listing?.title === "string" ? listing.title.trim() : "";
+  return title || "Untitled";
+}
+
+/**
  * @param {FileMapping[]} files
  * @param {string | null | undefined} posterPath Staged poster file path (e.g. `poster-seek.jpg`), if any
  * @param {string | null | undefined} posterAnimPath Staged animated preview path (e.g. `listing-preview.webp`), if any
@@ -1076,7 +999,6 @@ function parseOptionalJsonObject(raw) {
 function extractPlaybackUrls(files, posterPath, posterAnimPath) {
   const master = files.find((f) => f.path === "master-app.m3u8");
   const manifest = files.find((f) => f.path === "manifest.json");
-  const meta = files.find((f) => f.path === "meta.json");
   const pNorm =
     typeof posterPath === "string" && posterPath.trim() !== ""
       ? posterPath.trim()
@@ -1089,14 +1011,11 @@ function extractPlaybackUrls(files, posterPath, posterAnimPath) {
       : "";
   const posterAnim =
     aNorm !== "" ? files.find((f) => f.path === aNorm) : undefined;
-  const catalog = files.find((f) => f.path === "filstream_catalog.json");
   return {
     masterAppUrl: master?.retrievalUrl || null,
     manifestUrl: manifest?.retrievalUrl || null,
-    metaJsonUrl: meta?.retrievalUrl || null,
     posterUrl: poster?.retrievalUrl ?? null,
     posterAnimUrl: posterAnim?.retrievalUrl ?? null,
-    catalogJsonUrl: catalog?.retrievalUrl ?? null,
   };
 }
 
@@ -1296,28 +1215,18 @@ function abandonUncommittedStagingByPath(session, path) {
  * @param {{
  *   masterAppUrl: string | null,
  *   manifestUrl: string | null,
- *   metaJsonUrl: string | null,
  *   posterUrl: string | null,
  *   posterAnimUrl: string | null,
- *   catalogJsonUrl: string | null,
  * }} urls
  * @returns {Record<string, unknown>}
  */
 function buildPublishedMetaDocument(session, urls) {
-  const stagingPath =
-    typeof session.listingMetaPath === "string" && session.listingMetaPath.trim() !== ""
-      ? session.listingMetaPath.trim()
-      : "meta.json";
-  const metaFile = session.textFiles.get(stagingPath);
-  if (!metaFile) {
+  const base = listingDocFromSession(session);
+  if (!base) {
     throw new StoreError(
       400,
-      "Listing meta is missing — complete Listing Details before finalize.",
+      "Listing data is missing — complete Listing Details before finalize.",
     );
-  }
-  const base = parseOptionalJsonObject(new TextDecoder().decode(metaFile.data));
-  if (!base) {
-    throw new StoreError(400, "Listing meta (meta.json) is not valid JSON.");
   }
   const master = typeof urls.masterAppUrl === "string" ? urls.masterAppUrl.trim() : "";
   const manifest = typeof urls.manifestUrl === "string" ? urls.manifestUrl.trim() : "";
@@ -1329,19 +1238,11 @@ function buildPublishedMetaDocument(session, urls) {
     typeof urls.posterAnimUrl === "string" && urls.posterAnimUrl.trim() !== ""
       ? urls.posterAnimUrl.trim()
       : null;
-  const metaJson =
-    typeof urls.metaJsonUrl === "string" && urls.metaJsonUrl.trim() !== ""
-      ? urls.metaJsonUrl.trim()
-      : null;
-  const catalogJson =
-    typeof urls.catalogJsonUrl === "string" && urls.catalogJsonUrl.trim() !== ""
-      ? urls.catalogJsonUrl.trim()
-      : null;
   if (!master) {
-    throw new StoreError(500, "Cannot publish meta.json: missing master-app.m3u8 retrieval URL.");
+    throw new StoreError(500, "Cannot publish listing data: missing master-app.m3u8 retrieval URL.");
   }
   if (!manifest) {
-    throw new StoreError(500, "Cannot publish meta.json: missing manifest.json retrieval URL.");
+    throw new StoreError(500, "Cannot publish listing data: missing manifest.json retrieval URL.");
   }
   /** @type {Record<string, unknown>} */
   const prevPb =
@@ -1372,8 +1273,6 @@ function buildPublishedMetaDocument(session, urls) {
       ...prevPb,
       masterAppUrl: master,
       manifestUrl: manifest,
-      ...(metaJson != null ? { metaJsonUrl: metaJson } : {}),
-      ...(catalogJson != null ? { catalogJsonUrl: catalogJson } : {}),
       ...(posterUrl != null ? { posterUrl } : {}),
       ...(posterAnimUrl != null ? { posterAnimUrl } : {}),
     },
@@ -1499,714 +1398,6 @@ export async function readPieceMetadataKvPublicBatch(input) {
       ),
     );
   }
-}
-
-/**
- * Read-only Synapse client for public PDP / FWSS view calls (no session key).
- *
- * @param {{ rpcUrl: string, chainId: number, source: string }} cfg
- */
-function createSynapseForPublicRead(cfg) {
-  const chain = getChain(cfg.chainId);
-  const transport = jsonRpcUrlCustomTransport(cfg.rpcUrl);
-  return Synapse.create({
-    chain,
-    transport,
-    account: "0x0000000000000000000000000000000000000001",
-    source: cfg.source,
-  });
-}
-
-/**
- * @param {string} hex
- * @returns {Uint8Array}
- */
-function hexToBytes(hex) {
-  const h = hex.startsWith("0x") || hex.startsWith("0X") ? hex.slice(2) : hex;
-  const out = new Uint8Array(h.length / 2);
-  for (let i = 0; i < out.length; i++) {
-    out[i] = parseInt(h.slice(i * 2, i * 2 + 2), 16);
-  }
-  return out;
-}
-
-/**
- * @param {unknown} data
- * @returns {{ pieces: unknown[], pieceIds: unknown[], hasMore: boolean }}
- */
-function parseGetActivePiecesResult(data) {
-  if (Array.isArray(data)) {
-    const a = /** @type {unknown[]} */ (data);
-    return {
-      pieces: Array.isArray(a[0]) ? a[0] : [],
-      pieceIds: Array.isArray(a[1]) ? a[1] : [],
-      hasMore: Boolean(a[2]),
-    };
-  }
-  if (data && typeof data === "object" && data !== null) {
-    const d = /** @type {Record<string, unknown>} */ (data);
-    if (Array.isArray(d.pieces) && Array.isArray(d.pieceIds)) {
-      return {
-        pieces: d.pieces,
-        pieceIds: d.pieceIds,
-        hasMore: Boolean(d.hasMore),
-      };
-    }
-  }
-  return { pieces: [], pieceIds: [], hasMore: false };
-}
-
-/** Larger than Synapse default (100n) to cut `getActivePieces` round-trips when scanning a data set. */
-const FETCH_LATEST_CATALOG_GET_ACTIVE_PIECES_LIMIT = 500n;
-
-/**
- * Highest-`FS_VER` `filstream_catalog.json` among PDP `getActivePieces` (same enumeration as
- * {@link fetchLatestCatalogJsonForDataSet}).
- *
- * @param {{
- *   synapse: import("@filoz/synapse-sdk").Synapse,
- *   chainId: number,
- *   dataSetId: number,
- * }} input
- * @returns {Promise<{ bestVer: number, bestPieceId: bigint | null } | null>}
- * `null` if the chain scan failed. When no catalog piece exists, `bestVer` is `-1` and `bestPieceId` is `null`.
- */
-async function findHighestFilstreamCatalogOnActivePieces(input) {
-  const { synapse, chainId, dataSetId } = input;
-  const client = synapse.client;
-  const chain = getChain(chainId);
-  let bestVer = -1;
-  /** @type {bigint | null} */
-  let bestPieceId = null;
-  try {
-    let offset = 0n;
-    const limit = FETCH_LATEST_CATALOG_GET_ACTIVE_PIECES_LIMIT;
-    let hasMore = true;
-    while (hasMore) {
-      const raw = await client.readContract({
-        address: chain.contracts.pdp.address,
-        abi: chain.contracts.pdp.abi,
-        functionName: "getActivePieces",
-        args: [BigInt(dataSetId), offset, limit],
-      });
-      const { pieces, pieceIds, hasMore: more } = parseGetActivePiecesResult(raw);
-      hasMore = more;
-      const n = Math.min(pieces.length, pieceIds.length);
-      offset += BigInt(n);
-      /** @type {bigint[]} */
-      const ids = [];
-      for (let i = 0; i < n; i++) {
-        const pieceIdRaw = pieceIds[i];
-        const pieceId =
-          typeof pieceIdRaw === "bigint"
-            ? pieceIdRaw
-            : pieceIdRaw != null
-              ? BigInt(pieceIdRaw)
-              : null;
-        if (pieceId != null) ids.push(pieceId);
-      }
-      const kvs = await readPieceMetadataKvPublicBatch({
-        synapse,
-        chainId,
-        dataSetId,
-        pieceIds: ids,
-      });
-      for (let j = 0; j < ids.length; j++) {
-        const kv = kvs[j];
-        const pieceId = ids[j];
-        if (kv.FS_NAME !== "filstream_catalog.json") continue;
-        const v = Number.parseInt(kv.FS_VER ?? "0", 10);
-        if (Number.isFinite(v) && v > bestVer) {
-          bestVer = v;
-          bestPieceId = pieceId;
-        }
-      }
-      if (!hasMore) break;
-    }
-    return { bestVer, bestPieceId };
-  } catch (e) {
-    console.warn("[filstream] findHighestFilstreamCatalogOnActivePieces: chain scan failed", e);
-    return null;
-  }
-}
-
-/**
- * Highest `FS_VER` among `filstream_catalog.json` pieces on the data set (via `getActivePieces`), and
- * the version to use for the next catalog piece. Matches the upload wizard / recovery path.
- *
- * @param {{
- *   synapse: import("@filoz/synapse-sdk").Synapse,
- *   chainId: number,
- *   dataSetId: number,
- * }} input
- * @returns {Promise<{ latestVersion: number, nextVersion: number }>}
- */
-export async function findLatestCatalogVersion(input) {
-  const { synapse, chainId, dataSetId } = input;
-  if (!synapse?.client) {
-    throw new StoreError(500, "Synapse client is unavailable");
-  }
-  const scan = await findHighestFilstreamCatalogOnActivePieces({ synapse, chainId, dataSetId });
-  if (scan == null) {
-    console.warn("[filstream] findLatestCatalogVersion: chain scan failed");
-    return { latestVersion: -1, nextVersion: 0 };
-  }
-  const bestVer = scan.bestVer;
-  const nextVersion = bestVer < 0 ? 0 : bestVer + 1;
-  return { latestVersion: bestVer < 0 ? -1 : bestVer, nextVersion };
-}
-
-/** Max calldata bytes per Multicall3 `aggregate3` chunk inside each `multicall` (half of prior 256 KiB). */
-const FETCH_LATEST_CATALOG_METADATA_MULTICALL_BATCH_BYTES = 131_072;
-
-/** Concurrent top-level `multicall` RPCs (each uses {@link FETCH_LATEST_CATALOG_METADATA_MULTICALL_BATCH_BYTES}). */
-const FETCH_LATEST_CATALOG_METADATA_MULTICALL_PARALLEL = 2;
-
-/**
- * @param {unknown} cidStruct
- * @param {string} serviceURL
- * @returns {Promise<string | null>}
- */
-async function pieceCidStructToRetrievalUrl(cidStruct, serviceURL) {
-  if (!cidStruct || typeof cidStruct !== "object") return null;
-  const data = /** @type {{ data?: unknown }} */ (cidStruct).data;
-  if (data == null) return null;
-  let bytes;
-  if (data instanceof Uint8Array) {
-    bytes = data;
-  } else if (typeof data === "string") {
-    bytes = hexToBytes(data);
-  } else {
-    return null;
-  }
-  const { CID } = await import("https://esm.sh/multiformats@13.0.1/cid");
-  const cid = CID.decode(bytes);
-  return new URL(`piece/${cid.toString()}`, serviceURL).href;
-}
-
-/**
- * @param {unknown} data Return value of FWSS `getDataSet(uint256)`.
- * @returns {{ providerId: number } | null}
- */
-function providerIdFromGetDataSetView(data) {
-  if (data == null || typeof data !== "object") {
-    return null;
-  }
-  const d = /** @type {Record<string, unknown>} */ (data);
-  const info =
-    "info" in d && d.info != null && typeof d.info === "object"
-      ? /** @type {Record<string, unknown>} */ (d.info)
-      : d;
-  const rail = info.pdpRailId;
-  const railZero =
-    rail === 0n ||
-    rail === 0 ||
-    rail === "0" ||
-    (typeof rail === "string" && /^0x0*$/i.test(rail.trim()));
-  if (railZero) {
-    return null;
-  }
-  const pid = info.providerId;
-  let n;
-  if (typeof pid === "bigint") {
-    n = Number(pid);
-  } else if (typeof pid === "number") {
-    n = pid;
-  } else {
-    return null;
-  }
-  if (!Number.isFinite(n) || n < 0) {
-    return null;
-  }
-  return { providerId: n };
-}
-
-/**
- * Resolve the PDP provider id for a data set via `fwssView.getDataSet` (no catalog JSON needed).
- *
- * @param {import("@filoz/synapse-sdk").Synapse} synapse
- * @param {number} chainId
- * @param {number} dataSetId
- * @returns {Promise<number | null>}
- */
-async function resolveProviderIdFromDataSetId(synapse, chainId, dataSetId) {
-  const client = synapse.client;
-  const chain = getChain(chainId);
-  try {
-    const data = await client.readContract({
-      address: chain.contracts.fwssView.address,
-      abi: chain.contracts.fwssView.abi,
-      functionName: "getDataSet",
-      args: [BigInt(dataSetId)],
-    });
-    const out = providerIdFromGetDataSetView(data);
-    return out?.providerId ?? null;
-  } catch (e) {
-    console.warn("[filstream] resolveProviderIdFromDataSetId failed", e);
-    return null;
-  }
-}
-
-/**
- * Find the highest-`FS_VER` `filstream_catalog.json` piece on a PDP data set and fetch its JSON
- * from the provider retrieval URL. Uses public chain reads only (no storage session / ownership).
- *
- * When `providerId` is omitted, it is resolved from `fwssView.getDataSet(dataSetId)` so callers
- * only need `chainId` + `dataSetId` (e.g. creator recovery when the catalog URL is dead).
- *
- * @param {{
- *   chainId: number,
- *   dataSetId: number,
- *   providerId?: number | null,
- *   rpcUrl?: string,
- *   source?: string,
- *   synapse?: import("@filoz/synapse-sdk").Synapse,
- * }} input
- * @returns {Promise<{ retrievalUrl: string, doc: unknown, catalogVersion: number } | null>}
- */
-export async function fetchLatestCatalogJsonForDataSet(input) {
-  const { chainId, dataSetId } = input;
-  const existingSynapse = input.synapse;
-  let providerId =
-    typeof input.providerId === "number" && Number.isFinite(input.providerId)
-      ? input.providerId
-      : null;
-  if (!Number.isFinite(chainId) || !Number.isFinite(dataSetId)) {
-    return null;
-  }
-  const cfg = getFilstreamStoreConfig();
-  const rpcUrl =
-    typeof input.rpcUrl === "string" && input.rpcUrl.trim() !== ""
-      ? input.rpcUrl.trim()
-      : cfg.storeRpcUrl;
-  const source =
-    typeof input.source === "string" && input.source.trim() !== ""
-      ? input.source.trim()
-      : cfg.storeSource;
-
-  let synapse;
-  if (existingSynapse) {
-    synapse = existingSynapse;
-  } else {
-    try {
-      synapse = createSynapseForPublicRead({ rpcUrl, chainId, source });
-    } catch (e) {
-      console.warn("[filstream] fetchLatestCatalogJsonForDataSet: synapse init failed", e);
-      return null;
-    }
-  }
-
-  const client = synapse.client;
-  const chain = getChain(chainId);
-
-  if (providerId == null) {
-    const resolved = await resolveProviderIdFromDataSetId(synapse, chainId, dataSetId);
-    if (resolved == null) {
-      console.warn(
-        "[filstream] fetchLatestCatalogJsonForDataSet: could not resolve providerId for data set",
-      );
-      return null;
-    }
-    providerId = resolved;
-  }
-
-  let providerInfo;
-  try {
-    providerInfo = await synapse.providers.getProvider({
-      providerId: BigInt(providerId),
-    });
-  } catch (e) {
-    console.warn("[filstream] fetchLatestCatalogJsonForDataSet: provider lookup failed", e);
-    return null;
-  }
-  const serviceURL = providerInfo?.pdp?.serviceURL;
-  if (typeof serviceURL !== "string" || serviceURL.trim() === "") {
-    return null;
-  }
-
-  const scan = await findHighestFilstreamCatalogOnActivePieces({ synapse, chainId, dataSetId });
-  if (scan == null) {
-    console.warn("[filstream] fetchLatestCatalogJsonForDataSet: chain scan failed");
-    return null;
-  }
-  const { bestVer, bestPieceId } = scan;
-
-  if (bestPieceId == null || bestVer < 0) {
-    return null;
-  }
-
-  let cidStruct;
-  try {
-    cidStruct = await client.readContract({
-      address: chain.contracts.pdp.address,
-      abi: chain.contracts.pdp.abi,
-      functionName: "getPieceCid",
-      args: [BigInt(dataSetId), bestPieceId],
-    });
-  } catch (e) {
-    console.warn("[filstream] fetchLatestCatalogJsonForDataSet: getPieceCid failed", e);
-    return null;
-  }
-
-  let retrievalUrl;
-  try {
-    retrievalUrl = await pieceCidStructToRetrievalUrl(cidStruct, serviceURL);
-  } catch (e) {
-    console.warn("[filstream] fetchLatestCatalogJsonForDataSet: CID decode failed", e);
-    return null;
-  }
-  if (!retrievalUrl) {
-    return null;
-  }
-
-  /** @type {unknown} */
-  let doc = null;
-  for (let httpAttempt = 0; httpAttempt < 3; httpAttempt++) {
-    try {
-      const res = await fetch(retrievalUrl);
-      if (!res.ok) {
-        console.warn(
-          "[filstream] fetchLatestCatalogJsonForDataSet: HTTP",
-          res.status,
-          retrievalUrl,
-          "attempt",
-          httpAttempt + 1,
-        );
-        continue;
-      }
-      doc = await res.json();
-      break;
-    } catch (e) {
-      console.warn(
-        "[filstream] fetchLatestCatalogJsonForDataSet: fetch failed attempt",
-        httpAttempt + 1,
-        e,
-      );
-    }
-  }
-  if (doc == null) {
-    return null;
-  }
-  return { retrievalUrl, doc, catalogVersion: bestVer };
-}
-
-/**
- * @param {BrowserFilstreamUploadSession} session
- * @param {number} dataSetId
- * @param {bigint} pieceId
- * @returns {Promise<Record<string, string>>}
- */
-async function readPieceMetadataKv(session, dataSetId, pieceId) {
-  return readPieceMetadataKvPublic({
-    synapse: session.synapse,
-    chainId: session.cfg.chainId,
-    dataSetId,
-    pieceId,
-  });
-}
-
-/**
- * Latest `filstream_catalog.json` from the PDP storage session (legacy merge path before chain-only
- * fetch). Scans `context.getPieces()` and picks the highest `FS_VER` among catalog pieces.
- *
- * @param {BrowserFilstreamUploadSession} session
- * @param {number} dataSetId
- * @returns {Promise<{ retrievalUrl: string, doc: unknown, catalogVersion: number } | null>}
- */
-async function fetchLatestCatalogFromSessionContext(session, dataSetId) {
-  if (!session.context) return null;
-  let bestVer = -1;
-  /** @type {unknown} */
-  let bestCid = null;
-  try {
-    for await (const row of session.context.getPieces()) {
-      const kv = await readPieceMetadataKv(session, dataSetId, row.pieceId);
-      if (kv.FS_NAME === "filstream_catalog.json") {
-        const v = Number.parseInt(kv.FS_VER ?? "0", 10);
-        if (Number.isFinite(v) && v > bestVer) {
-          bestVer = v;
-          bestCid = row.pieceCid;
-        }
-      }
-    }
-  } catch (e) {
-    console.warn("[filstream] catalog session scan failed", e);
-    return null;
-  }
-  if (bestCid == null || bestVer < 0) return null;
-  try {
-    const url = session.context.getPieceUrl(bestCid);
-    const res = await fetch(url);
-    if (!res.ok) return null;
-    const doc = await res.json();
-    return { retrievalUrl: url, doc, catalogVersion: bestVer };
-  } catch (e) {
-    console.warn("[filstream] catalog session fetch failed", e);
-    return null;
-  }
-}
-
-/**
- * Prefer the newer catalog when both session and chain scans succeed (tie → session).
- *
- * @param {{ retrievalUrl: string, doc: unknown, catalogVersion: number } | null} sessionFetch
- * @param {{ retrievalUrl: string, doc: unknown, catalogVersion: number } | null} chainFetch
- * @returns {{ retrievalUrl: string, doc: unknown, catalogVersion: number } | null}
- */
-function pickHigherCatalogFetch(sessionFetch, chainFetch) {
-  if (sessionFetch && !chainFetch) return sessionFetch;
-  if (chainFetch && !sessionFetch) return chainFetch;
-  if (!sessionFetch && !chainFetch) return null;
-  if (sessionFetch && chainFetch) {
-    if (chainFetch.catalogVersion > sessionFetch.catalogVersion) return chainFetch;
-    return sessionFetch;
-  }
-  return null;
-}
-
-/**
- * @param {string} assetId
- * @param {number} version
- */
-function catalogPieceMetadata(assetId, version) {
-  return validatePieceMetadata({
-    FS_ASSET: assetId,
-    FS_VAR: "root",
-    FS_NAME: "filstream_catalog.json",
-    FS_VER: String(version),
-  });
-}
-
-/**
- * @param {Record<string, unknown> | null} doc Published `meta.json` object
- * @returns {string}
- */
-function posterUrlFromPublishedMetaDoc(doc) {
-  if (!doc) return "";
-  const poster = doc.poster;
-  if (poster && typeof poster === "object" && poster !== null) {
-    const u = /** @type {{ url?: string }} */ (poster).url;
-    if (typeof u === "string" && u.trim() !== "") return u.trim();
-  }
-  const pb = doc.playback;
-  if (pb && typeof pb === "object" && pb !== null) {
-    const u = /** @type {{ posterUrl?: string }} */ (pb).posterUrl;
-    if (typeof u === "string" && u.trim() !== "") return u.trim();
-  }
-  return "";
-}
-
-/**
- * @param {Record<string, unknown> | null} doc Published `meta.json` object
- * @returns {string}
- */
-function posterAnimUrlFromPublishedMetaDoc(doc) {
-  if (!doc) return "";
-  const pa = doc.posterAnim;
-  if (pa && typeof pa === "object" && pa !== null) {
-    const u = /** @type {{ url?: string }} */ (pa).url;
-    if (typeof u === "string" && u.trim() !== "") return u.trim();
-  }
-  const pb = doc.playback;
-  if (pb && typeof pb === "object" && pb !== null) {
-    const u = /** @type {{ posterAnimUrl?: string }} */ (pb).posterAnimUrl;
-    if (typeof u === "string" && u.trim() !== "") return u.trim();
-  }
-  return "";
-}
-
-/**
- * @param {string} addr
- * @returns {string}
- */
-function normalizeEditorAddress(addr) {
-  if (typeof addr !== "string" || addr.trim() === "") return "";
-  try {
-    return getAddress(/** @type {`0x${string}`} */ (addr.trim()));
-  } catch {
-    return addr.trim().toLowerCase();
-  }
-}
-
-/**
- * Published `filstream_catalog.json` top-level fields so viewers can match dataset + editor wallet.
- * Optional `creatorName` / `creatorPosterUrl` (https URL) are merged from `prevCatalog` when present.
- *
- * @param {BrowserFilstreamUploadSession} session
- * @param {{ title: string, metapath: string, posterUrl?: string, posterAnimUrl?: string }[]} movies
- * @param {Record<string, unknown> | null} prevCatalog Prior catalog (chain), for merging `dataSetId` if session has not committed yet
- * @param {number} catalogVersion PDP `FS_VER` for this document (matches {@link CATALOG_JSON_VERSION_KEY})
- * @returns {Record<string, unknown>}
- */
-function buildFilstreamCatalogDoc(session, movies, prevCatalog, catalogVersion) {
-  const editorAddress = normalizeEditorAddress(session.clientAddress);
-  let dataSetId = session.dataSetId != null ? session.dataSetId : null;
-  if (dataSetId == null && prevCatalog) {
-    const p = prevCatalog.dataSetId;
-    if (typeof p === "number" && Number.isFinite(p)) {
-      dataSetId = p;
-    }
-  }
-
-  /** @type {Record<string, unknown>} */
-  const doc = {
-    kind: "filstream v1",
-    editorAddress,
-    movies,
-  };
-  if (dataSetId != null) {
-    doc.dataSetId = dataSetId;
-  }
-  if (session.providerId != null && Number.isFinite(session.providerId)) {
-    doc.providerId = session.providerId;
-  }
-  if (session.cfg?.chainId != null && Number.isFinite(session.cfg.chainId)) {
-    doc.chainId = session.cfg.chainId;
-  }
-  if (prevCatalog) {
-    const cn = prevCatalog.creatorName;
-    if (typeof cn === "string" && cn.trim() !== "") {
-      doc.creatorName = cn.trim();
-    }
-    const cpu = prevCatalog.creatorPosterUrl;
-    if (typeof cpu === "string" && cpu.trim() !== "") {
-      doc.creatorPosterUrl = cpu.trim();
-    }
-  }
-  doc[CATALOG_JSON_VERSION_KEY] = catalogVersion;
-  return doc;
-}
-
-/**
- * @param {BrowserFilstreamUploadSession} session
- * @param {string | null | undefined} [shareRetrievalUrl] Optional `share.html` retrieval URL for the new
- *   catalog row (`movies[].share`). When set, one catalog piece is written with prior entries + meta +
- *   share in a single update.
- * @returns {Promise<{
- *   catalogVersion: number | null,
- *   catalogPieceCid: string | null,
- *   catalogDoc: Record<string, unknown> | null,
- * }>}
- */
-async function appendFilstreamCatalogPiece(session, shareRetrievalUrl) {
-  const metaMapping = session.fileMappings.find((f) => f.path === "meta.json");
-  const metaUrl = metaMapping?.retrievalUrl ?? null;
-  if (!metaUrl || typeof metaUrl !== "string") {
-    return { catalogVersion: null, catalogPieceCid: null, catalogDoc: null };
-  }
-
-  let title = "Untitled";
-  /** @type {string} */
-  let posterUrl = "";
-  /** @type {string} */
-  let posterAnimUrl = "";
-  try {
-    const metaFile = session.textFiles.get("meta.json");
-    if (metaFile) {
-      const doc = parseOptionalJsonObject(new TextDecoder().decode(metaFile.data));
-      const t =
-        doc && typeof doc.listing === "object" && doc.listing !== null
-          ? /** @type {{ title?: string }} */ (doc.listing).title
-          : undefined;
-      if (typeof t === "string" && t.trim()) title = t.trim();
-      posterUrl = posterUrlFromPublishedMetaDoc(doc);
-      posterAnimUrl = posterAnimUrlFromPublishedMetaDoc(doc);
-    }
-  } catch {
-    /* ignore */
-  }
-
-  let nextVer = 0;
-  /** @type {{ title: string, metapath: string, posterUrl?: string }[]} */
-  let movies = [];
-  /** @type {Record<string, unknown> | null} */
-  let prevCatalog = null;
-
-  const dsId = session.dataSetId;
-  if (dsId != null) {
-    /** @type {{ retrievalUrl: string, doc: unknown, catalogVersion: number } | null} */
-    let chainFetched = null;
-    if (session.synapse) {
-      if (session._catalogMergePrefetch) {
-        try {
-          chainFetched = await session._catalogMergePrefetch;
-        } catch {
-          chainFetched = null;
-        }
-        session._catalogMergePrefetch = null;
-      }
-      if (chainFetched == null) {
-        const fetchInput = {
-          chainId: session.cfg.chainId,
-          dataSetId: dsId,
-          synapse: session.synapse,
-        };
-        for (let attempt = 0; attempt < 3 && chainFetched == null; attempt++) {
-          try {
-            chainFetched = await fetchLatestCatalogJsonForDataSet(fetchInput);
-          } catch (e) {
-            console.warn("[filstream] catalog latest fetch failed", attempt, e);
-          }
-        }
-      }
-    }
-
-    /** @type {{ retrievalUrl: string, doc: unknown, catalogVersion: number } | null} */
-    let sessionFetched = null;
-    if (session.context) {
-      try {
-        sessionFetched = await fetchLatestCatalogFromSessionContext(session, dsId);
-      } catch (e) {
-        console.warn("[filstream] catalog session merge failed", e);
-      }
-    }
-
-    const fetched = pickHigherCatalogFetch(sessionFetched, chainFetched);
-    if (fetched && fetched.doc && typeof fetched.doc === "object" && fetched.doc !== null) {
-      prevCatalog = /** @type {Record<string, unknown>} */ (fetched.doc);
-      const doc = fetched.doc;
-      if (Array.isArray(doc.movies)) {
-        movies = [...doc.movies];
-      }
-      nextVer = fetched.catalogVersion + 1;
-    }
-  }
-
-  /** @type {{ title: string, metapath: string, posterUrl?: string, posterAnimUrl?: string }} */
-  const entry = { title, metapath: metaUrl };
-  if (posterUrl !== "") {
-    entry.posterUrl = posterUrl;
-  }
-  if (posterAnimUrl !== "") {
-    entry.posterAnimUrl = posterAnimUrl;
-  }
-  movies.push(entry);
-  if (typeof shareRetrievalUrl === "string" && shareRetrievalUrl.trim() !== "") {
-    const last = movies[movies.length - 1];
-    if (last && typeof last === "object") {
-      /** @type {Record<string, unknown>} */ (last).share = shareRetrievalUrl.trim();
-    }
-  }
-  const doc = buildFilstreamCatalogDoc(session, movies, prevCatalog, nextVer);
-  let text = JSON.stringify(doc, null, 2);
-  const enc = new TextEncoder();
-  let bytes = enc.encode(text);
-  while (bytes.byteLength < SYNAPSE_MIN_PIECE_BYTES) {
-    text += "\n";
-    bytes = enc.encode(text);
-  }
-
-  const metadata = catalogPieceMetadata(session.assetId, nextVer);
-  const catalogPieceCid = String(computePieceCidFromBytes(bytes));
-  session.seedStagedPieceForFinalize({
-    path: "filstream_catalog.json",
-    mimeType: "application/json",
-    data: bytes,
-    pieceMetadata: metadata,
-    variant: metadata.FS_VAR || "root",
-    sequence: null,
-  });
-  return { catalogVersion: nextVer, catalogPieceCid, catalogDoc: doc };
 }
 
 /**
@@ -2463,6 +1654,7 @@ export class BrowserFilstreamUploadSession {
    *   uploadId: string,
    *   assetId: string,
    *   clientAddress: string,
+   *   sessionPrivateKey: string,
    *   synapse: import("@filoz/synapse-sdk").Synapse,
    *   context: import("@filoz/synapse-sdk/storage").StorageContext,
    *   dataSetId: number | null,
@@ -2473,6 +1665,7 @@ export class BrowserFilstreamUploadSession {
     this.uploadId = core.uploadId;
     this.assetId = core.assetId;
     this.clientAddress = core.clientAddress;
+    this.sessionPrivateKey = core.sessionPrivateKey;
     this.filstreamId = cfg.filstreamId;
     this.providerId = cfg.providerId;
     this.dataSetId = core.dataSetId;
@@ -2497,8 +1690,8 @@ export class BrowserFilstreamUploadSession {
     };
     this.transcodeCompleteReceived = false;
     this.listingDetailsReceived = false;
-    /** Staging path for listing JSON (`listingDetails`), default `meta.json`. */
-    this.listingMetaPath = null;
+    /** Listing JSON payload from `listingDetails` event (in-memory only; not staged as a separate file). */
+    this.listingDoc = null;
     /**
      * Listing poster image bytes + path, uploaded as its own piece during finalize.
      *
@@ -2538,27 +1731,6 @@ export class BrowserFilstreamUploadSession {
      * @type {{ data: Uint8Array, pieceRef: import("@filoz/synapse-sdk").PieceCID }[] | null}
      */
     this._finalizePdpFlushJobs = null;
-    /**
-     * Optional prefetch: same chain scan + fetch as `appendFilstreamCatalogPiece` (batched `getActivePieces`).
-     *
-     * @type {Promise<{ retrievalUrl: string, doc: unknown, catalogVersion: number } | null> | null}
-     */
-    this._catalogMergePrefetch = null;
-  }
-
-  /**
-   * Start loading latest `filstream_catalog.json` for merge (safe after `dataSetId` + Synapse exist).
-   * Overlaps with encode/upload so finalize does not wait on chain scan + fetch.
-   */
-  prefetchCatalogMergeForFinalize() {
-    const dsId = this.dataSetId;
-    if (dsId == null || !this.synapse) return;
-    if (this._catalogMergePrefetch) return;
-    this._catalogMergePrefetch = fetchLatestCatalogJsonForDataSet({
-      chainId: this.cfg.chainId,
-      dataSetId: dsId,
-      synapse: this.synapse,
-    }).catch(() => null);
   }
 
   _notifyStagingStateChanged() {
@@ -3204,21 +2376,13 @@ export class BrowserFilstreamUploadSession {
    */
   async handleListingDetails(detail) {
     this.listingDetailsReceived = true;
+    this.listingDoc = null;
     this.posterStagedFile = null;
     this.posterAnimStagedFile = null;
     if (!detail || typeof detail !== "object") return;
     const d = /** @type {Record<string, unknown>} */ (detail);
-    const metaPath =
-      typeof d.metaPath === "string" && d.metaPath.trim() !== ""
-        ? d.metaPath.trim()
-        : "meta.json";
-    this.listingMetaPath = metaPath;
     if (typeof d.metaJsonText === "string" && d.metaJsonText.trim() !== "") {
-      this.textFiles.set(metaPath, {
-        path: metaPath,
-        mimeType: "application/json",
-        data: new TextEncoder().encode(d.metaJsonText),
-      });
+      this.listingDoc = parseOptionalJsonObject(d.metaJsonText);
     }
     const pb = d.posterBytes;
     if (pb instanceof Uint8Array && pb.byteLength > 0) {
@@ -3346,6 +2510,7 @@ export class BrowserFilstreamUploadSession {
     const livePieces = [...this.piecesByCid.values()].filter((p) => !p.abandoned);
     const livePieceSet = new Set(livePieces.map((p) => p.pieceCid));
     const files = this.fileMappings.filter((f) => livePieceSet.has(f.pieceCid));
+    const listingDoc = listingDocFromSession(this);
     const playback = extractPlaybackUrls(
       files,
       this.posterStagedFile?.path ?? null,
@@ -3355,19 +2520,51 @@ export class BrowserFilstreamUploadSession {
     const playbackOut = {};
     if (playback.masterAppUrl) playbackOut.masterAppUrl = playback.masterAppUrl;
     if (playback.manifestUrl) playbackOut.manifestUrl = playback.manifestUrl;
-    if (playback.metaJsonUrl) playbackOut.metaJsonUrl = playback.metaJsonUrl;
     if (playback.posterUrl) playbackOut.posterUrl = playback.posterUrl;
     if (playback.posterAnimUrl) playbackOut.posterAnimUrl = playback.posterAnimUrl;
-    if (playback.catalogJsonUrl) playbackOut.catalogJsonUrl = playback.catalogJsonUrl;
+    const listingBlock =
+      listingDoc &&
+      typeof listingDoc.listing === "object" &&
+      listingDoc.listing !== null &&
+      !Array.isArray(listingDoc.listing)
+        ? listingDoc.listing
+        : undefined;
+    const donateBlock =
+      listingDoc &&
+      typeof listingDoc.donate === "object" &&
+      listingDoc.donate !== null &&
+      !Array.isArray(listingDoc.donate)
+        ? listingDoc.donate
+        : undefined;
+    const posterBlock =
+      listingDoc &&
+      typeof listingDoc.poster === "object" &&
+      listingDoc.poster !== null &&
+      !Array.isArray(listingDoc.poster)
+        ? listingDoc.poster
+        : undefined;
+    const posterAnimBlock =
+      listingDoc &&
+      typeof listingDoc.posterAnim === "object" &&
+      listingDoc.posterAnim !== null &&
+      !Array.isArray(listingDoc.posterAnim)
+        ? listingDoc.posterAnim
+        : undefined;
     return {
       version: 1,
       createdAt: new Date().toISOString(),
       assetId: this.assetId,
+      videoId: this.assetId,
       filstreamId: this.filstreamId,
       clientAddress: this.clientAddress,
       providerId: this.providerId,
       dataSetId: this.dataSetId,
       playback: playbackOut,
+      ...(listingBlock ? { listing: listingBlock } : {}),
+      ...(donateBlock ? { donate: donateBlock } : {}),
+      ...(posterBlock ? { poster: posterBlock } : {}),
+      ...(posterAnimBlock ? { posterAnim: posterAnimBlock } : {}),
+      ...(listingDoc ? { metadata: listingDoc } : {}),
       eventCounts: { ...this.eventCounts },
       transcodeCompleteReceived: this.transcodeCompleteReceived,
       listingDetailsReceived: this.listingDetailsReceived,
@@ -3472,15 +2669,15 @@ export class BrowserFilstreamUploadSession {
    *   finalized: boolean,
    *   committedCount: number,
    *   transactionHash: string | null,
+   *   catalogTransactionHash: string | null,
+   *   videoId: string,
+   *   assetId: string,
    *   masterAppUrl: string | null,
    *   manifestUrl: string | null,
-   *   metaJsonUrl: string | null,
+   *   manifestPieceCid: string | null,
    *   posterUrl: string | null,
    *   posterAnimUrl: string | null,
-   *   catalogJsonUrl: string | null,
    *   dataSetId: number | null,
-   *   catalogVersion: number | null,
-   *   catalogPieceCid: string | null,
    * }>}
    */
   async finalizeUpload() {
@@ -3490,8 +2687,6 @@ export class BrowserFilstreamUploadSession {
     }
     /** @type {Record<string, unknown> | null} */
     let publishedMeta = null;
-    /** @type {{ catalogVersion: number | null, catalogPieceCid: string | null }} */
-    let catalogOut = { catalogVersion: null, catalogPieceCid: null };
     this._finalizePdpFlushJobs = [];
     try {
       for (const buffer of this.variantBuffers.values()) {
@@ -3575,46 +2770,19 @@ export class BrowserFilstreamUploadSession {
         this.posterAnimStagedFile?.path ?? null,
       );
       publishedMeta = buildPublishedMetaDocument(this, urlsForMeta);
-      const metaBytes = encodeJsonWithMinPiecePadding(publishedMeta);
-      this.textFiles.set("meta.json", {
-        path: "meta.json",
-        mimeType: "application/json",
-        data: metaBytes,
-      });
-      const metam = filePieceMetadata(this.assetId, "meta.json");
-      this.seedStagedPieceForFinalize({
-        path: "meta.json",
-        mimeType: "application/json",
-        data: metaBytes,
-        pieceMetadata: metam,
-        variant: metam.FS_VAR || "root",
-        sequence: null,
-      });
 
       abandonUncommittedStagingByPath(this, "manifest.json");
 
       try {
-        /** `share.html` is staged before the new catalog piece exists. Viewer links use the prior `catalogJsonUrl` already merged into `publishedMeta.playback` from listing (draft) so the sidebar shows the existing index; the new title is not in that URL yet, which matches “already watching this video.” */
-        let shareU = "";
-        const metaMap = this.fileMappings.find((f) => f.path === "meta.json");
-        const metaU = typeof metaMap?.retrievalUrl === "string" ? metaMap.retrievalUrl.trim() : "";
-        if (metaU !== "" && publishedMeta) {
-          const ds =
-            this.dataSetId != null && Number.isFinite(this.dataSetId)
-              ? Number(this.dataSetId)
-              : null;
+        if (publishedMeta) {
+          const viewerRedirect = buildViewerUrlForVideoId(this.assetId);
+          const embedPlayer = buildViewerUrlForVideoId(this.assetId, { embed: true });
           const pb =
             typeof publishedMeta.playback === "object" &&
             publishedMeta.playback !== null &&
             !Array.isArray(publishedMeta.playback)
               ? /** @type {Record<string, unknown>} */ (publishedMeta.playback)
               : {};
-          const priorCatalogUrl =
-            typeof pb.catalogJsonUrl === "string" && pb.catalogJsonUrl.trim() !== ""
-              ? pb.catalogJsonUrl.trim()
-              : null;
-          const viewerRedirect = buildReviewViewerIframeSrc(metaU, priorCatalogUrl, ds);
-          const embedPlayer = buildReviewViewerEmbedSrc(metaU, priorCatalogUrl, ds);
           const masterVideoUrl =
             typeof pb.masterAppUrl === "string" && pb.masterAppUrl.trim() !== ""
               ? pb.masterAppUrl.trim()
@@ -3634,18 +2802,9 @@ export class BrowserFilstreamUploadSession {
             variant: sharePieceMeta.FS_VAR || "root",
             sequence: null,
           });
-          const shareRow = this.fileMappings.find((f) => f.path === "share.html");
-          shareU =
-            typeof shareRow?.retrievalUrl === "string" ? shareRow.retrievalUrl.trim() : "";
         }
-
-        const catFirst = await appendFilstreamCatalogPiece(this, shareU !== "" ? shareU : null);
-        catalogOut = {
-          catalogVersion: catFirst.catalogVersion,
-          catalogPieceCid: catFirst.catalogPieceCid,
-        };
       } catch (e) {
-        console.warn("[filstream] catalog append failed", e);
+        console.warn("[filstream] share html stage failed", e);
       }
 
       abandonUncommittedStagingByPath(this, "manifest.json");
@@ -3666,7 +2825,6 @@ export class BrowserFilstreamUploadSession {
     }
 
     const commit = await this.commitPendingPieces();
-    this.finalized = true;
     const liveFiles = this.fileMappings.filter((f) => {
       const p = this.piecesByCid.get(f.pieceCid);
       return p != null && !p.abandoned;
@@ -3676,19 +2834,46 @@ export class BrowserFilstreamUploadSession {
       this.posterStagedFile?.path ?? null,
       this.posterAnimStagedFile?.path ?? null,
     );
+    const manifestMap = liveFiles.find((f) => f.path === "manifest.json");
+    const manifestPieceCid =
+      typeof manifestMap?.pieceCid === "string" ? manifestMap.pieceCid : null;
+    let catalogTransactionHash = null;
+
+    if (!isCatalogConfigured()) {
+      throw new StoreError(
+        500,
+        "Missing catalog contract address in config",
+        "Set window.__FILSTREAM_CONFIG__.catalogContractAddress before uploading.",
+      );
+    }
+    if (!manifestPieceCid) {
+      throw new StoreError(500, "Missing manifest piece CID after commit");
+    }
+    const title = titleFromListingDoc(listingDocFromSession(this));
+    const catWrite = await addCatalogEntryWithSessionKey({
+      claimedUser: this.clientAddress,
+      sessionPrivateKey: this.sessionPrivateKey,
+      assetId: this.assetId,
+      providerId: this.providerId,
+      manifestCid: manifestPieceCid,
+      title,
+    });
+    catalogTransactionHash = catWrite.txHash;
+    this.finalized = true;
+
     return {
       finalized: true,
       committedCount: commit.committedCount,
       transactionHash: commit.transactionHash,
+      catalogTransactionHash,
+      videoId: this.assetId,
+      assetId: this.assetId,
       masterAppUrl: playback.masterAppUrl,
       manifestUrl: playback.manifestUrl,
-      metaJsonUrl: playback.metaJsonUrl,
+      manifestPieceCid,
       posterUrl: playback.posterUrl,
       posterAnimUrl: playback.posterAnimUrl,
-      catalogJsonUrl: playback.catalogJsonUrl,
       dataSetId: this.dataSetId,
-      catalogVersion: catalogOut.catalogVersion,
-      catalogPieceCid: catalogOut.catalogPieceCid,
     };
   }
 
@@ -3721,6 +2906,13 @@ export async function createBrowserUploadSession(input) {
       500,
       "Invalid FilStream upload config (storeRpcUrl, storeChainId, storeProviderId)",
       "Override window.__FILSTREAM_CONFIG__ or edit defaults in filstream-config.mjs",
+    );
+  }
+  if (!isCatalogConfigured()) {
+    throw new StoreError(
+      500,
+      "Missing catalog contract address in config",
+      "Set window.__FILSTREAM_CONFIG__.catalogContractAddress before uploading.",
     );
   }
   const synCfg = {
@@ -3764,6 +2956,7 @@ export async function createBrowserUploadSession(input) {
       uploadId,
       assetId,
       clientAddress,
+      sessionPrivateKey,
       synapse,
       context: resolved.context,
       dataSetId: resolved.dataSetId,

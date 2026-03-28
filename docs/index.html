@@ -9,20 +9,7 @@
 </head>
 <body>
   <div class="wrap landing-wrap">
-    <header class="landing-brand" aria-label="FilStream">
-      <img
-        class="site-brand-mark"
-        src="favicon.svg"
-        width="40"
-        height="40"
-        alt=""
-        decoding="async"
-      />
-      <div class="site-brand-text">
-        <span class="site-brand-name">FilStream</span>
-        <span class="site-brand-tagline">CalibrationNet edition</span>
-      </div>
-    </header>
+    <header id="landing-header-mount" class="landing-brand" aria-label="FilStream" role="banner"></header>
 
     <h1 class="landing-headline">Own your movies:</h1>
     <ul class="landing-list">
@@ -37,5 +24,13 @@
       <a class="btn btn-primary" href="upload.html">Upload a movie</a>
     </p>
   </div>
+  <script>
+    window.__FILSTREAM_CONFIG__ = window.__FILSTREAM_CONFIG__ || {};
+  </script>
+  <script type="module">
+    import { mountFilstreamHeader } from "./filstream-brand.mjs";
+    const mount = document.getElementById("landing-header-mount");
+    if (mount) mountFilstreamHeader(mount, { active: "home" });
+  </script>
 </body>
 </html>

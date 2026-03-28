@@ -107,7 +107,7 @@ export function publishMetadataForm(props) {
             </label>
             <p
               class="publish-donate-hint"
-              title="Fund-step wallet is written to meta.json as listing.fundWalletAddress."
+              title="Fund-step wallet is written into listing metadata as listing.fundWalletAddress."
             >
               Recipient = Fund wallet.
             </p>

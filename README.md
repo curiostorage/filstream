@@ -19,7 +19,7 @@ They’re your movies. Share them with the world without a gatekeeper company or
 - **Browser-first pipeline:** Transcoding and segmentation run in the page; encoder output feeds an upload session that stages packed media in **IndexedDB** and streams it to Synapse `store()` as a `ReadableStream`. You stay in one tab for encode → fund → store.
 - **Wallet + session model:** The root account is your **client** account; **session keys** sign upload operations with scoped expiry and permissions—so the UX can be smooth without putting long-lived keys in hot paths.
 - **Static + config-driven:** Pages ship as static HTML/JS/CSS; public RPC, chain, provider, and viewer base URL come from **`window.__FILSTREAM_CONFIG__`** (defaults in [`docs/filstream-config.mjs`](docs/filstream-config.mjs)), aligned with Filecoin Calibration.
-- **Shareable playback:** Published links use the static viewer: `viewer.html?meta=<absolute-https-url-to-meta.json>` so anyone with the URL can play back without your app server.
+- **Shareable playback:** Published links use the static viewer: `viewer.html?videoId=<asset-id>` with playback resolved from on-chain catalog + `manifest.json`.
 - **Creator + catalog:** The repo includes a creator flow and shared catalog/metadata helpers so publishing and discovery stay coherent with the upload path.
 
 ---
@@ -59,7 +59,7 @@ Serves [`docs/`](docs/) at `http://localhost:8080` (landing at `/`, upload wizar
 
 ## GitHub Pages
 
-The [`docs/`](docs/) folder is the published site root for `https://curiostorage.github.io/filstream/`. Shared playback links use `viewer.html?meta=<absolute-https-url-to-meta.json>`.
+The [`docs/`](docs/) folder is the published site root for `https://curiostorage.github.io/filstream/`. Shared playback links use `viewer.html?videoId=<asset-id>`.
 
 ## Runtime Overview
 
