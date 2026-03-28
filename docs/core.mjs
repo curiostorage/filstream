@@ -344,6 +344,20 @@ function isRecoverableVideoHwError(message) {
 }
 
 /**
+ * Mediabunny surfaces WebCodecs audio failures as `OperationError` / "Encoding error." with
+ * `_registerAudioSample` on the stack.
+ * @param {unknown} err
+ * @returns {boolean}
+ */
+function isLikelyAudioEncodeFailure(err) {
+  if (err == null) return false;
+  const msg = err instanceof Error ? err.message : String(err);
+  const stack = err instanceof Error && typeof err.stack === "string" ? err.stack : "";
+  if (!/encoding error/i.test(msg)) return false;
+  return stack.includes("registerAudioSample");
+}
+
+/**
  * @typedef {{
  *   onFragmentReady?: (ev: {
  *     kind: "init" | "media",
@@ -377,6 +391,7 @@ async function convertToFmp4Segments(
    * >}
    */
   async function runOneFmp4Attempt(videoBlock) {
+    async function once() {
     let ftyp = null;
     let moov = null;
     let pendingMoof = null;
@@ -445,11 +460,39 @@ async function convertToFmp4Segments(
         output,
         video: videoBlock,
         audio: audioCodec
-          ? { codec: audioCodec, bitrate: 128_000 }
+          ? {
+              codec: audioCodec,
+              bitrate: 128_000,
+              numberOfChannels: 2,
+              sampleRate: 48_000,
+              forceTranscode: true,
+            }
           : { discard: true },
         showWarnings: false,
       });
     } catch (error) {
+      // #region agent log
+      fetch("http://127.0.0.1:7633/ingest/7d7c4be0-eed8-4a57-baec-1bad87d28ccf", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Debug-Session-Id": "310c49",
+        },
+        body: JSON.stringify({
+          sessionId: "310c49",
+          location: "core.mjs:Conversion.init",
+          message: "Conversion.init threw",
+          data: {
+            audioCodec,
+            hw: videoBlock.hardwareAcceleration,
+            errName: error instanceof Error ? error.name : typeof error,
+            errMsg: error instanceof Error ? error.message : String(error),
+          },
+          timestamp: Date.now(),
+          hypothesisId: "H2",
+        }),
+      }).catch(() => {});
+      // #endregion
       return { ok: false, phase: "execute", error };
     }
 
@@ -468,6 +511,33 @@ async function convertToFmp4Segments(
       conversion.onProgress = onProgress;
       await conversion.execute();
     } catch (error) {
+      // #region agent log
+      fetch("http://127.0.0.1:7633/ingest/7d7c4be0-eed8-4a57-baec-1bad87d28ccf", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Debug-Session-Id": "310c49",
+        },
+        body: JSON.stringify({
+          sessionId: "310c49",
+          location: "core.mjs:conversion.execute",
+          message: "conversion.execute threw",
+          data: {
+            audioCodec,
+            hw: videoBlock.hardwareAcceleration,
+            videoH: videoOpts.height,
+            errName: error instanceof Error ? error.name : typeof error,
+            errMsg: error instanceof Error ? error.message : String(error),
+            stackSnippet:
+              error instanceof Error && typeof error.stack === "string"
+                ? error.stack.slice(0, 900)
+                : "",
+          },
+          timestamp: Date.now(),
+          hypothesisId: "H3",
+        }),
+      }).catch(() => {});
+      // #endregion
       return { ok: false, phase: "execute", error };
     }
 
@@ -493,6 +563,42 @@ async function convertToFmp4Segments(
     const durationSec = await input.computeDuration();
 
     return { ok: true, init, segments, fragmentStartsSec, durationSec };
+    }
+
+    const maxAudioEncodeAttempts = audioCodec ? 2 : 1;
+    for (let i = 0; i < maxAudioEncodeAttempts; i++) {
+      if (i > 0) hooks?.onEncodeAttemptReset?.();
+      const r = await once();
+      if (r.ok) return r;
+      if (r.phase === "invalid") return r;
+      if (
+        r.phase === "execute" &&
+        r.error &&
+        audioCodec &&
+        isLikelyAudioEncodeFailure(r.error) &&
+        i < maxAudioEncodeAttempts - 1
+      ) {
+        // #region agent log
+        fetch("http://127.0.0.1:7633/ingest/7d7c4be0-eed8-4a57-baec-1bad87d28ccf", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "X-Debug-Session-Id": "310c49",
+          },
+          body: JSON.stringify({
+            sessionId: "310c49",
+            location: "core.mjs:audio-execute-retry",
+            message: "retrying after likely audio encode failure",
+            data: { attempt: i + 1, max: maxAudioEncodeAttempts },
+            timestamp: Date.now(),
+            hypothesisId: "H5",
+          }),
+        }).catch(() => {});
+        // #endregion
+        continue;
+      }
+      return r;
+    }
   }
 
   if (tryAvcPacketCopy && videoCodec === "avc") {
@@ -1014,6 +1120,39 @@ export async function runFilstreamPipeline(file, ui) {
     formats: ALL_FORMATS,
   });
   const primaryAudio = await probeInput.getPrimaryAudioTrack();
+  // #region agent log
+  {
+    const sr =
+      primaryAudio && typeof primaryAudio.sampleRate === "number"
+        ? primaryAudio.sampleRate
+        : null;
+    const ch =
+      primaryAudio && typeof primaryAudio.numberOfChannels === "number"
+        ? primaryAudio.numberOfChannels
+        : null;
+    fetch("http://127.0.0.1:7633/ingest/7d7c4be0-eed8-4a57-baec-1bad87d28ccf", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Debug-Session-Id": "310c49",
+      },
+      body: JSON.stringify({
+        sessionId: "310c49",
+        location: "core.mjs:probe-audio",
+        message: "primary audio track probe",
+        data: {
+          fileName: file.name,
+          includeAudio: primaryAudio != null,
+          sampleRate: sr,
+          numberOfChannels: ch,
+          ua: typeof navigator !== "undefined" ? navigator.userAgent : "",
+        },
+        timestamp: Date.now(),
+        hypothesisId: "H1",
+      }),
+    }).catch(() => {});
+  }
+  // #endregion
   const includeAudio = primaryAudio != null;
   if (includeAudio && !canEncodeAudio("aac")) {
     setStatus(
@@ -1047,7 +1186,14 @@ export async function runFilstreamPipeline(file, ui) {
 
   const video = getVideoElement();
 
+  /**
+   * Invalidates stale mediabunny onProgress callbacks after encode completes or a new fullAttempt
+   * runs — otherwise old callbacks regress the UI %.
+   */
+  let encodeProgressGeneration = 0;
+
   async function fullAttempt() {
+    const gen = ++encodeProgressGeneration;
     if (player) {
       await player.destroy();
       player = null;
@@ -1065,7 +1211,7 @@ export async function runFilstreamPipeline(file, ui) {
 
     const audioLabel = audioCodec === "aac" ? "AAC" : "";
     setStatus(
-      includeAudio
+      audioCodec
         ? `Transcoding ${nVar} ${videoLabel} + ${audioLabel} rung(s) for HLS ABR…`
         : `Transcoding ${nVar} ${videoLabel} rung(s) for HLS ABR…`,
       "",
@@ -1073,9 +1219,14 @@ export async function runFilstreamPipeline(file, ui) {
     setProgress(0);
 
     const globalProgress = new Array(nVar).fill(0);
+    /** Mediabunny HW retries restart per-rung progress near 0; keep the bar monotonic so it does not flicker backward. */
+    let aggregateProgressDisplayed = 0;
     const reportProgress = () => {
+      if (gen !== encodeProgressGeneration) return;
       const sum = globalProgress.reduce((a, p) => a + p, 0);
-      setProgress(Math.round(Math.min(100, (sum / nVar) * 100)));
+      const next = Math.round(Math.min(100, (sum / nVar) * 100));
+      aggregateProgressDisplayed = Math.max(aggregateProgressDisplayed, next);
+      setProgress(aggregateProgressDisplayed);
     };
     const textEnc = new TextEncoder();
 
@@ -1238,6 +1389,7 @@ export async function runFilstreamPipeline(file, ui) {
     );
 
     setProgress(100);
+    encodeProgressGeneration += 1;
 
     dispatchTranscodeCompleteEvent(ui, {
       rootM3U8Text: masterTextLocal,
@@ -1304,7 +1456,43 @@ export async function runFilstreamPipeline(file, ui) {
   try {
     await fullAttempt();
   } catch (e) {
-    setStatus(e.message || String(e), "err");
+    if (includeAudio && isLikelyAudioEncodeFailure(e)) {
+      // #region agent log
+      fetch("http://127.0.0.1:7633/ingest/7d7c4be0-eed8-4a57-baec-1bad87d28ccf", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Debug-Session-Id": "310c49",
+        },
+        body: JSON.stringify({
+          sessionId: "310c49",
+          location: "core.mjs:runFilstreamPipeline-catch",
+          message: "likely audio encode failure (outer catch)",
+          data: {
+            errName: e instanceof Error ? e.name : typeof e,
+            errMsg: e instanceof Error ? e.message : String(e),
+            stackSnippet:
+              e instanceof Error && typeof e.stack === "string"
+                ? e.stack.slice(0, 1200)
+                : "",
+          },
+          timestamp: Date.now(),
+          hypothesisId: "H4",
+        }),
+      }).catch(() => {});
+      // #endregion
+      setStatus(
+        "Audio encoding failed (AAC). FilStream publishes video with sound only — we do not fall back to silent video. Try re-encoding the file with AAC/LC stereo, or try Chrome or Edge. " +
+          (e instanceof Error ? e.message : String(e)),
+        "err",
+      );
+      if (player) {
+        await player.destroy();
+        player = null;
+      }
+      return;
+    }
+    setStatus(e instanceof Error ? e.message : String(e), "err");
     if (player) {
       await player.destroy();
       player = null;

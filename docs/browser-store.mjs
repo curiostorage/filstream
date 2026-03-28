@@ -1567,6 +1567,8 @@ async function findHighestFilstreamCatalogOnActivePieces(input) {
   let bestVer = -1;
   /** @type {bigint | null} */
   let bestPieceId = null;
+  let catalogNamedCount = 0;
+  let totalPiecesScanned = 0;
   try {
     let offset = 0n;
     const limit = FETCH_LATEST_CATALOG_GET_ACTIVE_PIECES_LIMIT;
@@ -1581,6 +1583,7 @@ async function findHighestFilstreamCatalogOnActivePieces(input) {
       const { pieces, pieceIds, hasMore: more } = parseGetActivePiecesResult(raw);
       hasMore = more;
       const n = Math.min(pieces.length, pieceIds.length);
+      totalPiecesScanned += n;
       offset += BigInt(n);
       /** @type {bigint[]} */
       const ids = [];
@@ -1604,6 +1607,7 @@ async function findHighestFilstreamCatalogOnActivePieces(input) {
         const kv = kvs[j];
         const pieceId = ids[j];
         if (kv.FS_NAME !== "filstream_catalog.json") continue;
+        catalogNamedCount += 1;
         const v = Number.parseInt(kv.FS_VER ?? "0", 10);
         if (Number.isFinite(v) && v > bestVer) {
           bestVer = v;
@@ -1612,9 +1616,54 @@ async function findHighestFilstreamCatalogOnActivePieces(input) {
       }
       if (!hasMore) break;
     }
+    // #region agent log
+    fetch("http://127.0.0.1:7633/ingest/7d7c4be0-eed8-4a57-baec-1bad87d28ccf", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Debug-Session-Id": "310c49",
+      },
+      body: JSON.stringify({
+        sessionId: "310c49",
+        location: "browser-store.mjs:findHighestFilstreamCatalogOnActivePieces",
+        message: "chain scan done",
+        data: {
+          hypothesisId: "C2",
+          chainId,
+          dataSetId,
+          bestVer,
+          bestPieceId: bestPieceId != null ? bestPieceId.toString() : null,
+          catalogNamedCount,
+          totalPiecesScanned,
+        },
+        timestamp: Date.now(),
+      }),
+    }).catch(() => {});
+    // #endregion
     return { bestVer, bestPieceId };
   } catch (e) {
     console.warn("[filstream] findHighestFilstreamCatalogOnActivePieces: chain scan failed", e);
+    // #region agent log
+    fetch("http://127.0.0.1:7633/ingest/7d7c4be0-eed8-4a57-baec-1bad87d28ccf", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Debug-Session-Id": "310c49",
+      },
+      body: JSON.stringify({
+        sessionId: "310c49",
+        location: "browser-store.mjs:findHighestFilstreamCatalogOnActivePieces",
+        message: "chain scan threw",
+        data: {
+          hypothesisId: "C2",
+          chainId,
+          dataSetId,
+          err: e instanceof Error ? e.message : String(e),
+        },
+        timestamp: Date.now(),
+      }),
+    }).catch(() => {});
+    // #endregion
     return null;
   }
 }
@@ -1816,11 +1865,57 @@ export async function fetchLatestCatalogJsonForDataSet(input) {
   const scan = await findHighestFilstreamCatalogOnActivePieces({ synapse, chainId, dataSetId });
   if (scan == null) {
     console.warn("[filstream] fetchLatestCatalogJsonForDataSet: chain scan failed");
+    // #region agent log
+    fetch("http://127.0.0.1:7633/ingest/7d7c4be0-eed8-4a57-baec-1bad87d28ccf", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Debug-Session-Id": "310c49",
+      },
+      body: JSON.stringify({
+        sessionId: "310c49",
+        location: "browser-store.mjs:fetchLatestCatalogJsonForDataSet",
+        message: "fetch aborted",
+        data: {
+          hypothesisId: "C2",
+          reason: "scan_returned_null",
+          chainId,
+          dataSetId,
+          providerId,
+        },
+        timestamp: Date.now(),
+      }),
+    }).catch(() => {});
+    // #endregion
     return null;
   }
   const { bestVer, bestPieceId } = scan;
 
   if (bestPieceId == null || bestVer < 0) {
+    // #region agent log
+    fetch("http://127.0.0.1:7633/ingest/7d7c4be0-eed8-4a57-baec-1bad87d28ccf", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Debug-Session-Id": "310c49",
+      },
+      body: JSON.stringify({
+        sessionId: "310c49",
+        location: "browser-store.mjs:fetchLatestCatalogJsonForDataSet",
+        message: "fetch aborted",
+        data: {
+          hypothesisId: "C2",
+          reason: "no_catalog_piece_with_fs_metadata",
+          chainId,
+          dataSetId,
+          providerId,
+          bestVer,
+          bestPieceId: bestPieceId != null ? bestPieceId.toString() : null,
+        },
+        timestamp: Date.now(),
+      }),
+    }).catch(() => {});
+    // #endregion
     return null;
   }
 
@@ -1848,22 +1943,87 @@ export async function fetchLatestCatalogJsonForDataSet(input) {
     return null;
   }
 
-  try {
-    const res = await fetch(retrievalUrl);
-    if (!res.ok) {
+  /** @type {unknown} */
+  let doc = null;
+  for (let httpAttempt = 0; httpAttempt < 3; httpAttempt++) {
+    try {
+      const res = await fetch(retrievalUrl);
+      if (!res.ok) {
+        console.warn(
+          "[filstream] fetchLatestCatalogJsonForDataSet: HTTP",
+          res.status,
+          retrievalUrl,
+          "attempt",
+          httpAttempt + 1,
+        );
+        continue;
+      }
+      doc = await res.json();
+      break;
+    } catch (e) {
       console.warn(
-        "[filstream] fetchLatestCatalogJsonForDataSet: HTTP",
-        res.status,
-        retrievalUrl,
+        "[filstream] fetchLatestCatalogJsonForDataSet: fetch failed attempt",
+        httpAttempt + 1,
+        e,
       );
-      return null;
     }
-    const doc = await res.json();
-    return { retrievalUrl, doc, catalogVersion: bestVer };
-  } catch (e) {
-    console.warn("[filstream] fetchLatestCatalogJsonForDataSet: fetch failed", e);
+  }
+  if (doc == null) {
+    // #region agent log
+    fetch("http://127.0.0.1:7633/ingest/7d7c4be0-eed8-4a57-baec-1bad87d28ccf", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Debug-Session-Id": "310c49",
+      },
+      body: JSON.stringify({
+        sessionId: "310c49",
+        location: "browser-store.mjs:fetchLatestCatalogJsonForDataSet",
+        message: "fetch aborted",
+        data: {
+          hypothesisId: "C3",
+          reason: "http_json_fetch_failed",
+          chainId,
+          dataSetId,
+          providerId,
+          retrievalUrl,
+        },
+        timestamp: Date.now(),
+      }),
+    }).catch(() => {});
+    // #endregion
     return null;
   }
+  // #region agent log
+  {
+    const m =
+      doc && typeof doc === "object" && doc !== null && "movies" in doc && Array.isArray(doc.movies)
+        ? doc.movies.length
+        : null;
+    fetch("http://127.0.0.1:7633/ingest/7d7c4be0-eed8-4a57-baec-1bad87d28ccf", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Debug-Session-Id": "310c49",
+      },
+      body: JSON.stringify({
+        sessionId: "310c49",
+        location: "browser-store.mjs:fetchLatestCatalogJsonForDataSet",
+        message: "catalog json loaded",
+        data: {
+          hypothesisId: "C4",
+          chainId,
+          dataSetId,
+          providerId,
+          catalogVersion: bestVer,
+          movieRowCount: m,
+        },
+        timestamp: Date.now(),
+      }),
+    }).catch(() => {});
+  }
+  // #endregion
+  return { retrievalUrl, doc, catalogVersion: bestVer };
 }
 
 /**
@@ -2040,24 +2200,32 @@ async function appendFilstreamCatalogPiece(session) {
   if (dsId != null && session.synapse) {
     /** @type {{ retrievalUrl: string, doc: unknown, catalogVersion: number } | null} */
     let fetched = null;
+    const hadPrefetchPending = !!session._catalogMergePrefetch;
+    let prefetchRejected = false;
     if (session._catalogMergePrefetch) {
       try {
         fetched = await session._catalogMergePrefetch;
       } catch {
         fetched = null;
+        prefetchRejected = true;
       }
       session._catalogMergePrefetch = null;
     }
+    let fetchAttempts = 0;
     if (fetched == null) {
-      try {
-        fetched = await fetchLatestCatalogJsonForDataSet({
-          chainId: session.cfg.chainId,
-          dataSetId: dsId,
-          providerId: session.providerId,
-          synapse: session.synapse,
-        });
-      } catch (e) {
-        console.warn("[filstream] catalog latest fetch failed", e);
+      /** Resolve provider from chain for this data set — session.config providerId can drift from on-chain PDP. */
+      const fetchInput = {
+        chainId: session.cfg.chainId,
+        dataSetId: dsId,
+        synapse: session.synapse,
+      };
+      for (let attempt = 0; attempt < 3 && fetched == null; attempt++) {
+        fetchAttempts += 1;
+        try {
+          fetched = await fetchLatestCatalogJsonForDataSet(fetchInput);
+        } catch (e) {
+          console.warn("[filstream] catalog latest fetch failed", attempt, e);
+        }
       }
     }
     if (fetched && fetched.doc && typeof fetched.doc === "object" && fetched.doc !== null) {
@@ -2068,6 +2236,62 @@ async function appendFilstreamCatalogPiece(session) {
       }
       nextVer = fetched.catalogVersion + 1;
     }
+    // #region agent log
+    fetch("http://127.0.0.1:7633/ingest/7d7c4be0-eed8-4a57-baec-1bad87d28ccf", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Debug-Session-Id": "310c49",
+      },
+      body: JSON.stringify({
+        sessionId: "310c49",
+        location: "browser-store.mjs:appendFilstreamCatalogPiece",
+        message: "catalog merge state before new row",
+        data: {
+          hypothesisId: "C1",
+          dataSetId: dsId,
+          chainId: session.cfg?.chainId,
+          hadPrefetchPending,
+          prefetchRejected,
+          fetchAttemptsAfterPrefetch: fetchAttempts,
+          mergedFromChain: !!(
+            fetched &&
+            fetched.doc &&
+            typeof fetched.doc === "object" &&
+            fetched.doc !== null
+          ),
+          chainCatalogVersion: fetched?.catalogVersion ?? null,
+          moviesCarriedCount: movies.length,
+          nextFsVer: nextVer,
+        },
+        timestamp: Date.now(),
+      }),
+    }).catch(() => {});
+    // #endregion
+  } else {
+    // #region agent log
+    fetch("http://127.0.0.1:7633/ingest/7d7c4be0-eed8-4a57-baec-1bad87d28ccf", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Debug-Session-Id": "310c49",
+      },
+      body: JSON.stringify({
+        sessionId: "310c49",
+        location: "browser-store.mjs:appendFilstreamCatalogPiece",
+        message: "catalog merge skipped (no dataSetId or no synapse)",
+        data: {
+          hypothesisId: "C1",
+          dataSetId: dsId,
+          hasSynapse: !!session.synapse,
+          chainId: session.cfg?.chainId,
+          nextFsVerStays: 0,
+          moviesCarriedCount: 0,
+        },
+        timestamp: Date.now(),
+      }),
+    }).catch(() => {});
+    // #endregion
   }
 
   /** @type {{ title: string, metapath: string, posterUrl?: string, posterAnimUrl?: string }} */
@@ -2501,7 +2725,6 @@ export class BrowserFilstreamUploadSession {
     this._catalogMergePrefetch = fetchLatestCatalogJsonForDataSet({
       chainId: this.cfg.chainId,
       dataSetId: dsId,
-      providerId: this.providerId,
       synapse: this.synapse,
     }).catch(() => null);
   }

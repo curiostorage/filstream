@@ -176,8 +176,7 @@ export function convertProgressPanel(props) {
     <div class="convert-awaiting-spinner" aria-hidden="true"></div>
     <p class="convert-awaiting-title">Waiting for stream</p>
     <p class="convert-awaiting-sub">
-      ${statusMsg ||
-      "Playback is still attaching. This step stays here until the player is ready."}
+      ${statusMsg}
     </p>
   `;
 

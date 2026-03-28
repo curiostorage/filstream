@@ -1301,9 +1301,17 @@ function setWizardStatus(msg, kind) {
   renderWizard();
 }
 
+/** Coalesce progress-driven renders: pipeline can emit many onProgress ticks per frame; full lit re-render each tick causes visible bar flicker. */
+let wizardProgressRafId = 0;
+
 function setWizardProgress(value) {
-  wizardState.progress = Math.round(Math.min(100, Math.max(0, value)));
-  renderWizard();
+  const v = Math.round(Math.min(100, Math.max(0, value)));
+  wizardState.progress = v;
+  if (wizardProgressRafId) return;
+  wizardProgressRafId = requestAnimationFrame(() => {
+    wizardProgressRafId = 0;
+    renderWizard();
+  });
 }
 
 function handleStreamMode(mode) {
