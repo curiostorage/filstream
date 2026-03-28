@@ -490,14 +490,17 @@ function syncPieceRetrievalUrl(context, pieceCid) {
 }
 
 /**
- * PDP rejects a second delete when that piece is already queued for removal.
- * Treat as success so callers can delete the rest of an asset’s pieces.
+ * PDP rejects duplicate deletes, or delete when the piece is not in a removable “live” state
+ * (e.g. already queued or already gone). Treat as success so callers can delete the rest of an asset’s pieces.
  *
  * @param {unknown} e
  */
-function isPieceAlreadyScheduledForRemovalError(e) {
+function isIgnorablePieceDeleteError(e) {
   const msg = e instanceof Error ? e.message : String(e);
-  return /already scheduled.*removal|scheduled for removal/i.test(msg);
+  return (
+    /already scheduled.*removal|scheduled for removal/i.test(msg) ||
+    /only schedule removal of live pieces/i.test(msg)
+  );
 }
 
 /**
@@ -777,7 +780,7 @@ export async function flushDeferredPieceDeletions(input) {
     try {
       await deletePiece(context, item.pieceCid);
     } catch (e) {
-      if (isPieceAlreadyScheduledForRemovalError(e)) {
+      if (isIgnorablePieceDeleteError(e)) {
         continue;
       }
       console.warn("[filstream] deferred piece delete failed", item.pieceCid, e);
@@ -834,7 +837,7 @@ export async function deleteAllPiecesForAssetId(input) {
       await deletePiece(context, pieceCid);
       deleted += 1;
     } catch (e) {
-      if (isPieceAlreadyScheduledForRemovalError(e)) {
+      if (isIgnorablePieceDeleteError(e)) {
         deleted += 1;
         continue;
       }

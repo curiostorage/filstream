@@ -124,33 +124,6 @@ function scaledWidth(srcW, srcH, targetH) {
   return Math.max(2, w);
 }
 
-/** Even display height, matching `ladderHeights` source rounding. */
-function evenDisplayH(h) {
-  const x = Math.max(2, h);
-  return x - (x % 2);
-}
-
-/** @param {unknown} vt */
-function inputTrackLooksLikeAvc(vt) {
-  if (vt == null || typeof vt !== "object") return false;
-  if (/** @type {{ codec?: string }} */ (vt).codec === "avc") return true;
-  const id = /** @type {{ internalCodecId?: unknown }} */ (vt).internalCodecId;
-  return typeof id === "string" && id.toLowerCase().startsWith("avc");
-}
-
-/**
- * Top ABR rung matches source display size (no scale) and input is AVC — Mediabunny can copy
- * packets if we omit `bitrate` and `keyFrameInterval` (both force transcode).
- */
-function canFastRemuxAvcTopRung(vt, srcW, srcH, heights, rungIndex) {
-  if (!vt || rungIndex !== 0) return false;
-  if (!inputTrackLooksLikeAvc(vt)) return false;
-  const sh = evenDisplayH(srcH);
-  if (heights[0] !== sh) return false;
-  const w = scaledWidth(srcW, srcH, heights[0]);
-  return w === srcW;
-}
-
 function bandwidthBits(videoBps, includeAudio) {
   let b = videoBps;
   if (includeAudio) b += 128_000;
@@ -1090,21 +1063,11 @@ export async function runFilstreamPipeline(file, ui) {
     const maxBr = vp9BitrateForHeight(maxH);
     const masterVideoCodecParam = buildAvcCodecString(maxW, maxH, maxBr);
 
-    const mayRemuxTop = canFastRemuxAvcTopRung(vt, srcW, srcH, heights, 0);
-    const remuxOnly = mayRemuxTop && nVar === 1;
     const audioLabel = audioCodec === "aac" ? "AAC" : "";
     setStatus(
-      remuxOnly
-        ? includeAudio
-          ? `HLS: remuxing H.264 + ${audioLabel} (no video re-encode)…`
-          : `HLS: remuxing H.264 (no video re-encode)…`
-        : mayRemuxTop
-          ? includeAudio
-            ? `HLS ABR: H.264 remux at source resolution + ${audioLabel} + transcoded lower rung(s)…`
-            : `HLS ABR: H.264 remux at source resolution + transcoded lower rung(s)…`
-          : includeAudio
-            ? `Transcoding ${nVar} ${videoLabel} + ${audioLabel} rung(s) for HLS ABR…`
-            : `Transcoding ${nVar} ${videoLabel} rung(s) for HLS ABR…`,
+      includeAudio
+        ? `Transcoding ${nVar} ${videoLabel} + ${audioLabel} rung(s) for HLS ABR…`
+        : `Transcoding ${nVar} ${videoLabel} rung(s) for HLS ABR…`,
       "",
     );
     setProgress(0);
@@ -1121,7 +1084,6 @@ export async function runFilstreamPipeline(file, ui) {
       const w = scaledWidth(srcW, srcH, h);
       const br = vp9BitrateForHeight(h);
       const segmentHooks = buildVariantSegmentHooks(ui, i, w, h);
-      const tryAvcPacketCopy = canFastRemuxAvcTopRung(vt, srcW, srcH, heights, i);
       const { init, segments, fragmentStartsSec, durationSec } =
         await convertToFmp4Segments(
           file,
@@ -1133,7 +1095,6 @@ export async function runFilstreamPipeline(file, ui) {
           },
           videoCodec,
           segmentHooks,
-          tryAvcPacketCopy,
         );
       globalProgress[i] = 1;
       reportProgress();
