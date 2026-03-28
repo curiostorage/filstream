@@ -117,6 +117,27 @@ body {
   max-height: 80vh;
 }
 
+/* Theater: fill viewport via CSS (not browser fullscreen). Toggled by Shaka control. */
+.viewer-shaka-container.viewer-shaka-theater {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100vw;
+  height: 100vh;
+  margin: 0;
+  padding: 0;
+  max-height: none;
+  border-radius: 0;
+  z-index: 100;
+}
+
+.viewer-shaka-container.viewer-shaka-theater video {
+  max-height: none;
+  height: 100%;
+  width: 100%;
+  object-fit: contain;
+}
+
 /* Shaka overflow: FilStream row (logo + label) */
 .shaka-filstream-site-button label {
   display: flex;

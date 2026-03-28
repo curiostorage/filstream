@@ -83,6 +83,51 @@ let donateError = "";
 let donateTxHash = "";
 
 let filstreamOverflowRegistered = false;
+let theaterControlRegistered = false;
+
+/** Expands the Shaka container to the viewport (CSS) without browser fullscreen. */
+class TheaterModeButton extends shaka.ui.Element {
+  /**
+   * @param {HTMLElement} parent
+   * @param {*} controls
+   */
+  constructor(parent, controls) {
+    super(parent, controls);
+    const container = shakaContainerEl;
+    const button = document.createElement("button");
+    button.type = "button";
+    button.classList.add("shaka-theater-button");
+    button.classList.add("material-icons-round");
+    button.classList.add("shaka-tooltip");
+    button.classList.add("shaka-no-propagation");
+    const sync = () => {
+      const on = Boolean(container?.classList.contains("viewer-shaka-theater"));
+      button.textContent = on ? "fullscreen_exit" : "fit_screen";
+      button.setAttribute("aria-pressed", on ? "true" : "false");
+      button.setAttribute(
+        "aria-label",
+        on ? "Exit theater mode" : "Theater mode (fill window)",
+      );
+    };
+    sync();
+    this.eventManager.listen(button, "click", () => {
+      if (!container) return;
+      container.classList.toggle("viewer-shaka-theater");
+      sync();
+    });
+    this.parent.appendChild(button);
+  }
+}
+
+TheaterModeButton.Factory = class {
+  /**
+   * @param {HTMLElement} rootElement
+   * @param {*} controls
+   */
+  create(rootElement, controls) {
+    return new TheaterModeButton(rootElement, controls);
+  }
+};
 
 /** Opens the full viewer page (no embed) from the Shaka ⋯ overflow menu. */
 class FilstreamSiteButton extends shaka.ui.Element {
@@ -135,7 +180,16 @@ function registerFilstreamOverflowElement() {
   shaka.ui.OverflowMenu.registerElement("filstream", new FilstreamSiteButton.Factory());
 }
 
+function registerTheaterControl() {
+  if (theaterControlRegistered) return;
+  if (!shaka.ui?.Controls?.registerElement) return;
+  if (!shakaContainerEl) return;
+  theaterControlRegistered = true;
+  shaka.ui.Controls.registerElement("theater", new TheaterModeButton.Factory());
+}
+
 registerFilstreamOverflowElement();
+registerTheaterControl();
 
 function setStatus(msg, kind) {
   if (!statusEl) return;
@@ -959,6 +1013,7 @@ if (!metaUrl || !/^https?:\/\//i.test(metaUrl)) {
           "mute",
           "volume",
           "spacer",
+          ...(theaterControlRegistered ? ["theater"] : []),
           "fullscreen",
           "overflow_menu",
         ],
