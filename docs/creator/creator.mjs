@@ -328,6 +328,23 @@ function posterFromManifestDoc(doc) {
     : null;
 }
 
+function posterAnimFromManifestDoc(doc) {
+  if (!doc || typeof doc !== "object" || doc === null) return null;
+  const d = /** @type {Record<string, unknown>} */ (doc);
+  const pa =
+    d.posterAnim && typeof d.posterAnim === "object" && d.posterAnim !== null
+      ? /** @type {{ url?: unknown }} */ (d.posterAnim).url
+      : null;
+  if (typeof pa === "string" && pa.trim() !== "") return pa.trim();
+  const playback =
+    d.playback && typeof d.playback === "object" && d.playback !== null
+      ? /** @type {{ posterAnimUrl?: unknown }} */ (d.playback)
+      : {};
+  return typeof playback.posterAnimUrl === "string" && playback.posterAnimUrl.trim() !== ""
+    ? playback.posterAnimUrl.trim()
+    : null;
+}
+
 function updateActions() {
   if (!enableEditBtn || !heroActionsEl) return;
   heroActionsEl.hidden = false;
@@ -472,13 +489,28 @@ async function hydrateMoviePosters(activeEntries) {
     const entry = activeEntries[i];
     const row = rows[i];
     const img = /** @type {HTMLImageElement | null} */ (
-      row.querySelector(".creator-catalog-poster")
+      row.querySelector(".creator-catalog-poster--still")
     );
     if (!img) continue;
+    const wrap = row.querySelector(".creator-catalog-poster-wrap");
     try {
       const doc = await manifestDocForEntry(entry);
       const posterUrl = posterFromManifestDoc(doc);
+      const animUrl = posterAnimFromManifestDoc(doc);
       if (posterUrl) img.src = posterUrl;
+      if (posterUrl && animUrl && wrap instanceof HTMLElement) {
+        wrap.classList.add("creator-catalog-poster-wrap--anim");
+        let motion = wrap.querySelector(".creator-catalog-poster--motion");
+        if (!(motion instanceof HTMLImageElement)) {
+          motion = document.createElement("img");
+          motion.className = "creator-catalog-poster creator-catalog-poster--motion";
+          motion.alt = "";
+          motion.loading = "lazy";
+          motion.decoding = "async";
+          wrap.appendChild(motion);
+        }
+        motion.src = animUrl;
+      }
       if (i === 0 && posterImg && posterUrl && posterImg.hidden) {
         posterImg.src = posterUrl;
         posterImg.hidden = false;

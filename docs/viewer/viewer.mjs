@@ -1015,7 +1015,7 @@ function createCatalogCard(row, opts = {}) {
   const thumbWrap = document.createElement("div");
   thumbWrap.className = "viewer-catalog-card-thumb-wrap";
   const thumb = document.createElement("img");
-  thumb.className = "viewer-catalog-card-thumb";
+  thumb.className = "viewer-catalog-card-thumb viewer-catalog-card-thumb--still";
   thumb.alt = "";
   thumb.loading = "lazy";
   thumb.decoding = "async";
@@ -1336,7 +1336,7 @@ async function hydrateCatalogPosters(rows) {
   if (!catalogAside) return;
   /** @type {Map<string, HTMLImageElement[]>} */
   const imagesByVideoId = new Map();
-  const cards = catalogAside.querySelectorAll(".viewer-catalog-card-thumb");
+  const cards = catalogAside.querySelectorAll(".viewer-catalog-card-thumb--still");
   for (const node of cards) {
     const img = /** @type {HTMLImageElement} */ (node);
     const videoId = String(img.dataset.videoId || "").trim();
@@ -1360,9 +1360,23 @@ async function hydrateCatalogPosters(rows) {
         try {
           const { manifestDoc } = await loadManifestForVideo(videoId, row);
           const still = posterUrlFromDoc(manifestDoc);
-          if (still) {
-            for (const img of targets) {
-              img.src = still;
+          const anim = posterAnimUrlFromDoc(manifestDoc);
+          for (const img of targets) {
+            const wrap = img.parentElement;
+            if (still) img.src = still;
+            if (still && anim && wrap instanceof HTMLElement) {
+              wrap.classList.add("viewer-catalog-card-thumb-wrap--anim");
+              let motion = wrap.querySelector(".viewer-catalog-card-thumb--motion");
+              if (!(motion instanceof HTMLImageElement)) {
+                motion = document.createElement("img");
+                motion.className =
+                  "viewer-catalog-card-thumb viewer-catalog-card-thumb--motion";
+                motion.alt = "";
+                motion.loading = "lazy";
+                motion.decoding = "async";
+                wrap.appendChild(motion);
+              }
+              motion.src = anim;
             }
           }
         } catch {

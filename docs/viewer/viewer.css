@@ -757,8 +757,32 @@ button.viewer-action-btn--round {
 }
 
 .viewer-catalog-card-thumb-wrap {
+  position: relative;
   aspect-ratio: 16 / 9;
   background: #232935;
+}
+
+.viewer-catalog-card-thumb-wrap--anim .viewer-catalog-card-thumb--still,
+.viewer-catalog-card-thumb-wrap--anim .viewer-catalog-card-thumb--motion {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  transition: opacity 0.15s ease;
+}
+
+.viewer-catalog-card-thumb-wrap--anim .viewer-catalog-card-thumb--motion {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.viewer-catalog-card:hover .viewer-catalog-card-thumb-wrap--anim .viewer-catalog-card-thumb--motion {
+  opacity: 1;
+}
+
+.viewer-catalog-card:hover .viewer-catalog-card-thumb-wrap--anim .viewer-catalog-card-thumb--still {
+  opacity: 0;
 }
 
 .viewer-catalog-card-thumb {
