@@ -18,6 +18,24 @@
       <p class="creator-status" id="creator-status">Loading…</p>
     </div>
 
+    <section id="creator-empty-state" class="creator-empty-state" hidden aria-label="Manage channel">
+      <h1 class="creator-empty-title">Manage your creator channel</h1>
+      <p class="creator-empty-copy">
+        Connect your wallet first to open your channel dashboard and edit your creator profile.
+      </p>
+      <div class="creator-empty-actions">
+        <button type="button" id="creator-empty-connect" class="creator-primary-btn">
+          Connect wallet
+        </button>
+        <a href="viewer.html" class="creator-empty-link">Browse all videos</a>
+      </div>
+    </section>
+
+    <section id="creator-browse-section" class="creator-browse-section" hidden aria-label="Browse creators">
+      <h2 class="creator-catalog-head">Browse creators</h2>
+      <div id="creator-browse-list" class="creator-browse-list"></div>
+    </section>
+
     <section class="creator-hero" id="creator-hero" hidden>
       <div class="creator-hero-poster-wrap">
         <img id="creator-poster" class="creator-hero-poster" alt="" width="168" height="252" hidden />
@@ -31,6 +49,9 @@
         <div class="creator-hero-actions" id="creator-hero-actions" hidden>
           <button type="button" id="creator-enable-edit" class="creator-primary-btn" hidden>
             Sign-in to edit
+          </button>
+          <button type="button" id="creator-disconnect" class="creator-secondary-btn" hidden>
+            Logout
           </button>
           <p id="creator-sessionkey-note" class="creator-sessionkey-note" hidden></p>
         </div>
