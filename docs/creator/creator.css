@@ -156,6 +156,11 @@ body {
   flex-shrink: 0;
 }
 
+/* [hidden] alone is overridden by `.creator-spinner-slot { display: inline-flex }` (same specificity, our sheet wins). */
+.creator-spinner-slot[hidden] {
+  display: none;
+}
+
 .creator-status.err {
   color: #f28b82;
 }
