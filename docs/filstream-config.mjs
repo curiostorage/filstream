@@ -20,22 +20,15 @@
  *   storeFilstreamId: string,
  *   storeMaxPieceBytes: number,
  *   viewBaseUrl: string,
+ *   catalogContractAddress: string,
+ *   sessionKeyFundAttoFil: string,
+ *   catalogSyncIntervalMs: number,
  * }} FilstreamPublicConfig
  */
-
-/** Same defaults as former Node `STORE_*` .env example (Filecoin Calibration). */
-const DEFAULT_FILSTREAM_PUBLIC_CONFIG = {
-  storeRpcUrl: "https://api.calibration.node.glif.io/rpc/v1",
-  storeChainId: 314159,
-  storeProviderId: 4,
-  storeSource: "filstream",
-  storeFilstreamId: "",
-  storeMaxPieceBytes: 133_169_152,
-  /** Base URL for the static viewer (GitHub Pages). Empty = same origin as the wizard (`viewer.html`). */
-  viewBaseUrl: "https://curiostorage.github.io/filstream/",
-};
-
-const FILSTREAM_ID_STORAGE_KEY = "filstream_store_filstream_id_v1";
+import {
+  DEFAULT_FILSTREAM_PUBLIC_CONFIG,
+  FILSTREAM_ID_STORAGE_KEY,
+} from "./filstream-constants.mjs";
 
 /** @type {FilstreamPublicConfig | null} */
 let cached = null;
@@ -63,6 +56,17 @@ export function getFilstreamStoreConfig() {
     typeof g?.storeMaxPieceBytes === "number" && Number.isFinite(g.storeMaxPieceBytes)
       ? Math.floor(g.storeMaxPieceBytes)
       : null;
+  const catalogSyncIntervalMs =
+    typeof g?.catalogSyncIntervalMs === "number" &&
+    Number.isFinite(g.catalogSyncIntervalMs) &&
+    g.catalogSyncIntervalMs >= 5_000
+      ? Math.floor(g.catalogSyncIntervalMs)
+      : DEFAULT_FILSTREAM_PUBLIC_CONFIG.catalogSyncIntervalMs;
+  const sessionKeyFundAttoFil =
+    typeof g?.sessionKeyFundAttoFil === "string" &&
+    /^[0-9]+$/.test(g.sessionKeyFundAttoFil.trim())
+      ? g.sessionKeyFundAttoFil.trim()
+      : DEFAULT_FILSTREAM_PUBLIC_CONFIG.sessionKeyFundAttoFil;
   cached = {
     storeRpcUrl:
       typeof g?.storeRpcUrl === "string" && g.storeRpcUrl.trim() !== ""
@@ -93,6 +97,12 @@ export function getFilstreamStoreConfig() {
       typeof g?.viewBaseUrl === "string"
         ? g.viewBaseUrl.trim()
         : DEFAULT_FILSTREAM_PUBLIC_CONFIG.viewBaseUrl,
+    catalogContractAddress:
+      typeof g?.catalogContractAddress === "string"
+        ? g.catalogContractAddress.trim()
+        : DEFAULT_FILSTREAM_PUBLIC_CONFIG.catalogContractAddress,
+    sessionKeyFundAttoFil,
+    catalogSyncIntervalMs,
   };
   return cached;
 }
@@ -116,97 +126,53 @@ export function resolveViewerIndexPageUrl() {
 }
 
 /**
- * Review / share URL: `meta` points at `meta.json`; optional `catalog` at `filstream_catalog.json`
- * for the same dataset (multi-title index appended at finalize). Optional `dataset` is the PDP
- * data set id so links stay valid if the catalog piece URL goes stale.
+ * Primary viewer URL contract: `viewer.html?videoId=<asset-id>`.
  *
- * @param {string} metaJsonUrl
- * @param {string | null | undefined} [catalogJsonUrl]
- * @param {number | null | undefined} [dataSetId]
+ * @param {string} videoId
+ * @param {{ embed?: boolean }} [opts]
  * @returns {string}
  */
-export function buildReviewViewerIframeSrc(metaJsonUrl, catalogJsonUrl, dataSetId) {
+export function buildViewerUrlForVideoId(videoId, opts = {}) {
+  const id = String(videoId || "").trim();
   const u = new URL(resolveViewerIndexPageUrl());
-  u.searchParams.set("meta", metaJsonUrl);
-  const cat =
-    typeof catalogJsonUrl === "string" && catalogJsonUrl.trim() !== ""
-      ? catalogJsonUrl.trim()
-      : "";
-  if (cat) {
-    u.searchParams.set("catalog", cat);
+  if (id) {
+    u.searchParams.set("videoId", id);
+  } else {
+    u.searchParams.delete("videoId");
   }
-  if (dataSetId != null && Number.isFinite(dataSetId) && dataSetId >= 0) {
-    u.searchParams.set("dataset", String(Math.floor(dataSetId)));
+  if (opts.embed === true) {
+    u.searchParams.set("embed", "true");
+  } else {
+    u.searchParams.delete("embed");
   }
   return u.href;
 }
 
 /**
- * Same as {@link buildReviewViewerIframeSrc} with `embed=true` for Open Graph / Twitter player URLs.
+ * Creator page URL: `creator.html?creator=<wallet-address>`.
  *
- * @param {string} metaJsonUrl
- * @param {string | null | undefined} catalogJsonUrl
- * @param {number | null | undefined} dataSetId
+ * @param {string} creatorAddress
  * @returns {string}
  */
-export function buildReviewViewerEmbedSrc(metaJsonUrl, catalogJsonUrl, dataSetId) {
-  const u = new URL(buildReviewViewerIframeSrc(metaJsonUrl, catalogJsonUrl, dataSetId));
-  u.searchParams.set("embed", "true");
+export function buildCreatorUrlForAddress(creatorAddress) {
+  const u = new URL("creator.html", resolveViewerIndexPageUrl());
+  const addr = String(creatorAddress || "").trim();
+  if (addr) {
+    u.searchParams.set("creator", addr);
+  }
   return u.href;
 }
 
 /**
- * Absolute retrieval URL for `meta.json` from finalize output, or the same directory as
- * `manifest.json` / `master-app.m3u8` when the PDP response omits `metaJsonUrl`.
- *
- * @param {null | { metaJsonUrl?: string | null, manifestUrl?: string | null, masterAppUrl?: string | null }} result
+ * @param {null | { videoId?: string | null, assetId?: string | null }} result
  * @returns {string}
  */
-export function resolveMetaJsonUrlFromFinalize(result) {
+export function resolveVideoIdFromFinalize(result) {
   if (!result) return "";
-  const direct = typeof result.metaJsonUrl === "string" ? result.metaJsonUrl.trim() : "";
+  const direct = typeof result.videoId === "string" ? result.videoId.trim() : "";
   if (direct) return direct;
-  const manifest = typeof result.manifestUrl === "string" ? result.manifestUrl.trim() : "";
-  if (manifest) {
-    const d = replaceUrlPathLeaf(manifest, "manifest.json", "meta.json");
-    if (d) return d;
-  }
-  const master = typeof result.masterAppUrl === "string" ? result.masterAppUrl.trim() : "";
-  if (master) {
-    const d = replaceUrlPathLeaf(master, "master-app.m3u8", "meta.json");
-    if (d) return d;
-  }
-  return "";
-}
-
-/**
- * Absolute retrieval URL for `filstream_catalog.json` from finalize output (separate piece CID from `meta.json`).
- *
- * @param {null | { catalogJsonUrl?: string | null }} result
- * @returns {string}
- */
-export function resolveCatalogJsonUrlFromFinalize(result) {
-  if (!result) return "";
-  const direct =
-    typeof result.catalogJsonUrl === "string" ? result.catalogJsonUrl.trim() : "";
-  return direct;
-}
-
-/**
- * @param {string} absoluteUrl
- * @param {string} fromLeaf
- * @param {string} toLeaf
- * @returns {string}
- */
-function replaceUrlPathLeaf(absoluteUrl, fromLeaf, toLeaf) {
-  try {
-    const u = new URL(absoluteUrl);
-    if (!u.pathname.endsWith(`/${fromLeaf}`)) return "";
-    u.pathname = `${u.pathname.slice(0, -fromLeaf.length)}${toLeaf}`;
-    return u.href;
-  } catch {
-    return "";
-  }
+  const fallback = typeof result.assetId === "string" ? result.assetId.trim() : "";
+  return fallback;
 }
 
 /**

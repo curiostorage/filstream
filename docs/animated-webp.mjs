@@ -3,16 +3,15 @@
  * If the clip is shorter than ~10s, encodes a single static WebP of the first frame instead.
  * Uses vendored webpxmux (libwebp WASM).
  */
-
-const FRAME_COUNT = 20;
-const START_SEC = 10;
-const STEP_SEC = 2;
-const PLAYBACK_FPS = 4;
-/** Below this duration we only encode the first frame (still WebP). */
-const MIN_DURATION_FOR_ANIM_SEC = START_SEC + 0.05;
-
-/** Max width for catalog mini-poster (matches `viewer.css` / `creator.css` `--catalog-poster`). */
-export const CATALOG_ANIM_MAX_WIDTH_PX = 168;
+import {
+  CATALOG_ANIM_MAX_WIDTH_PX,
+  FRAME_COUNT,
+  MIN_DURATION_FOR_ANIM_SEC,
+  PLAYBACK_FPS,
+  START_SEC,
+  STEP_SEC,
+} from "./filstream-constants.mjs";
+export { CATALOG_ANIM_MAX_WIDTH_PX };
 
 /** @type {Promise<(...args: unknown[]) => unknown> | null} */
 let muxLoader = null;

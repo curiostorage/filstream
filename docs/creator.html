@@ -32,6 +32,7 @@
           <button type="button" id="creator-enable-edit" class="creator-primary-btn" hidden>
             Sign-in to edit
           </button>
+          <p id="creator-sessionkey-note" class="creator-sessionkey-note" hidden></p>
         </div>
       </div>
     </section>
@@ -61,15 +62,15 @@
           </div>
         </label>
         <div class="creator-movie-editor-head">
-          <span>Movies (catalog order, oldest first — drag ⋮⋮ to reorder)</span>
-          <button type="button" id="creator-save-btn" class="creator-primary-btn">Save catalog</button>
+          <span>Videos (newest first)</span>
+          <button type="button" id="creator-save-btn" class="creator-primary-btn">Save name</button>
         </div>
         <div class="creator-save-status-row">
           <span id="creator-save-spinner-mount" class="creator-spinner-slot" hidden aria-hidden="true"></span>
           <p class="creator-save-status" id="creator-save-status" aria-live="polite"></p>
         </div>
         <ul id="creator-movie-edit-list" class="creator-movie-edit-list"></ul>
-        <div class="creator-dev-paste-box" id="creator-dev-paste-box">
+        <div class="creator-dev-paste-box" id="creator-dev-paste-box" hidden>
           <p class="creator-dev-paste-heading">for development only</p>
           <p class="creator-dev-paste-desc">
             Paste a catalog <code>movies[]</code> object (JSON), then add it to the list. Use Save catalog to publish.
@@ -80,7 +81,7 @@
             rows="8"
             spellcheck="false"
             autocomplete="off"
-            placeholder='{ "title": "…", "metapath": "https://…/meta.json" }'
+            placeholder='{ "title": "…", "videoId": "asset_…" }'
           ></textarea>
           <div class="creator-dev-paste-actions">
             <button type="button" id="creator-dev-paste-add" class="creator-row-btn">

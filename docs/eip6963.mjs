@@ -2,6 +2,7 @@
  * EIP-6963 injected wallet discovery (https://eips.ethereum.org/EIPS/eip-6963).
  * No npm deps — edit and refresh.
  */
+import { EIP6963_LEGACY_PROVIDER_UUID as SHARED_EIP6963_LEGACY_PROVIDER_UUID } from "./filstream-constants.mjs";
 
 /**
  * @typedef {{ uuid: string, name: string, icon: string, rdns: string }} Eip6963ProviderInfo
@@ -12,9 +13,7 @@
  */
 
 /** Matches the synthetic wallet entry from `mergeLegacyEthereum`. */
-export const EIP6963_LEGACY_PROVIDER_UUID = "eip6963:legacy-window-ethereum";
-
-const LEGACY_UUID = EIP6963_LEGACY_PROVIDER_UUID;
+export const EIP6963_LEGACY_PROVIDER_UUID = SHARED_EIP6963_LEGACY_PROVIDER_UUID;
 
 /** @param {Eip6963AnnouncedWallet[]} list */
 function mergeLegacyEthereum(list) {
@@ -28,7 +27,7 @@ function mergeLegacyEthereum(list) {
     ...list,
     {
       info: {
-        uuid: LEGACY_UUID,
+        uuid: EIP6963_LEGACY_PROVIDER_UUID,
         name: "Browser wallet (window.ethereum)",
         icon: "",
         rdns: "window.ethereum",

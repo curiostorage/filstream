@@ -1,110 +1,119 @@
 /**
- * GitHub Pages: `creator.html?catalog=<absolute-https-url-to-filstream_catalog.json>[&dataset=<pdp-data-set-id>]`
- * If the catalog URL is missing or 404, `?dataset=` plus app chain config can load the latest
- * `filstream_catalog.json` from PDP (same helper as refresh).
+ * Creator page (on-chain catalog):
+ * - `creator.html?creator=0x...` to view a specific channel
+ * - no query param: follows connected wallet, or first available creator
  *
- * Shows catalog identity, creator header, movie list, and (for the editor with a storage session)
- * editing: creator name/poster, movie order, save, and remove movie with PDP piece deletes.
+ * Edit capabilities (owner only):
+ * - update username (`setMyUsername`)
+ * - update profile picture (`setMyProfilePicturePieceCid`)
+ * - remove videos (`deleteEntry`) using session key
  */
+import { mountFilstreamHeader } from "../filstream-brand.mjs";
+import {
+  buildViewerUrlForVideoId,
+  ensureFilstreamId,
+  getFilstreamStoreConfig,
+} from "../filstream-config.mjs";
+import {
+  deleteCatalogEntryWithSessionKey,
+  isCatalogConfigured,
+  readCatalogByCreator,
+  readCatalogLatest,
+  readCatalogProfilePicturePieceCid,
+  readCatalogUsername,
+  resolveManifestUrl,
+  setCatalogProfilePicturePieceCidWithWallet,
+  setCatalogUsernameWithWallet,
+} from "../filstream-catalog-chain.mjs";
 import {
   createSynapseForSession,
-  deleteAllPiecesForAssetId,
-  enqueueDeferredPieceDeletion,
-  fetchLatestCatalogJsonForDataSet,
-  flushDeferredPieceDeletions,
-  getPieceRetrievalUrl,
-  openDataSetContextForCatalog,
   publishCreatorPosterImage,
-  publishFilstreamCatalogJson,
+  resolveOrCreateDataSet,
 } from "../browser-store.mjs";
-import { CATALOG_JSON_VERSION_KEY } from "../filstream-catalog-shared.mjs";
-import { mountFilstreamBrand } from "../filstream-brand.mjs";
-import {
-  moviesFromCatalog,
-  parseCatalogMovieRow,
-  viewerHrefForMeta,
-} from "../filstream-catalog-shared.mjs";
-import { getFilstreamStoreConfig } from "../filstream-config.mjs";
+import { loadManifestCache, saveManifestCache } from "../filstream-catalog-cache.mjs";
 import { authorizeSessionKeyForUpload } from "../session-key-bootstrap.mjs";
+import {
+  expirationsForWizard,
+  isSessionKeyRecoverable,
+  loadSessionKeyFromStorage,
+  saveSessionKeyToStorage,
+} from "../session-key-storage.mjs";
 import { createSpinnerElement } from "../spinner.mjs";
+import { getAddress } from "../vendor/synapse-browser.mjs";
 
 const brandMount = document.getElementById("creator-brand-mount");
 if (brandMount) {
-  mountFilstreamBrand(brandMount);
+  mountFilstreamHeader(brandMount, { active: "creator" });
 }
 
 const statusEl = document.getElementById("creator-status");
 const pageSpinnerMount = document.getElementById("creator-page-spinner");
 const saveSpinnerMount = document.getElementById("creator-save-spinner-mount");
 const heroEl = document.getElementById("creator-hero");
-const posterImg = document.getElementById("creator-poster");
-const posterUrlInput = document.getElementById("creator-poster-url");
-const posterFileInput = document.getElementById("creator-poster-file");
-const posterBrowseBtn = document.getElementById("creator-poster-browse");
-const posterUploadStatus = document.getElementById("creator-poster-status");
+const posterImg = /** @type {HTMLImageElement | null} */ (document.getElementById("creator-poster"));
 const titleEl = document.getElementById("creator-title");
 const roleLabel = document.getElementById("creator-title-role");
 const datasetLabel = document.getElementById("creator-dataset-label");
 const heroActionsEl = document.getElementById("creator-hero-actions");
 const editSection = document.getElementById("creator-edit-section");
 const editHint = document.getElementById("creator-edit-hint");
-const enableEditBtn = document.getElementById("creator-enable-edit");
+const enableEditBtn = /** @type {HTMLButtonElement | null} */ (
+  document.getElementById("creator-enable-edit")
+);
+const sessionKeyNoteEl = document.getElementById("creator-sessionkey-note");
 const editForm = document.getElementById("creator-edit-form");
-const nameInput = document.getElementById("creator-name-input");
-const saveBtn = document.getElementById("creator-save-btn");
+const nameInput = /** @type {HTMLInputElement | null} */ (document.getElementById("creator-name-input"));
+const posterFileInput = /** @type {HTMLInputElement | null} */ (
+  document.getElementById("creator-poster-file")
+);
+const posterBrowseBtn = /** @type {HTMLButtonElement | null} */ (
+  document.getElementById("creator-poster-browse")
+);
+const posterStatusEl = document.getElementById("creator-poster-status");
+const saveBtn = /** @type {HTMLButtonElement | null} */ (document.getElementById("creator-save-btn"));
 const saveStatus = document.getElementById("creator-save-status");
 const movieEditList = document.getElementById("creator-movie-edit-list");
-const devPasteJson = document.getElementById("creator-dev-paste-json");
-const devPasteAddBtn = document.getElementById("creator-dev-paste-add");
-const devPasteStatus = document.getElementById("creator-dev-paste-status");
 const catalogSection = document.getElementById("creator-catalog-section");
 const movieListEl = document.getElementById("creator-movie-list");
 
-/** @type {{ editorAddress: string | null, dataSetId: number | null, chainId: number | null, providerId: number | null } | null} */
-let catalogIdentity = null;
+// Legacy dev-only paste box remains hidden in on-chain mode.
+document.getElementById("creator-dev-paste-box")?.setAttribute("hidden", "");
+
 /** @type {string | null} */
 let connectedAddress = null;
 /** @type {string | null} */
-let sessionPrivateKey = null;
-/** @type {Record<string, string> | null} */
-let sessionExpirations = null;
-/** @type {import("@filoz/synapse-sdk").Synapse | null} */
-let synapseRef = null;
-/** @type {import("@filoz/synapse-sdk/storage").StorageContext | null} */
-let storageContext = null;
-
+let creatorAddress = null;
+/** @type {string} */
+let creatorUsername = "";
+/** @type {string} */
+let creatorProfilePicturePieceCid = "";
+/** @type {string} */
+let creatorProfilePictureUrl = "";
+/** @type {import("../filstream-catalog-chain.mjs").CatalogEntry[]} */
+let creatorEntries = [];
 /** @type {string | null} */
-let catalogUrl = null;
-/** @type {number | null} Parsed non-negative `?dataset=` for links / refresh (optional). */
-let datasetQueryParsed = null;
-/** @type {{ title: string, metapath: string, posterUrl?: string, posterAnimUrl?: string, share?: string }[]} */
-let moviesState = [];
-/** @type {Record<string, unknown> | null} */
-let loadedCatalogRoot = null;
-
-let saveBusy = false;
-
-/** Wall-clock delay before deleting a replaced creator-poster PDP piece (processed on next session). */
-const CREATOR_POSTER_REPLACE_DELETE_DELAY_MS = 7 * 24 * 60 * 60 * 1000;
-
-/**
- * @param {number} dataSetId
- * @returns {string}
- */
-function creatorPosterPieceStorageKey(dataSetId) {
-  return `filstream_creator_poster_piece_${dataSetId}`;
-}
-
-function setPosterUploadStatus(msg) {
-  if (posterUploadStatus) {
-    posterUploadStatus.textContent = msg;
-  }
-}
+let sessionPrivateKey = null;
+/** @type {Record<number, boolean>} */
+const deleteBusyByEntry = {};
+let profileSaveBusy = false;
+let profilePosterBusy = false;
 
 function setStatus(msg, kind) {
   if (!statusEl) return;
   statusEl.textContent = msg;
   statusEl.className = `creator-status${kind === "err" ? " err" : ""}`;
+}
+
+function setSaveStatus(msg, kind) {
+  if (!saveStatus) return;
+  saveStatus.textContent = msg;
+  saveStatus.className = `creator-save-status${kind === "err" ? " err" : ""}`;
+}
+
+function setPosterStatus(msg, kind) {
+  if (!posterStatusEl) return;
+  posterStatusEl.textContent = msg;
+  posterStatusEl.className = `creator-poster-status${kind === "err" ? " err" : ""}`;
 }
 
 function showPageLoadSpinner() {
@@ -127,1030 +136,636 @@ function setSaveSpinnerVisible(on) {
   }
 }
 
-function setDevPasteStatus(msg) {
-  if (devPasteStatus) devPasteStatus.textContent = msg;
+function shortAddress(addr) {
+  if (!addr) return "";
+  return `${addr.slice(0, 6)}…${addr.slice(-4)}`;
 }
 
-/**
- * Parses pasted JSON: one movie object, or an array of movie objects (e.g. a `movies` slice).
- *
- * @param {unknown} parsed
- * @returns {{ title: string, metapath: string, posterUrl?: string, posterAnimUrl?: string, share?: string }[]}
- */
-function catalogMovieRowsFromParsedJson(parsed) {
-  if (
-    parsed &&
-    typeof parsed === "object" &&
-    !Array.isArray(parsed) &&
-    Array.isArray(/** @type {{ movies?: unknown }} */ (parsed).movies)
-  ) {
-    return catalogMovieRowsFromParsedJson(
-      /** @type {{ movies: unknown[] }} */ (parsed).movies,
-    );
-  }
-  if (Array.isArray(parsed)) {
-    /** @type {{ title: string, metapath: string, posterUrl?: string, posterAnimUrl?: string, share?: string }[]} */
-    const out = [];
-    for (const el of parsed) {
-      const row = parseCatalogMovieRow(el);
-      if (row) out.push(row);
-    }
-    return out;
-  }
-  const one = parseCatalogMovieRow(parsed);
-  return one ? [one] : [];
+function buildCreatorProfileAssetId(addr) {
+  return `creator_profile_${String(addr || "").trim().toLowerCase()}`;
 }
 
-/**
- * Parses pasted JSON as catalog movie object(s) and appends to the in-memory list.
- */
-function handleAddPastedMovie() {
-  if (!devPasteJson) return;
-  const raw = devPasteJson.value.trim();
-  if (!raw) {
-    setDevPasteStatus("Paste JSON first.");
-    return;
-  }
-  let parsed;
-  try {
-    parsed = JSON.parse(raw);
-  } catch (e) {
-    setDevPasteStatus(`Invalid JSON: ${e instanceof Error ? e.message : String(e)}`);
-    return;
-  }
-  const rows = catalogMovieRowsFromParsedJson(parsed);
-  if (rows.length === 0) {
-    setDevPasteStatus(
-      "No valid movie rows: need object(s) with a string metapath (and optional title, posterUrl, …).",
-    );
-    return;
-  }
-  moviesState.push(...rows);
-  devPasteJson.value = "";
-  const label =
-    rows.length === 1
-      ? `Added “${rows[0].title}”. Save catalog to publish.`
-      : `Added ${rows.length} movies. Save catalog to publish.`;
-  setDevPasteStatus(label);
-  renderMovieLists();
-}
-
-/**
- * Clears top status, save line, poster upload line; releases stuck Save state.
- *
- * @param {{ keepPageLoadSpinner?: boolean }} [opts]
- */
-function resetTransientCreatorUi(opts = {}) {
-  const keepPageLoadSpinner = opts.keepPageLoadSpinner === true;
-  if (saveStatus) saveStatus.textContent = "";
-  setDevPasteStatus("");
-  setPosterUploadStatus("");
-  setStatus("");
-  if (!keepPageLoadSpinner) {
-    hidePageLoadSpinner();
-  }
-  setSaveSpinnerVisible(false);
-  if (saveBusy) {
-    saveBusy = false;
-    if (saveBtn) saveBtn.disabled = false;
-  }
-}
-
-/**
- * @param {unknown} doc
- * @returns {{ editorAddress: string | null, dataSetId: number | null, chainId: number | null, providerId: number | null } | null}
- */
-function parseCatalogIdentity(doc) {
-  if (!doc || typeof doc !== "object" || doc === null) return null;
-  const d = /** @type {Record<string, unknown>} */ (doc);
-  const ed = d.editorAddress;
-  const editorAddress =
-    typeof ed === "string" && ed.trim() !== "" ? ed.trim() : null;
-  const ds = d.dataSetId;
-  const dataSetId = typeof ds === "number" && Number.isFinite(ds) ? ds : null;
-  const ch = d.chainId;
-  const chainId = typeof ch === "number" && Number.isFinite(ch) ? ch : null;
-  const pr = d.providerId;
-  const providerId = typeof pr === "number" && Number.isFinite(pr) ? pr : null;
-  if (
-    editorAddress == null &&
-    dataSetId == null &&
-    chainId == null &&
-    providerId == null
-  ) {
-    return null;
-  }
-  return { editorAddress, dataSetId, chainId, providerId };
-}
-
-/**
- * @param {string} a
- * @param {string} b
- */
 function sameEthAddress(a, b) {
   if (!a || !b) return false;
   return a.toLowerCase() === b.toLowerCase();
 }
 
-function refreshWalletRole() {
-  if (!roleLabel) return;
-  if (!catalogIdentity?.editorAddress) {
-    roleLabel.textContent = "";
-    return;
+function normalizeAddressOrNull(value) {
+  if (typeof value !== "string" || value.trim() === "") return null;
+  try {
+    return getAddress(/** @type {`0x${string}`} */ (value.trim()));
+  } catch {
+    return null;
   }
-  if (!window.ethereum) {
-    roleLabel.textContent = "Install a wallet extension";
-    return;
-  }
-  if (!connectedAddress) {
-    roleLabel.textContent = "Connect wallet";
-    return;
-  }
-  roleLabel.textContent = sameEthAddress(connectedAddress, catalogIdentity.editorAddress)
-    ? "Editor"
-    : "Viewer";
+}
+
+function isOwner() {
+  return Boolean(
+    creatorAddress && connectedAddress && sameEthAddress(creatorAddress, connectedAddress),
+  );
+}
+
+function queryCreatorAddress() {
+  const raw = new URLSearchParams(window.location.search).get("creator");
+  return normalizeAddressOrNull(raw);
+}
+
+function writeCreatorToUrl(addr) {
+  if (!addr) return;
+  const u = new URL(window.location.href);
+  u.searchParams.set("creator", addr);
+  window.history.replaceState({}, "", u.href);
 }
 
 async function refreshConnectedAccount() {
   const eth = window.ethereum;
-  if (!eth || typeof eth.request !== "function") return;
+  if (!eth || typeof eth.request !== "function") {
+    connectedAddress = null;
+    return;
+  }
   try {
-    const accounts = /** @type {string[]} */ (await eth.request({ method: "eth_accounts" }));
-    connectedAddress = accounts?.[0] ?? null;
-    refreshWalletRole();
-    refreshEditVisibility();
+    const accounts = /** @type {string[]} */ (
+      await eth.request({ method: "eth_accounts" })
+    );
+    connectedAddress = normalizeAddressOrNull(accounts?.[0] ?? null);
   } catch {
     connectedAddress = null;
-    refreshWalletRole();
-    refreshEditVisibility();
   }
 }
 
-function initWalletListeners() {
-  const eth = window.ethereum;
-  if (!eth || typeof eth.request !== "function") return;
-  if (typeof eth.on === "function") {
-    eth.on("accountsChanged", (accs) => {
-      const a = Array.isArray(accs) ? accs[0] : null;
-      connectedAddress = typeof a === "string" ? a : null;
-      refreshWalletRole();
-      refreshEditVisibility();
-    });
+function applyStoredSessionIfValid() {
+  if (!connectedAddress) {
+    sessionPrivateKey = null;
+    return;
   }
-}
-
-/**
- * @param {unknown} meta
- * @returns {string | null}
- */
-function assetIdFromMeta(meta) {
-  if (!meta || typeof meta !== "object" || meta === null) return null;
-  const f = /** @type {{ filstream?: unknown }} */ (meta).filstream;
-  if (f && typeof f === "object" && f !== null) {
-    const aid = /** @type {{ assetId?: unknown }} */ (f).assetId;
-    if (typeof aid === "string" && aid.trim() !== "") return aid.trim();
+  const stored = loadSessionKeyFromStorage();
+  if (!stored) {
+    sessionPrivateKey = null;
+    return;
   }
-  return null;
-}
-
-/**
- * @param {unknown} meta
- * @returns {string | null}
- */
-function posterUrlFromMetaJson(meta) {
-  if (
-    meta &&
-    typeof meta === "object" &&
-    meta !== null &&
-    typeof meta.poster === "object" &&
-    meta.poster !== null &&
-    typeof /** @type {{ url?: string }} */ (meta.poster).url === "string"
-  ) {
-    const u = /** @type {{ url?: string }} */ (meta.poster).url.trim();
-    if (u) return u;
+  if (!isSessionKeyRecoverable(stored)) {
+    sessionPrivateKey = null;
+    return;
   }
-  const m = meta && typeof meta === "object" && meta !== null ? meta : null;
-  const pb =
-    m &&
-    typeof m.playback === "object" &&
-    m.playback !== null &&
-    typeof /** @type {{ posterUrl?: string }} */ (m.playback).posterUrl === "string"
-      ? /** @type {{ posterUrl?: string }} */ (m.playback).posterUrl.trim()
-      : "";
-  return pb || null;
+  const root = normalizeAddressOrNull(stored.rootAddress);
+  if (!root || !sameEthAddress(root, connectedAddress)) {
+    sessionPrivateKey = null;
+    return;
+  }
+  sessionPrivateKey = stored.sessionPrivateKey;
 }
 
-function viewerBaseHref() {
-  return new URL("viewer.html", window.location.href).href;
-}
-
-function isEditorConnected() {
-  return Boolean(
-    catalogIdentity?.editorAddress &&
-      connectedAddress &&
-      sameEthAddress(connectedAddress, catalogIdentity.editorAddress),
+async function ensureSessionKey() {
+  if (sessionPrivateKey && connectedAddress) return sessionPrivateKey;
+  const provider = window.ethereum;
+  if (!provider || !connectedAddress) {
+    throw new Error("Connect wallet first.");
+  }
+  const { sessionPrivateKey: key, sessionExpirations } = await authorizeSessionKeyForUpload(
+    provider,
+    connectedAddress,
+    {
+      onTransactionSubmitted: (txHash) => {
+        setStatus(`Authorizing session key… ${txHash.slice(0, 10)}…`, "");
+      },
+      afterLoginSync: () => {
+        setStatus("Session key authorized.", "");
+      },
+    },
   );
+  sessionPrivateKey = key;
+  saveSessionKeyToStorage({
+    rootAddress: connectedAddress,
+    chainId: getFilstreamStoreConfig().storeChainId,
+    sessionPrivateKey: key,
+    sessionExpirations,
+  });
+  return key;
 }
 
-function refreshEditVisibility() {
-  if (!editSection || !editHint || !enableEditBtn || !editForm) return;
-  const editor = isEditorConnected();
-  const storageReady = Boolean(sessionPrivateKey && synapseRef && storageContext);
-  if (!catalogIdentity?.editorAddress) {
-    editSection.hidden = true;
-    if (heroActionsEl) heroActionsEl.hidden = true;
-    return;
-  }
-  if (heroActionsEl) heroActionsEl.hidden = false;
-  editSection.hidden = false;
-  if (!editor) {
-    editHint.textContent =
-      "Use “Sign-in to edit” with the wallet that published this catalog (the editor address on-chain).";
-    if (enableEditBtn) {
-      enableEditBtn.hidden = false;
-      enableEditBtn.textContent = "Sign-in to edit";
-    }
-    editForm.hidden = true;
-    if (posterBrowseBtn) posterBrowseBtn.disabled = true;
-    if (!storageReady) {
-      setPosterUploadStatus("");
-    }
-    return;
-  }
-  if (!storageReady) {
-    editSection.hidden = true;
-    if (editHint) editHint.textContent = "";
-    if (enableEditBtn) {
-      enableEditBtn.textContent = "Sign-in to edit";
-    }
-    enableEditBtn.hidden = false;
-    editForm.hidden = true;
-    if (posterBrowseBtn) posterBrowseBtn.disabled = true;
-    setPosterUploadStatus("");
-    return;
-  }
-  editSection.hidden = false;
-  if (editHint) {
-    editHint.textContent =
-      "Edits are saved as a new on-chain catalog piece. Removing a movie deletes its PDP pieces first, then updates the catalog.";
-  }
-  if (enableEditBtn) {
-    enableEditBtn.textContent = "Sign-in to edit";
-  }
-  enableEditBtn.hidden = true;
-  editForm.hidden = false;
-  if (nameInput && posterUrlInput) {
-    const cn = loadedCatalogRoot && /** @type {{ creatorName?: unknown }} */ (loadedCatalogRoot).creatorName;
-    const cpu =
-      loadedCatalogRoot && /** @type {{ creatorPosterUrl?: unknown }} */ (loadedCatalogRoot).creatorPosterUrl;
-    nameInput.value = typeof cn === "string" ? cn : "";
-    posterUrlInput.value = typeof cpu === "string" ? cpu : "";
-  }
-  if (posterBrowseBtn) {
-    posterBrowseBtn.disabled = false;
+async function resolveCreatorAddress() {
+  const fromQuery = queryCreatorAddress();
+  if (fromQuery) return fromQuery;
+  if (connectedAddress) return connectedAddress;
+  const latest = await readCatalogLatest({ limit: 1, activeOnly: true });
+  return latest[0]?.creator ?? null;
+}
+
+async function resolveProfilePictureUrlForPieceCid(pieceCid) {
+  const cid = String(pieceCid || "").trim();
+  if (!cid) return "";
+  try {
+    const cfg = getFilstreamStoreConfig();
+    return await resolveManifestUrl(cfg.storeProviderId, cid);
+  } catch {
+    return "";
   }
 }
 
-function buildPublishDoc() {
-  if (!catalogIdentity || !loadedCatalogRoot) {
-    throw new Error("Catalog not loaded");
+async function loadCreatorData() {
+  if (!creatorAddress) {
+    creatorEntries = [];
+    creatorUsername = "";
+    creatorProfilePicturePieceCid = "";
+    creatorProfilePictureUrl = "";
+    return;
   }
-  const ed = catalogIdentity.editorAddress;
-  if (!ed) {
-    throw new Error("Catalog has no editorAddress");
+  creatorUsername = await readCatalogUsername(creatorAddress);
+  creatorProfilePicturePieceCid = await readCatalogProfilePicturePieceCid(creatorAddress);
+  creatorProfilePictureUrl = await resolveProfilePictureUrlForPieceCid(
+    creatorProfilePicturePieceCid,
+  );
+  /** @type {import("../filstream-catalog-chain.mjs").CatalogEntry[]} */
+  const all = [];
+  let offset = 0;
+  const pageSize = 100;
+  for (let i = 0; i < 20; i++) {
+    const page = await readCatalogByCreator({
+      creatorAddress,
+      offset,
+      limit: pageSize,
+      activeOnly: false,
+    });
+    if (!page.length) break;
+    all.push(...page);
+    offset += page.length;
+    if (page.length < pageSize) break;
   }
-  const cn = nameInput?.value?.trim() ?? "";
-  const cpu = posterUrlInput?.value?.trim() ?? "";
-  /** @type {Record<string, unknown>} */
-  const doc = {
-    kind: "filstream v1",
-    editorAddress: ed,
-    movies: moviesState.map((m) => {
-      /** @type {{ title: string, metapath: string, posterUrl?: string, posterAnimUrl?: string, share?: string }} */
-      const row = { title: m.title, metapath: m.metapath };
-      if (m.posterUrl) row.posterUrl = m.posterUrl;
-      if (m.posterAnimUrl) row.posterAnimUrl = m.posterAnimUrl;
-      if (m.share) row.share = m.share;
-      return row;
-    }),
-  };
-  if (catalogIdentity.dataSetId != null) doc.dataSetId = catalogIdentity.dataSetId;
-  if (catalogIdentity.providerId != null) doc.providerId = catalogIdentity.providerId;
-  if (catalogIdentity.chainId != null) doc.chainId = catalogIdentity.chainId;
-  if (cn) doc.creatorName = cn;
-  if (cpu) doc.creatorPosterUrl = cpu;
+  creatorEntries = all;
+}
+
+async function manifestDocForEntry(entry) {
+  const cached = await loadManifestCache(entry.assetId);
+  if (cached?.manifestDoc) {
+    return cached.manifestDoc;
+  }
+  const manifestUrl = await resolveManifestUrl(entry.providerId, entry.manifestCid);
+  const res = await fetch(manifestUrl);
+  if (!res.ok) return null;
+  const doc = await res.json();
+  await saveManifestCache({
+    videoId: entry.assetId,
+    manifestUrl,
+    manifestDoc: doc,
+  });
   return doc;
 }
 
-/**
- * Ends the PDP upload session so the creator page returns to the non-edit state (hero “Sign-in to edit”);
- * in-memory catalog and `?catalog=` are unchanged. Wallet may stay connected.
- */
-function clearCreatorStorageSession() {
-  sessionPrivateKey = null;
-  sessionExpirations = null;
-  synapseRef = null;
-  storageContext = null;
+function posterFromManifestDoc(doc) {
+  if (!doc || typeof doc !== "object" || doc === null) return null;
+  const d = /** @type {Record<string, unknown>} */ (doc);
+  const poster =
+    d.poster && typeof d.poster === "object" && d.poster !== null
+      ? /** @type {{ url?: unknown }} */ (d.poster).url
+      : null;
+  if (typeof poster === "string" && poster.trim() !== "") return poster.trim();
+  const playback =
+    d.playback && typeof d.playback === "object" && d.playback !== null
+      ? /** @type {{ posterUrl?: unknown }} */ (d.playback)
+      : {};
+  return typeof playback.posterUrl === "string" && playback.posterUrl.trim() !== ""
+    ? playback.posterUrl.trim()
+    : null;
 }
 
-async function handleSaveCatalog() {
-  if (!storageContext || !synapseRef || !catalogIdentity?.dataSetId || saveBusy) return;
-  saveBusy = true;
-  if (saveStatus) saveStatus.textContent = "Saving…";
-  setSaveSpinnerVisible(true);
-  if (saveBtn) saveBtn.disabled = true;
-  try {
-    const doc = buildPublishDoc();
-    const assetId =
-      typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
-        ? crypto.randomUUID()
-        : `cat_${Date.now()}_${Math.random().toString(16).slice(2)}`;
-    const { pieceCid, catalogVersion: publishedRevision } = await publishFilstreamCatalogJson({
-      context: storageContext,
-      synapse: synapseRef,
-      assetId,
-      catalogDoc: doc,
-    });
-    loadedCatalogRoot = { ...doc, [CATALOG_JSON_VERSION_KEY]: publishedRevision };
-    const newCatalogUrl = await getPieceRetrievalUrl(storageContext, pieceCid);
-    clearCreatorStorageSession();
-    if (newCatalogUrl) {
-      catalogUrl = newCatalogUrl;
-      replaceBrowserUrlForCatalog(newCatalogUrl, catalogIdentity?.dataSetId ?? null);
-    }
-    if (saveStatus) saveStatus.textContent = "Saved.";
-    await applyHeroFromDoc(loadedCatalogRoot ?? {});
-    refreshEditVisibility();
-    renderMovieLists();
-    setStatus("");
-  } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
-    if (saveStatus) saveStatus.textContent = `Save failed: ${msg}`;
-  } finally {
-    saveBusy = false;
-    setSaveSpinnerVisible(false);
-    if (saveBtn) saveBtn.disabled = false;
+function updateActions() {
+  if (!enableEditBtn || !heroActionsEl) return;
+  heroActionsEl.hidden = false;
+  enableEditBtn.hidden = false;
+  if (sessionKeyNoteEl) {
+    sessionKeyNoteEl.hidden = true;
+    sessionKeyNoteEl.textContent = "";
   }
-}
-
-/**
- * @param {number} index
- */
-async function handleRemoveMovie(index) {
-  if (!storageContext || !synapseRef || !catalogIdentity || catalogIdentity.dataSetId == null) {
+  if (!connectedAddress) {
+    enableEditBtn.textContent = "Connect wallet";
     return;
   }
-  const row = moviesState[index];
-  if (!row) return;
-  if (
-    !window.confirm(
-      `Remove “${row.title}” from the catalog and delete its stored pieces? This cannot be undone.`,
-    )
-  ) {
+  if (!creatorAddress || !isOwner()) {
+    enableEditBtn.textContent = "Open my channel";
     return;
   }
-  const cfg = getFilstreamStoreConfig();
-  saveBusy = true;
-  if (saveStatus) saveStatus.textContent = "Removing…";
-  setSaveSpinnerVisible(true);
-  try {
-    const res = await fetch(row.metapath);
-    if (!res.ok) {
-      throw new Error(`meta.json HTTP ${res.status}`);
-    }
-    const meta = await res.json();
-    const assetId = assetIdFromMeta(meta);
-    if (!assetId) {
-      throw new Error(
-        "This listing has no filstream.assetId in meta.json — cannot delete PDP pieces automatically.",
-      );
-    }
-    const del = await deleteAllPiecesForAssetId({
-      context: storageContext,
-      synapse: synapseRef,
-      chainId: cfg.storeChainId,
-      dataSetId: catalogIdentity.dataSetId,
-      assetId,
-    });
-    if (del.errors.length > 0) {
-      throw new Error(del.errors[0] ?? "Delete failed");
-    }
-    moviesState.splice(index, 1);
-    renderMovieLists();
-    saveBusy = false;
-    await handleSaveCatalog();
-  } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
-    if (saveStatus) saveStatus.textContent = `Remove failed: ${msg}`;
-  } finally {
-    saveBusy = false;
-    setSaveSpinnerVisible(false);
+  enableEditBtn.textContent = sessionPrivateKey
+    ? "Refresh delete key"
+    : "Authorize delete key";
+  if (sessionKeyNoteEl) {
+    sessionKeyNoteEl.hidden = false;
+    sessionKeyNoteEl.textContent = sessionPrivateKey
+      ? "Delete key is ready. This key is only for removing videos."
+      : "Delete key is only needed for removing videos.";
   }
 }
 
-/**
- * Move the item at `fromIndex` so it sits before the row that was at `toIndex` (drop target).
- *
- * @param {number} fromIndex
- * @param {number} toIndex
- */
-function reorderMoviesByDrop(fromIndex, toIndex) {
-  if (fromIndex === toIndex) return;
-  const next = [...moviesState];
-  const [item] = next.splice(fromIndex, 1);
-  let insertAt = toIndex;
-  if (fromIndex < toIndex) insertAt = toIndex - 1;
-  next.splice(insertAt, 0, item);
-  moviesState.length = 0;
-  moviesState.push(...next);
-  renderMovieLists();
+function renderHero() {
+  if (!heroEl || !titleEl || !datasetLabel || !roleLabel) return;
+  heroEl.hidden = false;
+  if (posterImg) {
+    if (creatorProfilePictureUrl) {
+      posterImg.src = creatorProfilePictureUrl;
+      posterImg.hidden = false;
+    } else {
+      posterImg.hidden = true;
+    }
+  }
+  const name = creatorUsername && creatorUsername.trim() ? creatorUsername.trim() : "";
+  titleEl.textContent = name || (creatorAddress ? shortAddress(creatorAddress) : "Creator");
+  const active = creatorEntries.filter((x) => x.active).length;
+  const total = creatorEntries.length;
+  datasetLabel.textContent = creatorAddress
+    ? `${active} active videos · ${total} total · ${shortAddress(creatorAddress)}`
+    : "No creator selected";
+  roleLabel.textContent = isOwner()
+    ? "Creator"
+    : connectedAddress
+      ? "Viewer"
+      : "Connect wallet";
 }
 
-function clearMovieEditDropTargets() {
-  if (!movieEditList) return;
-  movieEditList.querySelectorAll(".creator-movie-edit-row--drop-target").forEach((el) => {
-    el.classList.remove("creator-movie-edit-row--drop-target");
-  });
-}
-
-function renderMovieEditList() {
-  if (!movieEditList) return;
+function renderEditSection() {
+  if (!editSection || !editHint || !editForm || !movieEditList || !saveBtn) return;
+  if (!isOwner()) {
+    editSection.hidden = true;
+    return;
+  }
+  editSection.hidden = false;
+  editForm.hidden = false;
+  editHint.textContent =
+    "Name and profile picture updates use wallet signature. Delete uses the delete key.";
+  if (nameInput && document.activeElement !== nameInput && !profileSaveBusy) {
+    nameInput.value = creatorUsername || "";
+  }
+  saveBtn.textContent = profileSaveBusy ? "Saving…" : "Save name";
+  saveBtn.disabled = profileSaveBusy || profilePosterBusy;
+  if (posterBrowseBtn) {
+    posterBrowseBtn.disabled = profileSaveBusy || profilePosterBusy;
+    posterBrowseBtn.textContent = profilePosterBusy ? "Uploading…" : "Browse…";
+  }
   movieEditList.innerHTML = "";
-  const storageReady = Boolean(sessionPrivateKey && synapseRef && storageContext);
-  moviesState.forEach((m, i) => {
+
+  for (const entry of creatorEntries) {
     const li = document.createElement("li");
     li.className = "creator-movie-edit-row";
     const title = document.createElement("span");
     title.className = "creator-movie-edit-title";
-    title.textContent = m.title;
+    title.textContent = entry.active ? entry.title : `${entry.title} (removed)`;
+    li.appendChild(title);
+
     const actions = document.createElement("div");
     actions.className = "creator-movie-edit-actions";
-    if (storageReady) {
-      const drag = document.createElement("span");
-      drag.className = "creator-movie-edit-drag";
-      drag.setAttribute("role", "button");
-      drag.tabIndex = 0;
-      drag.draggable = true;
-      drag.setAttribute("aria-label", "Drag to reorder");
-      drag.title = "Drag to reorder";
-      drag.textContent = "⋮⋮";
-      drag.addEventListener("dragstart", (e) => {
-        e.dataTransfer.effectAllowed = "move";
-        e.dataTransfer.setData("text/plain", String(i));
-        li.classList.add("creator-movie-edit-row--dragging");
+    if (entry.active) {
+      const delBtn = document.createElement("button");
+      delBtn.type = "button";
+      delBtn.className = "creator-row-btn creator-row-btn--danger";
+      delBtn.disabled = Boolean(deleteBusyByEntry[entry.entryId]);
+      delBtn.textContent = deleteBusyByEntry[entry.entryId] ? "Removing…" : "Remove";
+      delBtn.addEventListener("click", () => {
+        void handleDeleteEntry(entry.entryId);
       });
-      drag.addEventListener("dragend", () => {
-        li.classList.remove("creator-movie-edit-row--dragging");
-        clearMovieEditDropTargets();
-      });
-      const rm = document.createElement("button");
-      rm.type = "button";
-      rm.className = "creator-row-btn creator-row-btn--danger";
-      rm.textContent = "Remove";
-      rm.addEventListener("click", () => void handleRemoveMovie(i));
-      actions.append(rm);
-      li.append(drag, title, actions);
-      li.addEventListener("dragover", (e) => {
-        e.preventDefault();
-        e.dataTransfer.dropEffect = "move";
-        if (movieEditList) {
-          movieEditList.querySelectorAll(".creator-movie-edit-row--drop-target").forEach((el) => {
-            if (el !== li) el.classList.remove("creator-movie-edit-row--drop-target");
-          });
-        }
-        li.classList.add("creator-movie-edit-row--drop-target");
-      });
-      li.addEventListener("dragleave", (e) => {
-        if (e.relatedTarget instanceof Node && li.contains(e.relatedTarget)) return;
-        li.classList.remove("creator-movie-edit-row--drop-target");
-      });
-      li.addEventListener("drop", (e) => {
-        e.preventDefault();
-        clearMovieEditDropTargets();
-        const from = Number.parseInt(e.dataTransfer.getData("text/plain"), 10);
-        if (Number.isNaN(from)) return;
-        reorderMoviesByDrop(from, i);
-      });
-    } else {
-      li.append(title, actions);
+      actions.appendChild(delBtn);
     }
+    li.appendChild(actions);
     movieEditList.appendChild(li);
-  });
+  }
 }
 
-function renderMovieReadonlyList() {
-  if (!movieListEl || !catalogUrl) return;
+function renderMovieList() {
+  if (!catalogSection || !movieListEl) return;
+  catalogSection.hidden = false;
   movieListEl.innerHTML = "";
-  const chronological = [...moviesState];
-  const newestFirst = chronological.reverse();
-  newestFirst.forEach((m) => {
+  const active = creatorEntries.filter((x) => x.active);
+  if (!active.length) {
+    movieListEl.innerHTML = '<p class="creator-status">No active videos.</p>';
+    return;
+  }
+  for (const entry of active) {
     const a = document.createElement("a");
     a.className = "creator-catalog-row";
-    a.href = viewerHrefForMeta(
-      m.metapath,
-      catalogUrl,
-      viewerBaseHref(),
-      catalogIdentity?.dataSetId ?? datasetQueryParsed,
-    );
-    a.title = m.title;
+    a.href = buildViewerUrlForVideoId(entry.assetId);
+    a.target = "_blank";
+    a.rel = "noopener noreferrer";
 
-    const wrap = document.createElement("div");
-    wrap.className = "creator-catalog-poster-wrap";
-    if (m.posterUrl && m.posterAnimUrl) {
-      wrap.classList.add("creator-catalog-poster-wrap--anim");
-      const imgStill = document.createElement("img");
-      imgStill.className = "creator-catalog-poster creator-catalog-poster--still";
-      imgStill.src = m.posterUrl;
-      imgStill.alt = "";
-      imgStill.loading = "lazy";
-      const imgAnim = document.createElement("img");
-      imgAnim.className = "creator-catalog-poster creator-catalog-poster--motion";
-      imgAnim.src = m.posterAnimUrl;
-      imgAnim.alt = "";
-      imgAnim.loading = "lazy";
-      wrap.appendChild(imgStill);
-      wrap.appendChild(imgAnim);
-    } else if (m.posterUrl) {
-      const img = document.createElement("img");
-      img.className = "creator-catalog-poster";
-      img.src = m.posterUrl;
-      img.alt = "";
-      img.loading = "lazy";
-      wrap.appendChild(img);
-    }
+    const posterWrap = document.createElement("div");
+    posterWrap.className = "creator-catalog-poster-wrap";
+    const poster = document.createElement("img");
+    poster.className = "creator-catalog-poster creator-catalog-poster--still";
+    poster.alt = "";
+    poster.loading = "lazy";
+    poster.decoding = "async";
+    posterWrap.appendChild(poster);
 
-    const te = document.createElement("div");
-    te.className = "creator-catalog-title";
-    te.textContent = m.title;
+    const title = document.createElement("div");
+    title.className = "creator-catalog-title";
+    title.textContent = entry.title;
 
-    a.appendChild(wrap);
-    a.appendChild(te);
+    a.append(posterWrap, title);
     movieListEl.appendChild(a);
-  });
-}
-
-function renderMovieLists() {
-  renderMovieReadonlyList();
-  renderMovieEditList();
+  }
+  void hydrateMoviePosters(active);
 }
 
 /**
- * @param {Record<string, unknown>} doc
+ * @param {import("../filstream-catalog-chain.mjs").CatalogEntry[]} activeEntries
  */
-async function applyHeroFromDoc(doc) {
-  if (!heroEl || !titleEl) return;
-  const cn = typeof doc.creatorName === "string" ? doc.creatorName.trim() : "";
-  const cpu = typeof doc.creatorPosterUrl === "string" ? doc.creatorPosterUrl.trim() : "";
-  let title = cn || "Catalog";
-  let poster = cpu || null;
-
-  if (!cn && moviesState.length > 0) {
-    title = moviesState[0].title || title;
-    if (!poster && moviesState[0].posterUrl) {
-      poster = moviesState[0].posterUrl;
-    }
-  }
-  if (!poster && moviesState[0]?.metapath) {
+async function hydrateMoviePosters(activeEntries) {
+  if (!movieListEl) return;
+  const rows = movieListEl.querySelectorAll(".creator-catalog-row");
+  for (let i = 0; i < rows.length && i < activeEntries.length; i++) {
+    const entry = activeEntries[i];
+    const row = rows[i];
+    const img = /** @type {HTMLImageElement | null} */ (
+      row.querySelector(".creator-catalog-poster")
+    );
+    if (!img) continue;
     try {
-      const res = await fetch(moviesState[0].metapath);
-      if (res.ok) {
-        const meta = await res.json();
-        poster = posterUrlFromMetaJson(meta);
+      const doc = await manifestDocForEntry(entry);
+      const posterUrl = posterFromManifestDoc(doc);
+      if (posterUrl) img.src = posterUrl;
+      if (i === 0 && posterImg && posterUrl && posterImg.hidden) {
+        posterImg.src = posterUrl;
+        posterImg.hidden = false;
       }
     } catch {
       /* ignore */
     }
   }
-
-  titleEl.textContent = title;
-  document.title =
-    title && title !== "Catalog" ? `${title} · FilStream catalog` : "FilStream catalog · creator";
-  if (posterImg) {
-    if (poster) {
-      posterImg.removeAttribute("src");
-      posterImg.src = poster;
-      posterImg.hidden = false;
-    } else {
-      posterImg.removeAttribute("src");
-      posterImg.hidden = true;
-    }
-  }
-  heroEl.hidden = false;
 }
 
-/**
- * @param {unknown} doc
- */
-function applyCatalogIdentity(doc) {
-  if (!datasetLabel) return;
+function renderAll() {
+  renderHero();
+  updateActions();
+  renderEditSection();
+  renderMovieList();
+  if (!isOwner()) {
+    setPosterStatus("");
+  } else if (creatorProfilePicturePieceCid) {
+    setPosterStatus(`Current picture CID: ${creatorProfilePicturePieceCid}`);
+  } else {
+    setPosterStatus("No profile picture set.");
+  }
+}
 
-  if (doc == null) {
-    catalogIdentity = null;
-    if (heroActionsEl) heroActionsEl.hidden = true;
-    if (roleLabel) roleLabel.textContent = "";
-    refreshEditVisibility();
+async function refreshAll() {
+  if (!isCatalogConfigured()) {
+    setStatus("Catalog contract is not configured.", "err");
+    if (heroEl) heroEl.hidden = true;
+    if (editSection) editSection.hidden = true;
+    if (catalogSection) catalogSection.hidden = true;
     return;
   }
-
-  catalogIdentity = parseCatalogIdentity(doc);
-
-  if (!catalogIdentity) {
-    datasetLabel.textContent =
-      "This catalog has no dataSetId, providerId, chainId, or editorAddress fields.";
-    if (heroActionsEl) heroActionsEl.hidden = true;
-    if (roleLabel) roleLabel.textContent = "";
-    refreshEditVisibility();
-    return;
-  }
-
-  const parts = [];
-  if (catalogIdentity.dataSetId != null) {
-    parts.push(`Dataset ${catalogIdentity.dataSetId}`);
-  }
-  if (catalogIdentity.providerId != null) {
-    parts.push(`provider ${catalogIdentity.providerId}`);
-  }
-  if (catalogIdentity.chainId != null) {
-    parts.push(`chain ${catalogIdentity.chainId}`);
-  }
-  datasetLabel.textContent = parts.length ? parts.join(" · ") : "Catalog";
-
-  void refreshConnectedAccount();
-  refreshWalletRole();
-  refreshEditVisibility();
-}
-
-/**
- * @param {unknown} doc
- * @param {string} url Absolute `filstream_catalog.json` retrieval URL.
- */
-async function applyLoadedCatalogDoc(doc, url) {
-  loadedCatalogRoot =
-    doc && typeof doc === "object" && doc !== null
-      ? /** @type {Record<string, unknown>} */ (doc)
-      : null;
-  catalogUrl = url;
-  moviesState = moviesFromCatalog(doc);
-  applyCatalogIdentity(doc);
-  await applyHeroFromDoc(loadedCatalogRoot ?? {});
-  if (catalogSection) catalogSection.hidden = moviesState.length === 0;
-  resetTransientCreatorUi({ keepPageLoadSpinner: true });
-  renderMovieLists();
-}
-
-/**
- * @param {string} catalogUrlStr
- * @param {number | null} dataSetId
- */
-function replaceBrowserUrlForCatalog(catalogUrlStr, dataSetId) {
-  const u = new URL(window.location.href);
-  u.searchParams.set("catalog", catalogUrlStr);
-  if (dataSetId != null && Number.isFinite(dataSetId) && dataSetId >= 0) {
-    u.searchParams.set("dataset", String(dataSetId));
-  }
-  history.replaceState({}, "", u);
-}
-
-/**
- * If the loaded URL points at an old piece but a newer catalog exists on-chain, switch to it.
- * Old catalog JSON may omit `chainId`; we use the app store config chain (same as viewer recovery).
- * Clears transient status/save/upload lines, reapplies identity + hero + address bar, awaits wallet
- * account refresh (editor vs viewer), then re-renders lists in `finally` so viewer links use the new `?catalog=`.
- *
- * @param {{ quiet?: boolean }} [opts] If `quiet`, do not set status text (initial load keeps the page spinner only).
- */
-async function upgradeCatalogFromChainIfNewer(opts = {}) {
-  const quiet = opts.quiet === true;
+  showPageLoadSpinner();
   try {
-    if (catalogIdentity?.dataSetId == null) {
-      return;
-    }
-    const cfg = getFilstreamStoreConfig();
-    const chainId =
-      catalogIdentity.chainId != null && Number.isFinite(catalogIdentity.chainId)
-        ? catalogIdentity.chainId
-        : cfg.storeChainId;
-    if (!Number.isFinite(chainId)) {
-      return;
-    }
-    if (!quiet) {
-      setStatus("Checking for newer catalog on-chain…");
-    }
-    const refreshed = await fetchLatestCatalogJsonForDataSet({
-      chainId,
-      dataSetId: catalogIdentity.dataSetId,
-      providerId: catalogIdentity.providerId,
-    });
-    if (!refreshed?.doc || typeof refreshed.doc !== "object") {
-      return;
-    }
-    const nextUrl = refreshed.retrievalUrl.trim();
-    const prevUrl = catalogUrl?.trim() ?? "";
-    if (!nextUrl || nextUrl === prevUrl) {
-      return;
-    }
-    resetTransientCreatorUi({ keepPageLoadSpinner: true });
-    catalogUrl = nextUrl;
-    loadedCatalogRoot =
-      refreshed.doc && typeof refreshed.doc === "object" && refreshed.doc !== null
-        ? /** @type {Record<string, unknown>} */ (refreshed.doc)
-        : loadedCatalogRoot;
-    moviesState = moviesFromCatalog(refreshed.doc);
-    applyCatalogIdentity(refreshed.doc);
-    await applyHeroFromDoc(loadedCatalogRoot ?? {});
-    if (catalogSection) catalogSection.hidden = moviesState.length === 0;
-    if (catalogIdentity.dataSetId != null) {
-      replaceBrowserUrlForCatalog(catalogUrl, catalogIdentity.dataSetId);
-    }
     await refreshConnectedAccount();
-  } finally {
+    applyStoredSessionIfValid();
+    creatorAddress = await resolveCreatorAddress();
+    if (!creatorAddress) {
+      setStatus("No creator found yet. Upload a video to create one.", "");
+      if (heroEl) heroEl.hidden = true;
+      if (editSection) editSection.hidden = true;
+      if (catalogSection) catalogSection.hidden = true;
+      return;
+    }
+    writeCreatorToUrl(creatorAddress);
+    await loadCreatorData();
+    renderAll();
     setStatus("");
-    renderMovieLists();
+  } catch (e) {
+    setStatus(e instanceof Error ? e.message : String(e), "err");
+  } finally {
+    hidePageLoadSpinner();
   }
 }
 
-async function handleSignInToEdit() {
-  const eth = window.ethereum;
-  if (!eth || !catalogIdentity?.dataSetId || !catalogIdentity.providerId || !catalogIdentity.editorAddress) {
+async function handleSaveProfileName() {
+  if (!isOwner() || !nameInput || !saveBtn) return;
+  const provider = window.ethereum;
+  if (!provider || !connectedAddress) {
+    setSaveStatus("Connect wallet first.", "err");
+    return;
+  }
+  const nextName = nameInput.value.trim();
+  if (!nextName) {
+    setSaveStatus("Username cannot be empty.", "err");
+    return;
+  }
+  profileSaveBusy = true;
+  setSaveSpinnerVisible(true);
+  setSaveStatus("Saving name on-chain…");
+  renderEditSection();
+  try {
+    await setCatalogUsernameWithWallet({
+      provider,
+      walletAddress: connectedAddress,
+      username: nextName,
+      onTransactionSubmitted: (txHash) => {
+        setSaveStatus(`Transaction sent: ${txHash.slice(0, 10)}…`);
+      },
+    });
+    creatorUsername = await readCatalogUsername(connectedAddress);
+    setSaveStatus("Name updated.");
+    renderAll();
+  } catch (e) {
+    setSaveStatus(e instanceof Error ? e.message : String(e), "err");
+  } finally {
+    profileSaveBusy = false;
+    setSaveSpinnerVisible(false);
+    renderEditSection();
+  }
+}
+
+async function ensureSessionForStorageOps() {
+  if (!connectedAddress) {
+    throw new Error("Connect wallet first.");
+  }
+  const stored = loadSessionKeyFromStorage();
+  const root = normalizeAddressOrNull(stored?.rootAddress ?? null);
+  if (
+    stored &&
+    isSessionKeyRecoverable(stored) &&
+    root &&
+    sameEthAddress(root, connectedAddress)
+  ) {
+    sessionPrivateKey = stored.sessionPrivateKey;
+    return {
+      sessionPrivateKey: stored.sessionPrivateKey,
+      sessionExpirations: expirationsForWizard(stored),
+    };
+  }
+  await ensureSessionKey();
+  const refreshed = loadSessionKeyFromStorage();
+  const refreshedRoot = normalizeAddressOrNull(refreshed?.rootAddress ?? null);
+  if (
+    !refreshed ||
+    !isSessionKeyRecoverable(refreshed) ||
+    !refreshedRoot ||
+    !sameEthAddress(refreshedRoot, connectedAddress)
+  ) {
+    throw new Error("Session key not available for storage upload.");
+  }
+  sessionPrivateKey = refreshed.sessionPrivateKey;
+  return {
+    sessionPrivateKey: refreshed.sessionPrivateKey,
+    sessionExpirations: expirationsForWizard(refreshed),
+  };
+}
+
+/**
+ * @param {File | null | undefined} file
+ */
+async function handleProfilePosterSelected(file) {
+  if (!file) return;
+  if (!isOwner() || !connectedAddress) {
+    setPosterStatus("Open your own channel to edit profile picture.", "err");
+    return;
+  }
+  if (!file.type.startsWith("image/")) {
+    setPosterStatus("Please select an image file.", "err");
+    return;
+  }
+  const provider = window.ethereum;
+  if (!provider) {
+    setPosterStatus("No wallet provider found.", "err");
     return;
   }
 
-  if (sessionPrivateKey && synapseRef && storageContext) {
-    refreshEditVisibility();
-    return;
-  }
-
-  const initialWaitLabel = connectedAddress ? "Authorizing…" : "Connecting…";
-  if (enableEditBtn) {
-    enableEditBtn.disabled = true;
-    enableEditBtn.textContent = initialWaitLabel;
-  }
-  if (saveStatus) saveStatus.textContent = "";
+  profilePosterBusy = true;
+  setSaveSpinnerVisible(true);
+  setPosterStatus("Uploading profile picture…");
+  setSaveStatus("Uploading profile picture piece…");
+  renderEditSection();
 
   try {
-    if (!connectedAddress) {
-      const accounts = /** @type {string[]} */ (
-        await eth.request({ method: "eth_requestAccounts" })
-      );
-      connectedAddress = accounts?.[0] ?? null;
-      refreshWalletRole();
-      if (connectedAddress && enableEditBtn) {
-        enableEditBtn.textContent = "Authorizing…";
-      }
-    }
-
-    if (!connectedAddress) {
-      return;
-    }
-
-    if (!sameEthAddress(connectedAddress, catalogIdentity.editorAddress)) {
-      if (saveStatus) {
-        saveStatus.textContent =
-          "This wallet is not the catalog editor. Switch accounts in your wallet, then try Sign-in to edit again.";
-      }
-      return;
-    }
-
-    const auth = await authorizeSessionKeyForUpload(eth, connectedAddress, {});
-    sessionPrivateKey = auth.sessionPrivateKey;
-    sessionExpirations = auth.sessionExpirations;
     const cfg = getFilstreamStoreConfig();
-    const syn = await createSynapseForSession(
+    const session = await ensureSessionForStorageOps();
+    const synapse = await createSynapseForSession(
       {
         rpcUrl: cfg.storeRpcUrl,
         chainId: cfg.storeChainId,
         source: cfg.storeSource,
       },
       connectedAddress,
-      sessionPrivateKey,
-      sessionExpirations,
+      session.sessionPrivateKey,
+      session.sessionExpirations,
     );
-    synapseRef = syn;
-    storageContext = await openDataSetContextForCatalog({
-      synapse: syn,
-      providerId: catalogIdentity.providerId,
-      dataSetId: catalogIdentity.dataSetId,
-      catalogChainId: catalogIdentity.chainId,
+    const filstreamId = ensureFilstreamId(cfg);
+    const { context } = await resolveOrCreateDataSet({
+      synapse,
+      providerId: cfg.storeProviderId,
+      clientAddress: connectedAddress,
+      filstreamId,
     });
-    await flushDeferredPieceDeletions({
-      context: storageContext,
-      dataSetId: catalogIdentity.dataSetId,
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    const uploaded = await publishCreatorPosterImage({
+      context,
+      synapse,
+      bytes,
+      assetId: buildCreatorProfileAssetId(connectedAddress),
     });
-    refreshEditVisibility();
-    renderMovieLists();
+    await setCatalogProfilePicturePieceCidWithWallet({
+      provider,
+      walletAddress: connectedAddress,
+      pieceCid: uploaded.pieceCid,
+      onTransactionSubmitted: (txHash) => {
+        setSaveStatus(`Profile tx: ${txHash.slice(0, 10)}…`);
+      },
+    });
+    creatorProfilePicturePieceCid = uploaded.pieceCid;
+    creatorProfilePictureUrl =
+      uploaded.retrievalUrl || (await resolveProfilePictureUrlForPieceCid(uploaded.pieceCid));
+    if (posterImg && creatorProfilePictureUrl) {
+      posterImg.src = creatorProfilePictureUrl;
+      posterImg.hidden = false;
+    }
+    setPosterStatus("Profile picture updated.");
+    setSaveStatus("Profile picture updated.");
+    renderAll();
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
-    if (saveStatus) saveStatus.textContent = `Sign-in failed: ${msg}`;
+    setPosterStatus(msg, "err");
+    setSaveStatus(msg, "err");
   } finally {
-    if (enableEditBtn) {
-      enableEditBtn.disabled = false;
-      enableEditBtn.textContent = "Sign-in to edit";
-    }
-    refreshWalletRole();
-    refreshEditVisibility();
+    profilePosterBusy = false;
+    setSaveSpinnerVisible(false);
+    renderEditSection();
   }
 }
 
-function wireEditControls() {
-  if (enableEditBtn) {
-    enableEditBtn.addEventListener("click", () => void handleSignInToEdit());
-  }
-  if (saveBtn) {
-    saveBtn.addEventListener("click", () => void handleSaveCatalog());
-  }
-  if (devPasteAddBtn) {
-    devPasteAddBtn.addEventListener("click", () => handleAddPastedMovie());
-  }
-  if (nameInput) {
-    nameInput.addEventListener("input", () => {
-      /* optional live hero update */
-    });
-  }
-}
-
-/**
- * @param {File} file
- */
-async function handleCreatorPosterFileSelected(file) {
-  if (!storageContext || !synapseRef || !catalogIdentity?.dataSetId) {
-    setPosterUploadStatus("Sign-in to edit first (wallet + storage session).");
-    return;
-  }
-  if (!file.type.startsWith("image/")) {
-    setPosterUploadStatus("Choose an image file.");
-    return;
-  }
-  const ds = catalogIdentity.dataSetId;
-  setPosterUploadStatus("Uploading…");
+async function handleDeleteEntry(entryId) {
+  if (!isOwner() || !connectedAddress) return;
+  deleteBusyByEntry[entryId] = true;
+  renderEditSection();
   try {
-    const buf = new Uint8Array(await file.arrayBuffer());
-    const assetId =
-      typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
-        ? crypto.randomUUID()
-        : `poster_${Date.now()}_${Math.random().toString(16).slice(2)}`;
-    const { pieceCid, retrievalUrl } = await publishCreatorPosterImage({
-      context: storageContext,
-      synapse: synapseRef,
-      bytes: buf,
-      assetId,
+    const session = await ensureSessionForStorageOps();
+    await deleteCatalogEntryWithSessionKey({
+      claimedUser: connectedAddress,
+      sessionPrivateKey: session.sessionPrivateKey,
+      entryId,
+      onTransactionSubmitted: (txHash) => {
+        setSaveStatus(`Remove tx: ${txHash.slice(0, 10)}…`);
+      },
     });
-    const key = creatorPosterPieceStorageKey(ds);
-    const prevCid = (() => {
-      try {
-        return localStorage.getItem(key);
-      } catch {
-        return null;
-      }
-    })();
-    if (prevCid && prevCid !== pieceCid) {
-      enqueueDeferredPieceDeletion(ds, prevCid, CREATOR_POSTER_REPLACE_DELETE_DELAY_MS);
-    }
-    try {
-      localStorage.setItem(key, pieceCid);
-    } catch {
-      /* private mode */
-    }
-    if (posterUrlInput) {
-      posterUrlInput.value = retrievalUrl;
-    }
-    if (loadedCatalogRoot && typeof loadedCatalogRoot === "object") {
-      loadedCatalogRoot.creatorPosterUrl = retrievalUrl;
-    }
-    await applyHeroFromDoc(loadedCatalogRoot ?? {});
-    setPosterUploadStatus("Poster uploaded. Save catalog to publish.");
-    await flushDeferredPieceDeletions({ context: storageContext, dataSetId: ds });
+    setSaveStatus("Video removed.");
+    await loadCreatorData();
+    renderAll();
   } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
-    setPosterUploadStatus(`Upload failed: ${msg}`);
+    setSaveStatus(e instanceof Error ? e.message : String(e), "err");
+  } finally {
+    deleteBusyByEntry[entryId] = false;
+    renderEditSection();
   }
 }
 
-function wirePosterControls() {
-  const triggerPosterFile = () => {
-    if (!posterFileInput) return;
-    posterFileInput.click();
-  };
-  if (posterBrowseBtn && posterFileInput) {
-    posterBrowseBtn.addEventListener("click", () => {
-      if (posterBrowseBtn.disabled) return;
-      triggerPosterFile();
+async function handlePrimaryAction() {
+  const provider = window.ethereum;
+  if (!provider || typeof provider.request !== "function") {
+    setStatus("Install a browser wallet extension.", "err");
+    return;
+  }
+  if (!connectedAddress) {
+    try {
+      await provider.request({ method: "eth_requestAccounts" });
+      await refreshAll();
+    } catch (e) {
+      setStatus(e instanceof Error ? e.message : String(e), "err");
+    }
+    return;
+  }
+  if (!creatorAddress || !isOwner()) {
+    creatorAddress = connectedAddress;
+    writeCreatorToUrl(creatorAddress);
+    await refreshAll();
+    return;
+  }
+  try {
+    sessionPrivateKey = null;
+    await ensureSessionKey();
+    setStatus("Session key ready.");
+    renderAll();
+  } catch (e) {
+    setStatus(e instanceof Error ? e.message : String(e), "err");
+  }
+}
+
+function bindEvents() {
+  enableEditBtn?.addEventListener("click", () => {
+    void handlePrimaryAction();
+  });
+  saveBtn?.addEventListener("click", () => {
+    void handleSaveProfileName();
+  });
+  posterBrowseBtn?.addEventListener("click", () => {
+    posterFileInput?.click();
+  });
+  posterFileInput?.addEventListener("change", () => {
+    const file = posterFileInput.files?.[0];
+    void handleProfilePosterSelected(file);
+    posterFileInput.value = "";
+  });
+  const eth = window.ethereum;
+  if (eth && typeof eth.on === "function") {
+    eth.on("accountsChanged", () => {
+      void refreshAll();
     });
   }
-  if (posterFileInput) {
-    posterFileInput.addEventListener("change", () => {
-      const f = posterFileInput.files?.[0];
-      posterFileInput.value = "";
-      if (f) {
-        void handleCreatorPosterFileSelected(f);
-      }
-    });
-  }
 }
 
-initWalletListeners();
-wireEditControls();
-wirePosterControls();
-
-const params = new URLSearchParams(window.location.search);
-const catalogUrlRaw = params.get("catalog");
-catalogUrl =
-  catalogUrlRaw && /^https?:\/\//i.test(catalogUrlRaw.trim())
-    ? catalogUrlRaw.trim()
-    : null;
-const datasetQueryRaw = params.get("dataset");
-if (datasetQueryRaw && datasetQueryRaw.trim() !== "") {
-  const n = Number.parseInt(datasetQueryRaw.trim(), 10);
-  if (Number.isFinite(n) && n >= 0) {
-    datasetQueryParsed = n;
-  } else {
-    console.warn(
-      "[filstream creator] Ignoring invalid dataset query param (expected non-negative integer).",
-    );
-  }
-}
-
-if (catalogUrlRaw && !catalogUrl) {
-  console.warn(
-    "[filstream creator] Ignoring invalid catalog query param (expected absolute http(s) URL).",
-  );
-}
-
-if (!catalogUrl && datasetQueryParsed == null) {
-  setStatus(
-    "Missing ?catalog= (absolute https URL) or ?dataset= (PDP data set id to load from chain).",
-    "err",
-  );
-} else {
-  void (async () => {
-    showPageLoadSpinner();
-    /** @type {Error | null} */
-    let loadError = null;
-
-    if (catalogUrl) {
-      try {
-        const res = await fetch(catalogUrl);
-        if (!res.ok) {
-          loadError = new Error(`Catalog HTTP ${res.status}`);
-        } else {
-          const doc = await res.json();
-          await applyLoadedCatalogDoc(doc, catalogUrl);
-          if (
-            datasetQueryParsed != null &&
-            catalogIdentity?.dataSetId != null &&
-            datasetQueryParsed !== catalogIdentity.dataSetId
-          ) {
-            console.warn(
-              "[filstream creator] ?dataset= does not match catalog dataSetId; using catalog identity.",
-            );
-          }
-          try {
-            await upgradeCatalogFromChainIfNewer({ quiet: true });
-          } finally {
-            hidePageLoadSpinner();
-          }
-          return;
-        }
-      } catch (e) {
-        loadError = e instanceof Error ? e : new Error(String(e));
-      }
-    }
-
-    if (datasetQueryParsed != null) {
-      const cfg = getFilstreamStoreConfig();
-      const recovered = await fetchLatestCatalogJsonForDataSet({
-        chainId: cfg.storeChainId,
-        dataSetId: datasetQueryParsed,
-      });
-      if (recovered?.doc && typeof recovered.doc === "object") {
-        await applyLoadedCatalogDoc(recovered.doc, recovered.retrievalUrl.trim());
-        const ds = catalogIdentity?.dataSetId ?? datasetQueryParsed;
-        replaceBrowserUrlForCatalog(catalogUrl, ds);
-        try {
-          await upgradeCatalogFromChainIfNewer({ quiet: true });
-        } finally {
-          hidePageLoadSpinner();
-        }
-        if (loadError) {
-          console.warn(
-            "[filstream creator] Recovered using on-chain catalog (catalog URL was missing or failed):",
-            loadError.message,
-          );
-        }
-        return;
-      }
-    }
-
-    applyCatalogIdentity(null);
-    if (heroEl) heroEl.hidden = true;
-    if (catalogSection) catalogSection.hidden = true;
-    const hint =
-      datasetQueryParsed != null
-        ? " On-chain recovery failed (wrong network: set window.__FILSTREAM_CONFIG__ storeRpcUrl / storeChainId to match this data set)."
-        : "";
-    hidePageLoadSpinner();
-    setStatus(
-      `Could not load catalog${loadError ? `: ${loadError.message}` : ""}.${hint}`,
-      "err",
-    );
-  })();
-}
+bindEvents();
+void refreshAll();

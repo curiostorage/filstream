@@ -28,28 +28,50 @@ import {
   requestInjectedProviders,
   subscribeInjectedWallets,
 } from "./eip6963.mjs";
-import { filstreamBrandLit } from "./filstream-brand.mjs";
+import { filstreamHeaderLit } from "./filstream-brand.mjs";
 import { broadcastViewTemplate } from "./filstream-broadcast-view.mjs";
 import {
-  buildReviewViewerIframeSrc,
+  buildViewerUrlForVideoId,
   ensureFilstreamId,
   getFilstreamStoreConfig,
-  resolveCatalogJsonUrlFromFinalize,
-  resolveMetaJsonUrlFromFinalize,
+  resolveVideoIdFromFinalize,
 } from "./filstream-config.mjs";
+import {
+  FUNDING_MIN_TOPUP_WEI,
+  FUNDING_TARGET_DENOMINATOR,
+  FUNDING_TARGET_NUMERATOR,
+  SESSION_ACTIVITY_HEARTBEAT_MS,
+  SESSION_CLEANUP_LOCK_TTL_MS,
+  SESSION_RETIRE_CLEANUP_INTERVAL_MS,
+  SESSION_UPLOAD_ACTIVITY_STALE_MS,
+  STORE_PHASE_FINALIZE_NOTE,
+  USDFC_DECIMALS,
+  USDFC_ONE,
+  WIZARD_MAX_STEP,
+} from "./filstream-constants.mjs";
 import { publishMetadataForm } from "./publish-metadata.mjs";
 import {
   authorizeSessionKeyForUpload,
+  revokeSessionKeyWithWallet,
+  sessionSignerAddressFromPrivateKey,
+  sweepSessionKeyBalanceToRoot,
   minExpirationSummaryLocal,
 } from "./session-key-bootstrap.mjs";
 import {
+  FILSTREAM_SESSION_CHANNEL_NAME,
+  FILSTREAM_SESSION_CLEANUP_LOCK_KEY,
+  FILSTREAM_SESSION_STORAGE_KEY,
   clearSessionKeyFromStorage,
   clearWalletFromStorage,
   expirationsForWizard,
   isSessionKeyRecoverable,
   loadSessionKeyFromStorage,
+  loadRetiredSessionKeysFromStorage,
   loadWalletFromStorage,
+  patchRetiredSessionKeyInStorage,
+  removeRetiredSessionKeyFromStorage,
   saveSessionKeyToStorage,
+  sessionKeyIdFromPrivateKey,
   saveWalletToStorage,
 } from "./session-key-storage.mjs";
 import { uploadConfigurePanel } from "./upload-configure.mjs";
@@ -91,12 +113,6 @@ function formatWizardError(e) {
   return parts.length > 0 ? parts.join("\n\n") : String(e);
 }
 
-const WIZARD_MAX_STEP = 5;
-
-/** PDP finalize phase copy; shown under the upload bar while {@link finalizeStoreUpload} runs. */
-const STORE_PHASE_FINALIZE_NOTE =
-  "Finalizing playlists, manifest, and on-chain commit…";
-
 /**
  * @typedef {{ [permissionHash: string]: string | number | bigint }} StoreSessionExpirations
  * @typedef {{
@@ -120,15 +136,15 @@ const STORE_PHASE_FINALIZE_NOTE =
  *   finalized: boolean,
  *   committedCount: number,
  *   transactionHash: string | null,
+ *   catalogTransactionHash: string | null,
+ *   videoId: string,
+ *   assetId: string,
  *   masterAppUrl: string | null,
  *   manifestUrl: string | null,
- *   metaJsonUrl: string | null,
+ *   manifestPieceCid: string | null,
  *   posterUrl: string | null,
  *   posterAnimUrl: string | null,
- *   catalogJsonUrl: string | null,
  *   dataSetId: number | null,
- *   catalogVersion: number | null,
- *   catalogPieceCid: string | null,
  * }} StoreFinalizeResponse
  */
 
@@ -138,6 +154,7 @@ const filstreamEvents = { filstreamEventTarget: new EventTarget() };
 const storeRuntime = {
   uploadId: "",
   assetId: "",
+  sessionKeyId: "",
   /** @type {import("./browser-store.mjs").BrowserFilstreamUploadSession | null} */
   session: null,
   initPromise: null,
@@ -150,6 +167,21 @@ const storeRuntime = {
 /** Single in-flight funding preflight for step 2 (session + wallet + source file). */
 let fundingPreflightPromise = null;
 
+const SESSION_TAB_ID =
+  typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+    ? crypto.randomUUID()
+    : `tab-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+/** @type {BroadcastChannel | null} */
+let sessionCoordChannel = null;
+/** @type {Map<string, number>} */
+const localUploadsBySessionKey = new Map();
+/** @type {Map<string, { updatedAtMs: number, activeKeyIds: Set<string> }>} */
+const remoteUploadStateByTab = new Map();
+let sessionHeartbeatIntervalId = 0;
+let retiredCleanupIntervalId = 0;
+let retiredCleanupPromise = null;
+let retiredCleanupWantsRevoke = false;
+
 
 /** PDP ingest is deferred until Fund wallet + session key exist; backlog preserves segment order (no cap / drops). */
 /** @type {{ eventType: string, detail: unknown }[]} */
@@ -161,6 +193,302 @@ function randomAssetId() {
     return `asset_${crypto.randomUUID()}`;
   }
   return `asset_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+}
+
+function cleanupStaleRemoteUploadState() {
+  const now = Date.now();
+  for (const [tabId, state] of remoteUploadStateByTab.entries()) {
+    if (now - state.updatedAtMs > SESSION_UPLOAD_ACTIVITY_STALE_MS) {
+      remoteUploadStateByTab.delete(tabId);
+    }
+  }
+}
+
+/**
+ * @param {unknown} msg
+ */
+function broadcastSessionCoordMessage(msg) {
+  if (!sessionCoordChannel) return;
+  try {
+    sessionCoordChannel.postMessage(msg);
+  } catch {
+    /* no-op */
+  }
+}
+
+function localActiveSessionKeyIds() {
+  return [...localUploadsBySessionKey.entries()]
+    .filter(([, count]) => count > 0)
+    .map(([keyId]) => keyId);
+}
+
+function publishLocalUploadActivity() {
+  cleanupStaleRemoteUploadState();
+  broadcastSessionCoordMessage({
+    type: "uploads",
+    tabId: SESSION_TAB_ID,
+    sentAtMs: Date.now(),
+    activeKeyIds: localActiveSessionKeyIds(),
+  });
+}
+
+/**
+ * @param {string} sessionKeyId
+ * @param {number} delta
+ */
+function mutateLocalUploadActivity(sessionKeyId, delta) {
+  const keyId = String(sessionKeyId || "").trim().toLowerCase();
+  if (!keyId) return;
+  const prev = localUploadsBySessionKey.get(keyId) ?? 0;
+  const next = prev + delta;
+  if (next <= 0) {
+    localUploadsBySessionKey.delete(keyId);
+  } else {
+    localUploadsBySessionKey.set(keyId, next);
+  }
+  publishLocalUploadActivity();
+}
+
+/**
+ * @param {string} keyId
+ * @returns {boolean}
+ */
+function sessionKeyInUseAcrossTabs(keyId) {
+  const wanted = String(keyId || "").trim().toLowerCase();
+  if (!wanted) return false;
+  if ((localUploadsBySessionKey.get(wanted) ?? 0) > 0) return true;
+  cleanupStaleRemoteUploadState();
+  for (const state of remoteUploadStateByTab.values()) {
+    if (state.activeKeyIds.has(wanted)) return true;
+  }
+  return false;
+}
+
+/**
+ * @param {string} keyId
+ * @returns {boolean}
+ */
+function tryAcquireSessionCleanupLock(keyId) {
+  if (typeof localStorage === "undefined") return true;
+  const wanted = String(keyId || "").trim().toLowerCase();
+  if (!wanted) return false;
+  const now = Date.now();
+  try {
+    const raw = localStorage.getItem(FILSTREAM_SESSION_CLEANUP_LOCK_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (
+        parsed &&
+        typeof parsed === "object" &&
+        typeof parsed.expiresAtMs === "number" &&
+        parsed.expiresAtMs > now &&
+        parsed.ownerTabId !== SESSION_TAB_ID
+      ) {
+        return false;
+      }
+    }
+  } catch {
+    /* ignore parse errors */
+  }
+  const lock = {
+    version: 1,
+    ownerTabId: SESSION_TAB_ID,
+    keyId: wanted,
+    expiresAtMs: now + SESSION_CLEANUP_LOCK_TTL_MS,
+  };
+  localStorage.setItem(FILSTREAM_SESSION_CLEANUP_LOCK_KEY, JSON.stringify(lock));
+  return true;
+}
+
+/**
+ * @param {string} keyId
+ */
+function releaseSessionCleanupLock(keyId) {
+  if (typeof localStorage === "undefined") return;
+  const wanted = String(keyId || "").trim().toLowerCase();
+  if (!wanted) return;
+  try {
+    const raw = localStorage.getItem(FILSTREAM_SESSION_CLEANUP_LOCK_KEY);
+    if (!raw) return;
+    const parsed = JSON.parse(raw);
+    if (
+      parsed &&
+      typeof parsed === "object" &&
+      parsed.ownerTabId === SESSION_TAB_ID &&
+      parsed.keyId === wanted
+    ) {
+      localStorage.removeItem(FILSTREAM_SESSION_CLEANUP_LOCK_KEY);
+    }
+  } catch {
+    /* ignore parse errors */
+  }
+}
+
+/**
+ * @param {{ attemptRevoke: boolean }} input
+ */
+async function runRetiredSessionKeyCleanup(input) {
+  const root = wizardState.walletAddress;
+  const provider = wizardState.eip1193Provider;
+  const retiredKeys = loadRetiredSessionKeysFromStorage();
+  for (const retired of retiredKeys) {
+    const keyId = retired.keyId.toLowerCase();
+    if (!keyId) continue;
+    if (sessionKeyInUseAcrossTabs(keyId)) continue;
+    if (!tryAcquireSessionCleanupLock(keyId)) continue;
+    try {
+      if (sessionKeyInUseAcrossTabs(keyId)) continue;
+      patchRetiredSessionKeyInStorage(keyId, {
+        state: "sweep_pending",
+        lastError: "",
+      });
+      const stored = loadSessionKeyFromStorage();
+      if (!stored?.rootAddress) continue;
+      try {
+        const sweep = await sweepSessionKeyBalanceToRoot({
+          sessionPrivateKey: retired.sessionPrivateKey,
+          rootAddress: stored.rootAddress,
+        });
+        patchRetiredSessionKeyInStorage(keyId, {
+          ...(sweep.txHash ? { sweepTxHash: sweep.txHash } : {}),
+          state: "sweep_pending",
+          lastError: "",
+        });
+      } catch (e) {
+        patchRetiredSessionKeyInStorage(keyId, {
+          lastError: e instanceof Error ? e.message : String(e),
+        });
+        continue;
+      }
+
+      let revoked = false;
+      if (
+        input.attemptRevoke &&
+        provider &&
+        root &&
+        stored.rootAddress.toLowerCase() === root.toLowerCase()
+      ) {
+        try {
+          const revoke = await revokeSessionKeyWithWallet({
+            provider,
+            walletAddress: root,
+            sessionSignerAddress: sessionSignerAddressFromPrivateKey(
+              retired.sessionPrivateKey,
+            ),
+          });
+          patchRetiredSessionKeyInStorage(keyId, {
+            state: "revoked",
+            revokeTxHash: revoke.txHash,
+            lastError: "",
+          });
+          revoked = true;
+        } catch (e) {
+          patchRetiredSessionKeyInStorage(keyId, {
+            lastError: e instanceof Error ? e.message : String(e),
+          });
+        }
+      }
+
+      if (sessionKeyInUseAcrossTabs(keyId)) continue;
+      if (input.attemptRevoke && !revoked && provider && root) {
+        // User rejected or revoke failed; rely on expiry and clear private key locally.
+        removeRetiredSessionKeyFromStorage(keyId);
+        continue;
+      }
+      if (!input.attemptRevoke || revoked || !provider || !root) {
+        removeRetiredSessionKeyFromStorage(keyId);
+      }
+    } finally {
+      releaseSessionCleanupLock(keyId);
+    }
+  }
+}
+
+/**
+ * @param {{ attemptRevoke?: boolean }} [opts]
+ */
+function scheduleRetiredSessionKeyCleanup(opts = {}) {
+  retiredCleanupWantsRevoke = retiredCleanupWantsRevoke || opts.attemptRevoke === true;
+  if (retiredCleanupPromise) return retiredCleanupPromise;
+  retiredCleanupPromise = (async () => {
+    const attemptRevoke = retiredCleanupWantsRevoke;
+    retiredCleanupWantsRevoke = false;
+    await runRetiredSessionKeyCleanup({ attemptRevoke });
+  })()
+    .catch(() => {
+      /* no-op */
+    })
+    .finally(() => {
+      retiredCleanupPromise = null;
+      if (retiredCleanupWantsRevoke) {
+        queueMicrotask(() => scheduleRetiredSessionKeyCleanup());
+      }
+    });
+  return retiredCleanupPromise;
+}
+
+function installSessionCoordination() {
+  if (typeof BroadcastChannel !== "undefined") {
+    sessionCoordChannel = new BroadcastChannel(FILSTREAM_SESSION_CHANNEL_NAME);
+    sessionCoordChannel.addEventListener("message", (ev) => {
+      const data =
+        ev && typeof ev === "object" && "data" in ev
+          ? /** @type {{ data?: unknown }} */ (ev).data
+          : null;
+      if (!data || typeof data !== "object") return;
+      const msg = /** @type {Record<string, unknown>} */ (data);
+      const tabId = typeof msg.tabId === "string" ? msg.tabId : "";
+      if (!tabId || tabId === SESSION_TAB_ID) return;
+      if (msg.type === "uploads") {
+        const active =
+          Array.isArray(msg.activeKeyIds) &&
+          msg.activeKeyIds.every((x) => typeof x === "string")
+            ? msg.activeKeyIds.map((x) => x.toLowerCase())
+            : [];
+        remoteUploadStateByTab.set(tabId, {
+          updatedAtMs:
+            typeof msg.sentAtMs === "number" && Number.isFinite(msg.sentAtMs)
+              ? msg.sentAtMs
+              : Date.now(),
+          activeKeyIds: new Set(active),
+        });
+      } else if (msg.type === "tab_closing") {
+        remoteUploadStateByTab.delete(tabId);
+      }
+    });
+  }
+  if (!sessionHeartbeatIntervalId) {
+    sessionHeartbeatIntervalId = window.setInterval(
+      publishLocalUploadActivity,
+      SESSION_ACTIVITY_HEARTBEAT_MS,
+    );
+  }
+  if (!retiredCleanupIntervalId) {
+    retiredCleanupIntervalId = window.setInterval(
+      () => void scheduleRetiredSessionKeyCleanup({ attemptRevoke: false }),
+      SESSION_RETIRE_CLEANUP_INTERVAL_MS,
+    );
+  }
+  window.addEventListener("beforeunload", () => {
+    broadcastSessionCoordMessage({
+      type: "tab_closing",
+      tabId: SESSION_TAB_ID,
+      sentAtMs: Date.now(),
+    });
+  });
+  window.addEventListener("storage", (ev) => {
+    if (ev.key !== FILSTREAM_SESSION_STORAGE_KEY) return;
+    if (!wizardState.walletAddress) return;
+    if (wizardState.sessionAuthBusy) return;
+    const changed = tryApplyStoredSession(wizardState.walletAddress);
+    if (changed) {
+      maybeAutoAdvanceFromFund();
+      renderWizard();
+    }
+    void scheduleRetiredSessionKeyCleanup({ attemptRevoke: false });
+  });
+  publishLocalUploadActivity();
+  void scheduleRetiredSessionKeyCleanup({ attemptRevoke: false });
 }
 
 /**
@@ -199,7 +527,6 @@ function tryApplyStoredSession(addr) {
     return false;
   }
   if (!isSessionKeyRecoverable(stored)) {
-    clearSessionKeyFromStorage();
     return false;
   }
   wizardState.sessionPrivateKey = stored.sessionPrivateKey;
@@ -259,9 +586,6 @@ async function abortUploadSetupFlow(reason) {
   renderWizard();
 }
 
-const USDFC_DECIMALS = 18n;
-const USDFC_ONE = 10n ** USDFC_DECIMALS;
-
 /**
  * @param {bigint} value
  * @returns {string}
@@ -275,10 +599,6 @@ function formatWeiAsUsdfc(value) {
   const fracStr = fracMicro.toString().padStart(6, "0").replace(/0+$/, "");
   return fracStr === "" ? `${whole} tUSDFC` : `${whole}.${fracStr} tUSDFC`;
 }
-const FUNDING_MIN_TOPUP_WEI = 5n * USDFC_ONE;
-const FUNDING_TARGET_NUMERATOR = 120n;
-const FUNDING_TARGET_DENOMINATOR = 100n;
-
 /**
  * @param {bigint} value
  * @param {bigint} numerator
@@ -504,8 +824,7 @@ async function runFinalizeAfterListingDetail(detail) {
   wizardState.storeUploadProgressPct = 0;
   wizardState.storeUploadPhaseNote = "Preparing finalize…";
   wizardState.storeUploadLabel = "";
-  wizardState.reviewMetaJsonUrl = "";
-  wizardState.reviewCatalogJsonUrl = "";
+  wizardState.reviewVideoId = "";
   updateStoreUploadProgressFromSession();
   renderWizard();
   try {
@@ -513,8 +832,7 @@ async function runFinalizeAfterListingDetail(detail) {
     const finalized = await finalizeStoreUpload();
     const masterUrl =
       typeof finalized?.masterAppUrl === "string" ? finalized.masterAppUrl : "";
-    wizardState.reviewMetaJsonUrl = resolveMetaJsonUrlFromFinalize(finalized);
-    wizardState.reviewCatalogJsonUrl = resolveCatalogJsonUrlFromFinalize(finalized);
+    wizardState.reviewVideoId = resolveVideoIdFromFinalize(finalized);
     tryMergePlaybackIntoPublishedMeta(finalized);
     wizardState.storeUploadProgressPct = 100;
     wizardState.storeUploadLabel = masterUrl ? "Stored — loading playback…" : "Stored.";
@@ -584,7 +902,7 @@ function sessionExpiresSummary() {
 }
 
 /**
- * Restore wallet + session key after page reload if `eth_accounts` still matches `sessionStorage`.
+ * Restore wallet + session key after reload if `eth_accounts` still matches stored auth state.
  *
  * @param {Array<{ info: { uuid: string, name: string, icon: string, rdns: string }, provider: import("./eip6963.mjs").Eip1193Provider }>} list
  */
@@ -638,6 +956,7 @@ function attemptRestoreWalletFromStorage(list) {
       wizardState.walletError = null;
       maybeAutoAdvanceFromFund();
       scheduleFundStepSessionAuthorizeIfNeeded();
+      void scheduleRetiredSessionKeyCleanup({ attemptRevoke: false });
       renderWizard();
     } catch {
       /* ignore */
@@ -667,7 +986,6 @@ function toBrowserStoreEventDetail(eventType, detail) {
   }
   if (eventType === LISTING_DETAILS_EVENT) {
     return {
-      metaPath: typeof src.metaPath === "string" ? src.metaPath : "meta.json",
       metaJsonText:
         typeof src.metaJsonText === "string" ? src.metaJsonText : "",
     };
@@ -734,13 +1052,14 @@ async function ensureStoreUploadSession() {
     const initRes = await createBrowserUploadSession(payload);
     storeRuntime.session = initRes.session;
     initRes.session.onStagingStateChanged = scheduleAwaitStagingUiRefresh;
+    storeRuntime.sessionKeyId = sessionKeyIdFromPrivateKey(auth.sessionPrivateKey);
+    if (storeRuntime.sessionKeyId) {
+      mutateLocalUploadActivity(storeRuntime.sessionKeyId, +1);
+    }
     storeRuntime.uploadId =
       typeof initRes?.uploadId === "string" ? initRes.uploadId : "";
     if (!storeRuntime.uploadId || !storeRuntime.session) {
       throw new Error("store init failed: missing upload session");
-    }
-    if (typeof storeRuntime.session.prefetchCatalogMergeForFinalize === "function") {
-      storeRuntime.session.prefetchCatalogMergeForFinalize();
     }
   })();
   try {
@@ -955,14 +1274,20 @@ async function finalizeStoreUpload() {
   } catch {
     /* ignore IDB cleanup errors */
   }
+  if (storeRuntime.sessionKeyId) {
+    mutateLocalUploadActivity(storeRuntime.sessionKeyId, -1);
+    storeRuntime.sessionKeyId = "";
+  }
   return result;
 }
 
 async function resetStoreRuntime(abortRemote) {
   const previousSession = storeRuntime.session;
+  const previousSessionKeyId = storeRuntime.sessionKeyId;
   const hadFinalized = storeRuntime.finalized;
   storeRuntime.uploadId = "";
   storeRuntime.assetId = "";
+  storeRuntime.sessionKeyId = "";
   storeRuntime.session = null;
   storeRuntime.initPromise = null;
   storeRuntime.queue = Promise.resolve();
@@ -970,6 +1295,9 @@ async function resetStoreRuntime(abortRemote) {
   storeRuntime.finalized = false;
   storeRuntime.finalizeResult = null;
   storeEventBacklog = [];
+  if (previousSessionKeyId) {
+    mutateLocalUploadActivity(previousSessionKeyId, -1);
+  }
   if (abortRemote && previousSession && !hadFinalized) {
     try {
       await previousSession.deleteUploadDatabase();
@@ -1013,7 +1341,7 @@ const wizardState = {
   walletAddress: null,
   /** @type {string | null} */
   connectedWalletName: null,
-  /** Synapse session key seed (hex); set after Fund-step authorize or from `sessionStorage`. */
+  /** Synapse session key seed (hex); set after Fund-step authorize or storage restore. */
   sessionPrivateKey: "",
   /**
    * FWSS permission hash → on-chain expiry (epoch seconds), as strings from storage or bootstrap.
@@ -1021,7 +1349,7 @@ const wizardState = {
    * @type {StoreSessionExpirations | null}
    */
   sessionExpirations: null,
-  /** EIP-1193 provider used for `loginSync` (same instance as connect). */
+  /** EIP-1193 provider used for `loginAndFund` (same instance as connect). */
   eip1193Provider: null,
   sessionAuthBusy: false,
   /** @type {"idle" | "wallet" | "chain" | "session_sync"} */
@@ -1061,7 +1389,7 @@ const wizardState = {
   defineNextError: "",
   /** User clicked Define Next before transcode meta existed; step 4 shows progress until upload runs. */
   defineListingFlowPending: false,
-  /** @type {unknown | null} parsed listing meta.json after Define → Next */
+  /** @type {unknown | null} parsed listing payload after Define → Next */
   publishedMeta: null,
   /** While `finalizeStoreUpload` runs — queue + on-chain commit. */
   storageUploadActive: false,
@@ -1070,10 +1398,8 @@ const wizardState = {
   storeUploadLabel: "",
   /** Short finalize phase hint shown after stats (e.g. draining queue, on-chain commit). */
   storeUploadPhaseNote: "",
-  /** PDP `meta.json` retrieval URL for Review iframe */
-  reviewMetaJsonUrl: "",
-  /** PDP `filstream_catalog.json` retrieval URL for share / Review (optional) */
-  reviewCatalogJsonUrl: "",
+  /** Review/open link target (`viewer.html?videoId=`). */
+  reviewVideoId: "",
 };
 
 /** @type {HTMLVideoElement | null} */
@@ -1240,7 +1566,6 @@ function tryMergePlaybackIntoPublishedMeta(finalized) {
   const nextPlayback = { ...pb };
   const mu = typeof f.masterAppUrl === "string" ? f.masterAppUrl.trim() : "";
   const manifest = typeof f.manifestUrl === "string" ? f.manifestUrl.trim() : "";
-  const metaUrl = typeof f.metaJsonUrl === "string" ? f.metaJsonUrl.trim() : "";
   const pu = typeof f.posterUrl === "string" ? f.posterUrl.trim() : "";
   const pau = typeof f.posterAnimUrl === "string" ? f.posterAnimUrl.trim() : "";
   const posterAnimMeta =
@@ -1249,7 +1574,6 @@ function tryMergePlaybackIntoPublishedMeta(finalized) {
       : {};
   if (mu) nextPlayback.masterAppUrl = mu;
   if (manifest) nextPlayback.manifestUrl = manifest;
-  if (metaUrl) nextPlayback.metaJsonUrl = metaUrl;
   if (pu) nextPlayback.posterUrl = pu;
   if (pau) nextPlayback.posterAnimUrl = pau;
   wizardState.publishedMeta = {
@@ -1408,12 +1732,23 @@ async function handleAuthorizeSession(opts = {}) {
     wizardState.sessionExpirations = sessionExpirations;
     resetFundingGateState();
     const cfg = getFilstreamStoreConfig();
-    saveSessionKeyToStorage({
+    const saved = saveSessionKeyToStorage({
       rootAddress: wizardState.walletAddress,
       chainId: cfg.storeChainId,
       sessionPrivateKey,
       sessionExpirations,
     });
+    if (saved) {
+      broadcastSessionCoordMessage({
+        type: "session_saved",
+        tabId: SESSION_TAB_ID,
+        sentAtMs: Date.now(),
+        rootAddress: saved.rootAddress,
+        chainId: saved.chainId,
+        keyId: saved.sessionKeyId,
+      });
+    }
+    void scheduleRetiredSessionKeyCleanup({ attemptRevoke: force });
     storeRuntime.disabled = false;
     flushStoreEventBacklog();
     maybeAutoAdvanceFromFund();
@@ -1444,7 +1779,7 @@ async function handleDefineNext() {
       !/^0x[a-fA-F0-9]{40}$/.test(wizardState.walletAddress)
     ) {
       wizardState.defineNextError =
-        "Connect a wallet on Fund (step 2) — that address is the USDFC donation target in meta.json.";
+        "Connect a wallet on Fund (step 2) — that address is the USDFC donation target in listing metadata.";
       renderWizard();
       return;
     }
@@ -1619,6 +1954,9 @@ async function handleConnectInjected(provider, info) {
     wizardState.connectingUuid = null;
     maybeAutoAdvanceFromFund();
     scheduleFundStepSessionAuthorizeIfNeeded();
+    if (wizardState.walletAddress) {
+      void scheduleRetiredSessionKeyCleanup({ attemptRevoke: false });
+    }
     renderWizard();
   }
 }
@@ -1659,7 +1997,7 @@ function renderWizard() {
       >
         <div class="site-top-bar">
           <header role="banner">
-            ${filstreamBrandLit()}
+            ${filstreamHeaderLit({ active: "upload" })}
           </header>
 
           <ol class="wizard-steps" aria-label="Progress">
@@ -1766,19 +2104,11 @@ function renderWizard() {
               <div class="step2-stack">
                 ${wizardState.step === 5
                   ? (() => {
-                      /** Static viewer: `?meta=` + optional `?catalog=` — same contract as shared links. */
-                      const reviewMetaUrl =
-                        wizardState.reviewMetaJsonUrl ||
-                        resolveMetaJsonUrlFromFinalize(storeRuntime.finalizeResult);
-                      const reviewCatalogUrl =
-                        wizardState.reviewCatalogJsonUrl ||
-                        resolveCatalogJsonUrlFromFinalize(storeRuntime.finalizeResult);
-                      const reviewViewerUrl = reviewMetaUrl
-                        ? buildReviewViewerIframeSrc(
-                            reviewMetaUrl,
-                            reviewCatalogUrl || undefined,
-                            storeRuntime.finalizeResult?.dataSetId ?? undefined,
-                          )
+                      const reviewVideoId =
+                        wizardState.reviewVideoId ||
+                        resolveVideoIdFromFinalize(storeRuntime.finalizeResult);
+                      const reviewViewerUrl = reviewVideoId
+                        ? buildViewerUrlForVideoId(reviewVideoId)
                         : null;
                       return html`
                       <section class="publish-broadcast-shell" aria-labelledby="publish-broadcast-title">
@@ -2013,8 +2343,7 @@ async function wizardGoBackToChoose() {
   wizardState.storeUploadProgressPct = 0;
   wizardState.storeUploadLabel = "";
   wizardState.storeUploadPhaseNote = "";
-    wizardState.reviewMetaJsonUrl = "";
-  wizardState.reviewCatalogJsonUrl = "";
+  wizardState.reviewVideoId = "";
   if (wizardState.posterObjectUrl) {
     URL.revokeObjectURL(wizardState.posterObjectUrl);
     wizardState.posterObjectUrl = null;
@@ -2088,5 +2417,6 @@ async function onWizardFileChosen(file) {
 
 ensureInjectedWalletSubscription();
 installStoreEventBridge();
+installSessionCoordination();
 renderWizard();
 void probeVideoEncoderHardwareAcceleration();
