@@ -1,6 +1,6 @@
 /**
  * Viewer entry:
- * - `viewer.html?videoId=<asset-id>[&embed=true]`
+ * - Discover: `index.html` · Playback: `viewer.html?videoId=<asset-id>[&embed=true]`
  *
  * Catalog discovery is on-chain (`CatalogRegistry`) with IndexedDB cache:
  * - entries are synced every ~30s when visible (or when hidden but video is playing)
@@ -16,12 +16,16 @@ import {
   broadcastCopyFromMeta,
   formatUploadDateLabel,
 } from "../filstream-broadcast-view.mjs";
-import { FILSTREAM_BRAND, mountFilstreamHeader } from "../filstream-brand.mjs";
+import {
+  hydrateFilstreamHeaderProfile,
+  FILSTREAM_BRAND,
+  mountFilstreamHeader,
+} from "../filstream-brand.mjs";
 import {
   buildCreatorUrlForAddress,
+  buildDiscoverHomeUrlWithSearchQuery,
   buildViewerUrlForVideoId,
   getFilstreamStoreConfig,
-  resolveViewerIndexPageUrl,
 } from "../filstream-config.mjs";
 import {
   cacheCatalogEntries,
@@ -57,16 +61,10 @@ const shaka = (
 const params = new URLSearchParams(window.location.search);
 const embedMode = params.get("embed") === "true";
 const requestedVideoId = (params.get("videoId") || "").trim();
+const LANDING_TOAST_STORAGE_KEY = "filstream-welcome-dismissed";
 
 if (embedMode) {
   document.documentElement.classList.add("viewer-embed");
-}
-
-const brandMount = document.getElementById("viewer-brand-mount");
-if (brandMount && !embedMode) {
-  mountFilstreamHeader(brandMount, { active: "viewer" });
-} else if (brandMount) {
-  brandMount.hidden = true;
 }
 
 const statusEl = document.getElementById("viewer-status");
@@ -100,7 +98,7 @@ let catalogEntries = [];
 /** @type {Map<string, { username: string, profilePieceCid: string, profileUrl: string, updatedAtMs: number }>} */
 const creatorProfileCache = new Map();
 let currentVideoId = requestedVideoId;
-let catalogSearchQuery = "";
+let catalogSearchQuery = (params.get("q") || "").trim();
 let syncInFlight = false;
 let syncIntervalId = 0;
 let isVideoPlaying = false;
@@ -108,10 +106,78 @@ let destroyed = false;
 const cfg = getFilstreamStoreConfig();
 const syncIntervalMs = Math.max(5_000, cfg.catalogSyncIntervalMs);
 
+const brandMount = document.getElementById("viewer-brand-mount");
+if (brandMount && !embedMode) {
+  mountFilstreamHeader(brandMount, { active: "", searchManaged: true });
+  void hydrateFilstreamHeaderProfile(
+    brandMount.querySelector("[data-filstream-header]"),
+  );
+  wireGlobalSearch();
+  initLandingToast();
+} else if (brandMount) {
+  brandMount.hidden = true;
+}
+
 function setStatus(msg, kind) {
   if (!statusEl) return;
   statusEl.textContent = msg;
   statusEl.className = `viewer-status${kind === "err" ? " err" : ""}`;
+}
+
+function syncDiscoverSearchToUrl() {
+  if (embedMode) return;
+  if (inWatchMode()) return;
+  const u = new URL(window.location.href);
+  const q = catalogSearchQuery.trim();
+  if (q) u.searchParams.set("q", q);
+  else u.searchParams.delete("q");
+  window.history.replaceState(null, "", u.toString());
+}
+
+function wireGlobalSearch() {
+  if (embedMode) return;
+  const searchEl = document.getElementById("filstream-global-search");
+  if (!(searchEl instanceof HTMLInputElement)) return;
+  searchEl.value = catalogSearchQuery;
+  searchEl.addEventListener("input", () => {
+    const next = searchEl.value;
+    if (next === catalogSearchQuery) return;
+    catalogSearchQuery = next;
+    syncDiscoverSearchToUrl();
+    renderCatalogSidebar();
+  });
+  searchEl.addEventListener("keydown", (e) => {
+    if (e.key !== "Enter") return;
+    if (!inWatchMode()) {
+      e.preventDefault();
+      return;
+    }
+    e.preventDefault();
+    window.location.href = buildDiscoverHomeUrlWithSearchQuery(searchEl.value);
+  });
+}
+
+function initLandingToast() {
+  if (embedMode) return;
+  const el = document.getElementById("filstream-landing-toast");
+  if (!el) return;
+  if (requestedVideoId) return;
+  if (
+    typeof localStorage !== "undefined" &&
+    localStorage.getItem(LANDING_TOAST_STORAGE_KEY) === "1"
+  ) {
+    return;
+  }
+  el.hidden = false;
+  const btn = el.querySelector(".filstream-landing-toast-dismiss");
+  btn?.addEventListener("click", () => {
+    el.hidden = true;
+    try {
+      localStorage.setItem(LANDING_TOAST_STORAGE_KEY, "1");
+    } catch {
+      /* ignore */
+    }
+  });
 }
 
 function inWatchMode() {
@@ -569,13 +635,8 @@ function startCatalogSyncLoop() {
 }
 
 function buildViewerUrlWithoutEmbed() {
-  const here = new URL(window.location.href);
-  const u = new URL(resolveViewerIndexPageUrl());
-  const videoId = (here.searchParams.get("videoId") || "").trim();
-  if (videoId) {
-    u.searchParams.set("videoId", videoId);
-  }
-  return u.href;
+  const videoId = (new URLSearchParams(window.location.search).get("videoId") || "").trim();
+  return buildViewerUrlForVideoId(videoId);
 }
 
 class TheaterModeButton extends shaka.ui.Element {
@@ -1051,7 +1112,7 @@ function renderCatalogDiscovery(active) {
   if (!catalogAside) return;
   const activeEl = document.activeElement;
   const shouldRestoreSearchFocus =
-    activeEl instanceof HTMLInputElement && activeEl.id === "viewer-catalog-search";
+    activeEl instanceof HTMLInputElement && activeEl.id === "filstream-global-search";
   const selStart = shouldRestoreSearchFocus ? activeEl.selectionStart : null;
   const selEnd = shouldRestoreSearchFocus ? activeEl.selectionEnd : null;
 
@@ -1063,27 +1124,14 @@ function renderCatalogDiscovery(active) {
   const heading = document.createElement("h2");
   heading.className = "viewer-catalog-head";
   heading.textContent = "Discover";
-  const search = document.createElement("input");
-  search.type = "search";
-  search.id = "viewer-catalog-search";
-  search.className = "viewer-catalog-search";
-  search.placeholder = "Search by creator name or wallet";
-  search.autocomplete = "off";
-  search.spellcheck = false;
-  search.value = catalogSearchQuery;
-  search.addEventListener("input", () => {
-    const next = search.value;
-    if (next === catalogSearchQuery) return;
-    catalogSearchQuery = next;
-    renderCatalogSidebar();
-  });
-  toolbar.append(heading, search);
+  toolbar.appendChild(heading);
   catalogAside.appendChild(toolbar);
 
-  if (shouldRestoreSearchFocus) {
-    search.focus();
+  const globalSearch = document.getElementById("filstream-global-search");
+  if (shouldRestoreSearchFocus && globalSearch instanceof HTMLInputElement) {
+    globalSearch.focus();
     if (selStart != null && selEnd != null) {
-      search.setSelectionRange(selStart, selEnd);
+      globalSearch.setSelectionRange(selStart, selEnd);
     }
   }
 
@@ -1299,25 +1347,31 @@ async function hydrateCatalogPosters(rows) {
   }
 
   const seen = new Set();
+  /** @type {Promise<void>[]} */
+  const tasks = [];
   for (const row of rows) {
     const videoId = String(row.assetId || "").trim();
     if (!videoId || seen.has(videoId)) continue;
     seen.add(videoId);
     const targets = imagesByVideoId.get(videoId) ?? [];
     if (!targets.length) continue;
-    try {
-      const cached = await loadManifestCache(videoId);
-      if (!cached?.manifestDoc) continue;
-      const still = posterUrlFromDoc(cached.manifestDoc);
-      if (still) {
-        for (const img of targets) {
-          img.src = still;
+    tasks.push(
+      (async () => {
+        try {
+          const { manifestDoc } = await loadManifestForVideo(videoId, row);
+          const still = posterUrlFromDoc(manifestDoc);
+          if (still) {
+            for (const img of targets) {
+              img.src = still;
+            }
+          }
+        } catch {
+          /* ignore per-item failures */
         }
-      }
-    } catch {
-      /* ignore per-item failures */
-    }
+      })(),
+    );
   }
+  await Promise.all(tasks);
 }
 
 /**

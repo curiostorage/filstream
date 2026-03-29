@@ -108,25 +108,31 @@ export function getFilstreamStoreConfig() {
 }
 
 /**
- * Absolute URL of `viewer.html` (Review iframe + public link). Uses `viewBaseUrl` when set; otherwise same directory as the current page.
+ * Relative path to the catalog discover home (`index.html`), same directory as other app pages.
+ * Intentionally not derived from `viewBaseUrl` so localhost and any host/path work without jumping to production.
  *
  * @returns {string}
  */
 export function resolveViewerIndexPageUrl() {
-  const cfg = getFilstreamStoreConfig();
-  const base = cfg.viewBaseUrl.trim();
-  if (base) {
-    const root = base.endsWith("/") ? base : `${base}/`;
-    return new URL("viewer.html", root).href;
-  }
-  if (typeof globalThis !== "undefined" && globalThis.location?.href) {
-    return new URL("viewer.html", globalThis.location.href).href;
-  }
-  return "viewer.html";
+  return "index.html";
 }
 
 /**
- * Primary viewer URL contract: `viewer.html?videoId=<asset-id>`.
+ * Discover home with optional catalog search (`q`). Same-directory relative URL.
+ *
+ * @param {string} [rawQuery]
+ * @returns {string}
+ */
+export function buildDiscoverHomeUrlWithSearchQuery(rawQuery) {
+  const q = String(rawQuery || "").trim();
+  const sp = new URLSearchParams();
+  if (q) sp.set("q", q);
+  const qs = sp.toString();
+  return qs ? `index.html?${qs}` : "index.html";
+}
+
+/**
+ * Primary playback URL: `viewer.html?videoId=<asset-id>` (relative, same directory as `index.html`).
  *
  * @param {string} videoId
  * @param {{ embed?: boolean }} [opts]
@@ -134,33 +140,25 @@ export function resolveViewerIndexPageUrl() {
  */
 export function buildViewerUrlForVideoId(videoId, opts = {}) {
   const id = String(videoId || "").trim();
-  const u = new URL(resolveViewerIndexPageUrl());
-  if (id) {
-    u.searchParams.set("videoId", id);
-  } else {
-    u.searchParams.delete("videoId");
-  }
-  if (opts.embed === true) {
-    u.searchParams.set("embed", "true");
-  } else {
-    u.searchParams.delete("embed");
-  }
-  return u.href;
+  const sp = new URLSearchParams();
+  if (id) sp.set("videoId", id);
+  if (opts.embed === true) sp.set("embed", "true");
+  const qs = sp.toString();
+  return qs ? `viewer.html?${qs}` : "viewer.html";
 }
 
 /**
- * Creator page URL: `creator.html?creator=<wallet-address>`.
+ * Creator page URL: `creator.html?creator=<wallet-address>` (relative).
  *
  * @param {string} creatorAddress
  * @returns {string}
  */
 export function buildCreatorUrlForAddress(creatorAddress) {
-  const u = new URL("creator.html", resolveViewerIndexPageUrl());
   const addr = String(creatorAddress || "").trim();
-  if (addr) {
-    u.searchParams.set("creator", addr);
-  }
-  return u.href;
+  const sp = new URLSearchParams();
+  if (addr) sp.set("creator", addr);
+  const qs = sp.toString();
+  return qs ? `creator.html?${qs}` : "creator.html";
 }
 
 /**

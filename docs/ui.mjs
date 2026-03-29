@@ -28,7 +28,7 @@ import {
   requestInjectedProviders,
   subscribeInjectedWallets,
 } from "./eip6963.mjs";
-import { filstreamHeaderLit } from "./filstream-brand.mjs";
+import { filstreamHeaderLit, hydrateFilstreamHeaderProfile } from "./filstream-brand.mjs";
 import { broadcastViewTemplate } from "./filstream-broadcast-view.mjs";
 import {
   buildViewerUrlForVideoId,
@@ -2274,6 +2274,9 @@ function renderWizard() {
     root,
   );
   queueMicrotask(() => {
+    void hydrateFilstreamHeaderProfile(
+      document.querySelector("[data-filstream-header]"),
+    );
     syncSourcePreviewSrc();
     const vid = ensureVideoEl();
     if (
