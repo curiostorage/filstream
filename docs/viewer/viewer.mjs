@@ -728,6 +728,29 @@ async function loadMasterWithAppleMseFallback(player, uri) {
   }
 }
 
+/**
+ * Shaka hides the buffering spinner when `pollBufferState_()` runs, which is
+ * tied to media element events (`progress`, `canplaythrough`, …). On a cold
+ * first load, those events can lag behind `load()` resolving so the internal
+ * buffer observer stays STARVING with nothing left to fetch. Nudging the same
+ * poll path after load fixes the stuck overlay; refresh often worked because
+ * timing/caches aligned.
+ *
+ * @param {HTMLMediaElement | null} mediaEl
+ */
+function nudgeShakaBufferingPollAfterLoad(mediaEl) {
+  if (!mediaEl) return;
+  const nudge = () => {
+    mediaEl.dispatchEvent(new Event("progress"));
+    mediaEl.dispatchEvent(new Event("canplaythrough"));
+  };
+  nudge();
+  queueMicrotask(nudge);
+  requestAnimationFrame(() => nudge());
+  mediaEl.addEventListener("loadeddata", nudge, { once: true });
+  mediaEl.addEventListener("canplay", nudge, { once: true });
+}
+
 async function ensurePlayer() {
   if (shakaPlayer) return shakaPlayer;
   if (!shakaContainerEl || !videoEl) {
@@ -1392,6 +1415,7 @@ async function openVideoById(videoId) {
   }
   const player = await ensurePlayer();
   await loadMasterWithAppleMseFallback(player, master);
+  nudgeShakaBufferingPollAfterLoad(videoEl);
   renderViewerMeta(merged ?? manifestDoc, entry);
   setStatus("");
 }
