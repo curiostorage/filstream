@@ -118,6 +118,23 @@ if (brandMount && !embedMode) {
   brandMount.hidden = true;
 }
 
+async function unregisterLegacyPieceHeadServiceWorker() {
+  if (typeof navigator === "undefined" || !("serviceWorker" in navigator)) {
+    return;
+  }
+  try {
+    const regs = await navigator.serviceWorker.getRegistrations();
+    for (const reg of regs) {
+      const scriptUrl =
+        reg.active?.scriptURL || reg.waiting?.scriptURL || reg.installing?.scriptURL || "";
+      if (!scriptUrl || !scriptUrl.includes("/piece-head-sw.js")) continue;
+      await reg.unregister();
+    }
+  } catch {
+    /* ignore cleanup errors */
+  }
+}
+
 function setStatus(msg, kind) {
   if (!statusEl) return;
   statusEl.textContent = msg;
@@ -1435,6 +1452,33 @@ async function loadManifestForVideo(videoId, entry) {
 }
 
 /**
+ * Best-effort on-chain lookup when local cache/cursor misses a known `videoId`.
+ *
+ * @param {string} videoId
+ * @returns {Promise<import("../filstream-catalog-chain.mjs").CatalogEntry | null>}
+ */
+async function findEntryByVideoIdFromChain(videoId) {
+  const target = String(videoId || "").trim();
+  if (!target || !isCatalogConfigured()) return null;
+  const pageSize = Math.min(250, Math.max(25, CATALOG_PAGE_SIZE));
+  let offset = 0;
+  for (let pageCount = 0; pageCount < 100; pageCount++) {
+    const page = await readCatalogLatest({
+      offset,
+      limit: pageSize,
+      activeOnly: false,
+    });
+    if (!page.length) return null;
+    await cacheCatalogEntries(page);
+    const hit = page.find((row) => row.assetId === target && row.active);
+    if (hit) return hit;
+    offset += page.length;
+    if (page.length < pageSize) return null;
+  }
+  return null;
+}
+
+/**
  * @param {string} videoId
  * @returns {Promise<import("../filstream-catalog-chain.mjs").CatalogEntry | null>}
  */
@@ -1443,6 +1487,8 @@ async function resolveEntryForVideo(videoId) {
   if (entry && entry.active) return entry;
   await syncCatalogOnce(true);
   entry = await findCachedEntryByVideoId(videoId);
+  if (entry && entry.active) return entry;
+  entry = await findEntryByVideoIdFromChain(videoId);
   if (entry && entry.active) return entry;
   return null;
 }
@@ -1500,6 +1546,7 @@ async function bootstrapCatalogState() {
 }
 
 try {
+  await unregisterLegacyPieceHeadServiceWorker();
   applyViewerModeLayout();
   await bootstrapCatalogState();
   if (requestedVideoId) {
