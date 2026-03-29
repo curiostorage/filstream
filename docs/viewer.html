@@ -4,6 +4,19 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>FilStream viewer</title>
+  <script>
+    (function () {
+      var p = new URLSearchParams(location.search);
+      var hasVideo = (p.get("videoId") || "").trim() !== "";
+      var embed = p.get("embed") === "true";
+      if (!hasVideo && !embed) {
+        var u = new URL("index.html", location.href);
+        u.search = location.search;
+        u.hash = location.hash;
+        location.replace(u.href);
+      }
+    })();
+  </script>
   <link rel="icon" href="favicon.svg" type="image/svg+xml" />
   <link rel="stylesheet" href="viewer/viewer.css" />
   <link
@@ -41,6 +54,7 @@
     </div>
     <aside id="viewer-catalog" class="viewer-catalog" hidden aria-label="Catalog"></aside>
   </div>
+
   <script type="module" src="viewer/viewer.mjs"></script>
 </body>
 </html>
