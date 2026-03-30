@@ -12,7 +12,9 @@
     window.__FILSTREAM_CONFIG__ = window.__FILSTREAM_CONFIG__ || {};
   </script>
   <div id="root" class="creator-layout">
-    <header id="creator-brand-mount" class="creator-brand" role="banner"></header>
+    <header class="creator-brand" role="banner">
+      <filstream-header active="creator"></filstream-header>
+    </header>
     <div class="creator-status-line">
       <span id="creator-page-spinner" class="creator-spinner-slot" hidden aria-hidden="true"></span>
       <p class="creator-status" id="creator-status">Loading…</p>
@@ -33,7 +35,10 @@
 
     <section id="creator-browse-section" class="creator-browse-section" hidden aria-label="Browse creators">
       <h2 class="creator-catalog-head">Browse creators</h2>
-      <div id="creator-browse-list" class="creator-browse-list"></div>
+      <creator-browse-list
+        id="creator-browse-list"
+        class="creator-browse-list"
+      ></creator-browse-list>
     </section>
 
     <section class="creator-hero" id="creator-hero" hidden>
@@ -90,7 +95,7 @@
           <span id="creator-save-spinner-mount" class="creator-spinner-slot" hidden aria-hidden="true"></span>
           <p class="creator-save-status" id="creator-save-status" aria-live="polite"></p>
         </div>
-        <ul id="creator-movie-edit-list" class="creator-movie-edit-list"></ul>
+        <creator-movie-edit-list id="creator-movie-edit-list"></creator-movie-edit-list>
         <div class="creator-dev-paste-box" id="creator-dev-paste-box" hidden>
           <p class="creator-dev-paste-heading">for development only</p>
           <p class="creator-dev-paste-desc">
@@ -116,7 +121,7 @@
 
     <section class="creator-catalog-section" id="creator-catalog-section" hidden aria-label="Movies in this catalog">
       <h2 class="creator-catalog-head">Movies</h2>
-      <div id="creator-movie-list" class="creator-movie-list"></div>
+      <creator-movie-list id="creator-movie-list" class="creator-movie-list"></creator-movie-list>
     </section>
   </div>
   <script type="module" src="creator/creator.mjs"></script>

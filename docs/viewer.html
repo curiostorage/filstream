@@ -37,22 +37,19 @@
           <video id="viewer-video" playsinline></video>
         </div>
       </div>
-      <section id="viewer-meta" class="viewer-meta" hidden aria-label="About this video">
-        <h1 id="viewer-title" class="broadcast-title"></h1>
-        <p id="viewer-upload-date" class="broadcast-upload-date" hidden></p>
-        <div id="viewer-byline" class="viewer-byline" hidden>
-          <div id="viewer-byline-catalog" class="viewer-byline-catalog"></div>
-          <div class="viewer-byline-trailing">
-            <div id="viewer-donate-root" class="viewer-byline-donate"></div>
-            <div id="viewer-actions" class="viewer-actions" hidden aria-label="Share and embed"></div>
-          </div>
-        </div>
-        <div class="viewer-description-box">
-          <div id="viewer-description" class="broadcast-description"></div>
-        </div>
-      </section>
+      <viewer-meta-block
+        id="viewer-meta"
+        class="viewer-meta"
+        hidden
+        aria-label="About this video"
+      ></viewer-meta-block>
     </div>
-    <aside id="viewer-catalog" class="viewer-catalog" hidden aria-label="Catalog"></aside>
+    <viewer-catalog-sidebar
+      id="viewer-catalog"
+      class="viewer-catalog"
+      hidden
+      aria-label="Catalog"
+    ></viewer-catalog-sidebar>
   </div>
 
   <script type="module" src="viewer/viewer.mjs"></script>

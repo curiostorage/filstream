@@ -8,12 +8,16 @@
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
-  <div id="wizard-root"></div>
-  <!-- Optional: override defaults from filstream-config.mjs (see env.example). -->
   <script>
     window.__FILSTREAM_CONFIG__ = window.__FILSTREAM_CONFIG__ || {};
   </script>
-  <!-- UI: ui.mjs + upload-configure.mjs (EIP-6963). Pipeline: core.mjs. -->
+  <div id="root" class="upload-layout">
+    <filstream-wizard-host
+      id="wizard-root"
+      class="upload-wizard"
+      aria-label="Upload wizard"
+    ></filstream-wizard-host>
+  </div>
   <script type="module" src="ui.mjs"></script>
 </body>
 </html>

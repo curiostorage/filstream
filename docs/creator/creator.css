@@ -29,6 +29,14 @@ body {
   margin: 0 0 1rem;
 }
 
+.creator-brand filstream-header {
+  display: block;
+}
+
+creator-movie-edit-list {
+  display: block;
+}
+
 .site-brand {
   display: flex;
   align-items: center;

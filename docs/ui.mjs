@@ -2,7 +2,12 @@
  * Wizard shell — edit and refresh; no `npm run build`.
  * Wallet/configure: `upload-configure.mjs`. Transcode + preview: `convert-progress.mjs`. Pipeline: `core.mjs`.
  */
-import { html, render } from "https://cdn.jsdelivr.net/npm/lit-html@3.2.1/+esm";
+import { html } from "./components/lit-base.mjs";
+import "./components/filstream-header.mjs";
+import {
+  FilstreamWizardHost,
+  setFilstreamWizardTemplate,
+} from "./components/filstream-wizard-host.mjs";
 import { captureListingAnimatedWebp } from "./animated-webp.mjs";
 import {
   createBrowserUploadSession,
@@ -28,7 +33,7 @@ import {
   requestInjectedProviders,
   subscribeInjectedWallets,
 } from "./eip6963.mjs";
-import { filstreamHeaderLit, hydrateFilstreamHeaderProfile } from "./filstream-brand.mjs";
+import { hydrateFilstreamHeaderProfile } from "./filstream-brand.mjs";
 import { broadcastViewTemplate } from "./filstream-broadcast-view.mjs";
 import {
   buildViewerUrlForVideoId,
@@ -1978,9 +1983,7 @@ function handleDisconnectWallet() {
   renderWizard();
 }
 
-function renderWizard() {
-  const root = document.getElementById("wizard-root");
-  if (!root) return;
+function wizardTemplate() {
   const v = ensureVideoEl();
   const srcSeek = ensureSourcePreviewVideoEl();
 
@@ -1990,14 +1993,13 @@ function renderWizard() {
     return "";
   };
 
-  render(
-    html`
+  return html`
       <main
         class=${`wrap layout-main${wizardState.step === 5 ? " layout-main--review-wide" : ""}`}
       >
         <div class="site-top-bar">
           <header role="banner">
-            ${filstreamHeaderLit({ active: "upload" })}
+            <filstream-header active="upload"></filstream-header>
           </header>
 
           <ol class="wizard-steps" aria-label="Progress">
@@ -2270,9 +2272,15 @@ function renderWizard() {
             `
           : null}
       </main>
-    `,
-    root,
-  );
+    `;
+}
+
+setFilstreamWizardTemplate(wizardTemplate);
+
+function renderWizard() {
+  const mount = document.getElementById("wizard-root");
+  if (!(mount instanceof FilstreamWizardHost)) return;
+  mount.requestUpdate();
   queueMicrotask(() => {
     void hydrateFilstreamHeaderProfile(
       document.querySelector("[data-filstream-header]"),

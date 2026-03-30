@@ -8,13 +8,13 @@
  * - update profile picture (`setMyProfilePicturePieceCid`)
  * - remove videos (`deleteEntry`) using session key
  */
-import { mountFilstreamHeader } from "../filstream-brand.mjs";
-import {
-  buildCreatorUrlForAddress,
-  buildViewerUrlForVideoId,
-  ensureFilstreamId,
-  getFilstreamStoreConfig,
-} from "../filstream-config.mjs";
+import { html, render } from "../components/lit-base.mjs";
+import "../components/filstream-header.mjs";
+import "../components/creator-browse-list.mjs";
+import "../components/creator-movie-edit-list.mjs";
+import "../components/creator-movie-list.mjs";
+import { hydrateFilstreamHeaderProfile } from "../filstream-brand.mjs";
+import { ensureFilstreamId, getFilstreamStoreConfig } from "../filstream-config.mjs";
 import {
   deleteCatalogEntryWithSessionKey,
   isCatalogConfigured,
@@ -48,10 +48,9 @@ import {
 import { createSpinnerElement } from "../spinner.mjs";
 import { getAddress } from "../vendor/synapse-browser.mjs";
 
-const brandMount = document.getElementById("creator-brand-mount");
-if (brandMount) {
-  mountFilstreamHeader(brandMount, { active: "creator" });
-}
+queueMicrotask(() => {
+  void hydrateFilstreamHeaderProfile(document.querySelector("[data-filstream-header]"));
+});
 
 const statusEl = document.getElementById("creator-status");
 const pageSpinnerMount = document.getElementById("creator-page-spinner");
@@ -393,38 +392,19 @@ async function loadBrowseCreatorData() {
 
 function renderBrowseCreators() {
   if (!browseSection || !browseListEl) return;
+  const host = /** @type {import("../components/creator-browse-list.mjs").CreatorBrowseList} */ (
+    browseListEl
+  );
   if (connectedAddress) {
     browseSection.hidden = true;
-    browseListEl.innerHTML = "";
-    return;
+    host.connected = true;
+    host.creators = [];
+  } else {
+    browseSection.hidden = false;
+    host.connected = false;
+    host.creators = browseCreators;
   }
-  browseSection.hidden = false;
-  browseListEl.innerHTML = "";
-
-  if (!browseCreators.length) {
-    const p = document.createElement("p");
-    p.className = "creator-status";
-    p.textContent = "No creators found yet.";
-    browseListEl.appendChild(p);
-    return;
-  }
-
-  for (const row of browseCreators) {
-    const a = document.createElement("a");
-    a.className = "creator-browse-card";
-    a.href = buildCreatorUrlForAddress(row.creator);
-
-    const name = document.createElement("span");
-    name.className = "creator-browse-card-name";
-    name.textContent = row.username || shortAddress(row.creator);
-
-    const meta = document.createElement("span");
-    meta.className = "creator-browse-card-meta";
-    meta.textContent = `${row.activeCount} video${row.activeCount === 1 ? "" : "s"} · ${shortAddress(row.creator)}`;
-
-    a.append(name, meta);
-    browseListEl.appendChild(a);
-  }
+  host.requestUpdate();
 }
 
 function renderWalletFirstLanding() {
@@ -607,67 +587,24 @@ function renderEditSection() {
     posterBrowseBtn.disabled = profileSaveBusy || profilePosterBusy;
     posterBrowseBtn.textContent = profilePosterBusy ? "Uploading…" : "Browse…";
   }
-  movieEditList.innerHTML = "";
-
-  for (const entry of creatorEntries) {
-    const li = document.createElement("li");
-    li.className = "creator-movie-edit-row";
-    const title = document.createElement("span");
-    title.className = "creator-movie-edit-title";
-    title.textContent = entry.active ? entry.title : `${entry.title} (removed)`;
-    li.appendChild(title);
-
-    const actions = document.createElement("div");
-    actions.className = "creator-movie-edit-actions";
-    if (entry.active) {
-      const delBtn = document.createElement("button");
-      delBtn.type = "button";
-      delBtn.className = "creator-row-btn creator-row-btn--danger";
-      delBtn.disabled = Boolean(deleteBusyByEntry[entry.entryId]);
-      delBtn.textContent = deleteBusyByEntry[entry.entryId] ? "Removing…" : "Remove";
-      delBtn.addEventListener("click", () => {
-        void handleDeleteEntry(entry.entryId);
-      });
-      actions.appendChild(delBtn);
-    }
-    li.appendChild(actions);
-    movieEditList.appendChild(li);
-  }
+  const el = /** @type {import("../components/creator-movie-edit-list.mjs").CreatorMovieEditList} */ (
+    movieEditList
+  );
+  el.entries = creatorEntries;
+  el.deleteBusy = { ...deleteBusyByEntry };
+  el.requestUpdate();
 }
 
 function renderMovieList() {
   if (!catalogSection || !movieListEl) return;
   catalogSection.hidden = false;
-  movieListEl.innerHTML = "";
   const active = creatorEntries.filter((x) => x.active);
-  if (!active.length) {
-    movieListEl.innerHTML = '<p class="creator-status">No active videos.</p>';
-    return;
-  }
-  for (const entry of active) {
-    const a = document.createElement("a");
-    a.className = "creator-catalog-row";
-    a.href = buildViewerUrlForVideoId(entry.assetId);
-    a.target = "_blank";
-    a.rel = "noopener noreferrer";
-
-    const posterWrap = document.createElement("div");
-    posterWrap.className = "creator-catalog-poster-wrap";
-    const poster = document.createElement("img");
-    poster.className = "creator-catalog-poster creator-catalog-poster--still";
-    poster.alt = "";
-    poster.loading = "lazy";
-    poster.decoding = "async";
-    posterWrap.appendChild(poster);
-
-    const title = document.createElement("div");
-    title.className = "creator-catalog-title";
-    title.textContent = entry.title;
-
-    a.append(posterWrap, title);
-    movieListEl.appendChild(a);
-  }
-  void hydrateMoviePosters(active);
+  const host = /** @type {import("../components/creator-movie-list.mjs").CreatorMovieList} */ (
+    movieListEl
+  );
+  host.entries = active;
+  void host.requestUpdate();
+  void host.updateComplete.then(() => hydrateMoviePosters(active));
 }
 
 /**
@@ -693,11 +630,17 @@ async function hydrateMoviePosters(activeEntries) {
         wrap.classList.add("creator-catalog-poster-wrap--anim");
         let motion = wrap.querySelector(".creator-catalog-poster--motion");
         if (!(motion instanceof HTMLImageElement)) {
-          motion = document.createElement("img");
-          motion.className = "creator-catalog-poster creator-catalog-poster--motion";
-          motion.alt = "";
-          motion.loading = "lazy";
-          motion.decoding = "async";
+          const motionHolder = document.createElement("div");
+          render(
+            html`<img
+              class="creator-catalog-poster creator-catalog-poster--motion"
+              alt=""
+              loading="lazy"
+              decoding="async"
+            />`,
+            motionHolder,
+          );
+          motion = /** @type {HTMLImageElement} */ (motionHolder.firstElementChild);
           wrap.appendChild(motion);
         }
         motion.src = animUrl;
@@ -987,6 +930,10 @@ async function handleDisconnectAction() {
 }
 
 function bindEvents() {
+  movieEditList?.addEventListener("filstream-delete-entry", (e) => {
+    const id = /** @type {CustomEvent<{ entryId: number }>} */ (e).detail.entryId;
+    if (typeof id === "number") void handleDeleteEntry(id);
+  });
   enableEditBtn?.addEventListener("click", () => {
     void handlePrimaryAction();
   });

@@ -12,6 +12,11 @@ body {
   color: #e8eaed;
 }
 
+/* Upload page shell (wizard content is rendered in `#wizard-root` / `<filstream-wizard-host>`). */
+.upload-layout {
+  min-height: 100vh;
+}
+
 .wrap {
   max-width: 40rem;
   margin: 0 auto;
