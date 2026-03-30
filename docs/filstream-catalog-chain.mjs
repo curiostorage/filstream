@@ -502,6 +502,53 @@ function ensureTxSuccess(receipt, txHash) {
  * }} input
  * @returns {Promise<{ txHash: string }>}
  */
+/**
+ * After `addEntry` confirms, resolve the new row's `entryId` by reading the catalog (RPC return
+ * data is not available on standard tx receipts). Used for rollback via `deleteEntry`.
+ *
+ * @param {{
+ *   creatorAddress: string,
+ *   assetId: string,
+ *   manifestCid: string,
+ *   maxAttempts?: number,
+ *   intervalMs?: number,
+ * }} input
+ * @returns {Promise<number | null>}
+ */
+export async function findCatalogEntryIdForAssetManifest(input) {
+  const assetId = String(input.assetId || "").trim();
+  const manifestCid = String(input.manifestCid || "").trim();
+  if (!assetId || !manifestCid) return null;
+  const creatorAddress = getAddress(/** @type {`0x${string}`} */ (input.creatorAddress));
+  const maxAttempts = Math.max(1, Math.floor(input.maxAttempts ?? 20));
+  const intervalMs = Math.max(50, Math.floor(input.intervalMs ?? 400));
+
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    const entries = await readCatalogByCreator({
+      creatorAddress,
+      offset: 0,
+      limit: 250,
+      activeOnly: true,
+    });
+    /** @type {CatalogEntry | null} */
+    let best = null;
+    for (const e of entries) {
+      if (e.assetId === assetId && e.manifestCid === manifestCid && e.active) {
+        if (!best || e.entryId > best.entryId) {
+          best = e;
+        }
+      }
+    }
+    if (best) {
+      return best.entryId;
+    }
+    if (attempt < maxAttempts - 1) {
+      await new Promise((r) => setTimeout(r, intervalMs));
+    }
+  }
+  return null;
+}
+
 export async function addCatalogEntryWithSessionKey(input) {
   const cfg = getFilstreamStoreConfig();
   const chain = getChain(cfg.storeChainId);

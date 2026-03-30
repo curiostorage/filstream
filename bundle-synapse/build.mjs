@@ -5,6 +5,12 @@ import path from "node:path";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const outFile = path.join(__dirname, "..", "docs", "vendor", "synapse-browser.mjs");
 const pieceCidOut = path.join(__dirname, "..", "docs", "piece-cid-from-bytes.mjs");
+const pieceCommIncrementalOut = path.join(
+  __dirname,
+  "..",
+  "docs",
+  "piece-commp-incremental.mjs",
+);
 
 await esbuild.build({
   entryPoints: [path.join(__dirname, "entry.mjs")],
@@ -31,3 +37,16 @@ await esbuild.build({
 });
 
 console.log("wrote", pieceCidOut);
+
+await esbuild.build({
+  entryPoints: [path.join(__dirname, "piece-cid-incremental-entry.mjs")],
+  bundle: true,
+  format: "esm",
+  platform: "browser",
+  target: ["es2022"],
+  outfile: pieceCommIncrementalOut,
+  legalComments: "none",
+  logLevel: "info",
+});
+
+console.log("wrote", pieceCommIncrementalOut);

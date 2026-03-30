@@ -24,9 +24,12 @@ import {
 } from "./filstream-constants.mjs";
 import {
   addCatalogEntryWithSessionKey,
+  deleteCatalogEntryWithSessionKey,
+  findCatalogEntryIdForAssetManifest,
   isCatalogConfigured,
 } from "./filstream-catalog-chain.mjs";
 import { computePieceCidFromBytes } from "./piece-cid-from-bytes.mjs";
+import { createPieceHasher, pieceLinkFromHasher } from "./piece-commp-incremental.mjs";
 import {
   DefaultFwssPermissions,
   Synapse,
@@ -839,6 +842,7 @@ function parseEventBytes(detail) {
  * @property {number | null} segmentStart
  * @property {number | null} segmentEnd
  * @property {number} pendingOrd
+ * @property {ReturnType<typeof createPieceHasher> | null} pieceHasher
  * @property {Array<{
  *   path: string,
  *   mimeType: string,
@@ -854,6 +858,8 @@ function parseEventBytes(detail) {
  * @property {number} sequence
  * @property {number} segmentCount
  * @property {number} byteLength
+ * @property {import("@filoz/synapse-sdk").PieceCID} pieceRef
+ * @property {string} pieceCid
  * @property {Record<string, string>} pieceMetadata
  * @property {Array<{
  *   path: string,
@@ -882,8 +888,47 @@ function newVariantBuffer(variant) {
     segmentStart: null,
     segmentEnd: null,
     pendingOrd: 0,
+    pieceHasher: null,
     entries: [],
   };
+}
+
+/**
+ * Undo {@link BrowserFilstreamUploadSession} piece + file mapping rows when a variant PDP upload fails or is skipped abandoned.
+ *
+ * @param {BrowserFilstreamUploadSession} session
+ * @param {string} pieceCid
+ */
+function removeVariantPieceRegistrationsForPiece(session, pieceCid) {
+  const cid = String(pieceCid || "").trim();
+  if (!cid) return;
+  session.piecesByCid.delete(cid);
+  for (let i = session.fileMappings.length - 1; i >= 0; i--) {
+    if (session.fileMappings[i].pieceCid === cid) {
+      session.fileMappings.splice(i, 1);
+    }
+  }
+  session._notifyStagingStateChanged();
+}
+
+/**
+ * Remove catalog row if PDP store/commit failed after `addEntry` (best-effort).
+ *
+ * @param {{ clientAddress: string, sessionPrivateKey: string }} session
+ * @param {number | null} entryId
+ */
+async function rollbackCatalogEntryIfPending(session, entryId) {
+  if (entryId == null || !Number.isFinite(entryId)) return;
+  const id = Math.floor(/** @type {number} */ (entryId));
+  try {
+    await deleteCatalogEntryWithSessionKey({
+      claimedUser: session.clientAddress,
+      sessionPrivateKey: session.sessionPrivateKey,
+      entryId: id,
+    });
+  } catch (e) {
+    console.error("[filstream] catalog rollback failed", e);
+  }
 }
 
 /**
@@ -1870,8 +1915,10 @@ export class BrowserFilstreamUploadSession {
       throw new StoreError(500, "Storage context.store is unavailable");
     }
     const db = await this._dbReady;
+    const pieceCid = job.pieceCid;
     if (this._isVariantSequenceAbandoned(job.variant, job.sequence)) {
       await idbDeletePendingPiece(db, job.variant, job.sequence, job.segmentCount);
+      removeVariantPieceRegistrationsForPiece(this, pieceCid);
       this._notifyStagingStateChanged();
       return;
     }
@@ -1881,47 +1928,36 @@ export class BrowserFilstreamUploadSession {
     this._notifyStagingStateChanged();
     let storeResult;
     try {
-      storeResult = await this.context.store(stream);
+      storeResult = await this.context.store(stream, { pieceCid: job.pieceRef });
+    } catch (e) {
+      removeVariantPieceRegistrationsForPiece(this, pieceCid);
+      throw e;
     } finally {
       this._pdpUploadsInFlight -= 1;
       this._notifyStagingStateChanged();
     }
-    const pieceRef = storeResult?.pieceCid;
-    if (!pieceRef) {
-      throw new StoreError(500, "store() response is missing pieceCid");
+    const got = storeResult?.pieceCid;
+    if (!got || String(got) !== pieceCid) {
+      removeVariantPieceRegistrationsForPiece(this, pieceCid);
+      throw new StoreError(500, "store() response is missing or mismatched pieceCid");
     }
-    const pieceCid = String(pieceRef);
-    const retrievalUrl = await getPieceRetrievalUrl(this.context, pieceRef);
+    const piece = this.piecesByCid.get(pieceCid);
+    if (!piece) {
+      throw new StoreError(500, "Missing pre-registered piece record for variant upload");
+    }
     const byteLength =
       typeof storeResult?.size === "number" ? storeResult.size : job.byteLength;
-    const abandoned = this._isVariantSequenceAbandoned(job.variant, job.sequence);
-    /** @type {PieceRecord} */
-    const piece = {
-      pieceRef,
-      pieceCid,
-      retrievalUrl,
-      byteLength,
-      pieceMetadata: job.pieceMetadata,
-      committed: false,
-      abandoned,
-      variant: job.variant,
-      sequence: job.sequence,
-      storedAt: new Date().toISOString(),
-    };
-    this.piecesByCid.set(piece.pieceCid, piece);
-    for (const entry of job.entries) {
-      this.fileMappings.push({
-        path: entry.path,
-        mimeType: entry.mimeType,
-        pieceCid: piece.pieceCid,
-        retrievalUrl: piece.retrievalUrl,
-        offset: entry.offset,
-        length: entry.length,
-        variant: job.variant,
-        sequence: job.sequence,
-        segmentIndex: entry.segmentIndex,
-      });
+    piece.byteLength = byteLength;
+    const retrievalUrl = await getPieceRetrievalUrl(this.context, job.pieceRef);
+    if (retrievalUrl) {
+      piece.retrievalUrl = retrievalUrl;
+      for (const m of this.fileMappings) {
+        if (m.pieceCid === pieceCid) {
+          m.retrievalUrl = retrievalUrl;
+        }
+      }
     }
+    piece.abandoned = this._isVariantSequenceAbandoned(job.variant, job.sequence);
     this._notifyStagingStateChanged();
   }
 
@@ -2199,6 +2235,9 @@ export class BrowserFilstreamUploadSession {
     if (buffer.pendingOrd <= 0 || buffer.entries.length === 0) {
       throw new StoreError(500, "Variant buffer flush requested with no pending entries");
     }
+    if (!buffer.pieceHasher) {
+      throw new StoreError(500, "Variant piece hasher missing at flush");
+    }
 
     const metadata = variantPieceMetadata(
       this.assetId,
@@ -2207,12 +2246,48 @@ export class BrowserFilstreamUploadSession {
       buffer.segmentStart,
       buffer.segmentEnd,
     );
+    const pieceRef = pieceLinkFromHasher(buffer.pieceHasher);
+    const pieceCid = String(pieceRef);
+    const retrievalUrl = syncPieceRetrievalUrl(this.context, pieceRef);
+    if (!retrievalUrl) {
+      throw new StoreError(500, "getPieceUrl failed for variant piece");
+    }
+    /** @type {PieceRecord} */
+    const pieceRecord = {
+      pieceRef,
+      pieceCid,
+      retrievalUrl,
+      byteLength: buffer.size,
+      pieceMetadata: metadata,
+      committed: false,
+      abandoned: false,
+      variant: buffer.variant,
+      sequence: buffer.sequence,
+      storedAt: new Date().toISOString(),
+    };
+    this.piecesByCid.set(pieceCid, pieceRecord);
+    for (const entry of buffer.entries) {
+      this.fileMappings.push({
+        path: entry.path,
+        mimeType: entry.mimeType,
+        pieceCid,
+        retrievalUrl,
+        offset: entry.offset,
+        length: entry.length,
+        variant: buffer.variant,
+        sequence: buffer.sequence,
+        segmentIndex: entry.segmentIndex,
+      });
+    }
+
     /** @type {VariantPieceUploadJob} */
     const job = {
       variant: buffer.variant,
       sequence: buffer.sequence,
       segmentCount: buffer.pendingOrd,
       byteLength: buffer.size,
+      pieceRef,
+      pieceCid,
       pieceMetadata: metadata,
       entries: buffer.entries.map((entry) => ({
         path: entry.path,
@@ -2228,6 +2303,7 @@ export class BrowserFilstreamUploadSession {
     buffer.size = 0;
     buffer.segmentStart = null;
     buffer.segmentEnd = null;
+    buffer.pieceHasher = null;
     this._notifyStagingStateChanged();
     this._queueVariantPieceUpload(job);
   }
@@ -2287,6 +2363,13 @@ export class BrowserFilstreamUploadSession {
         e instanceof Error ? e.message : String(e),
       );
     }
+    if (ord === 0) {
+      buffer.pieceHasher = createPieceHasher();
+    }
+    if (!buffer.pieceHasher) {
+      throw new StoreError(500, "Variant piece hasher missing after segment write");
+    }
+    buffer.pieceHasher.write(bytes);
     this._notifyStagingStateChanged();
     if (buffer.size >= this.cfg.maxPieceBytes) {
       await this.flushVariantBuffer(buffer);
@@ -2312,6 +2395,7 @@ export class BrowserFilstreamUploadSession {
     buffer.size = 0;
     buffer.segmentStart = null;
     buffer.segmentEnd = null;
+    buffer.pieceHasher = null;
     for (const piece of this.piecesByCid.values()) {
       if (!piece.committed && piece.variant === variant) {
         piece.abandoned = true;
@@ -2688,11 +2772,14 @@ export class BrowserFilstreamUploadSession {
     /** @type {Record<string, unknown> | null} */
     let publishedMeta = null;
     this._finalizePdpFlushJobs = [];
+    /** @type {number | null} */
+    let catalogEntryId = null;
+    /** @type {string | null} */
+    let catalogTxHash = null;
     try {
       for (const buffer of this.variantBuffers.values()) {
         await this.flushVariantBuffer(buffer);
       }
-      await this._waitForVariantUploadsIdle();
       this._throwIfVariantUploadFailed();
       this.rewriteVariantPlaylists();
       const variantPlaylists = [...this.textFiles.values()].filter((f) =>
@@ -2820,61 +2907,97 @@ export class BrowserFilstreamUploadSession {
         variant: mdmAfterCat.FS_VAR || "root",
         sequence: null,
       });
-    } finally {
+
+      if (!isCatalogConfigured()) {
+        throw new StoreError(
+          500,
+          "Missing catalog contract address in config",
+          "Set window.__FILSTREAM_CONFIG__.catalogContractAddress before uploading.",
+        );
+      }
+      const manifestMapForCatalog = this.fileMappings.find((f) => f.path === "manifest.json");
+      const manifestPieceCidForCatalog =
+        typeof manifestMapForCatalog?.pieceCid === "string"
+          ? manifestMapForCatalog.pieceCid.trim()
+          : "";
+      if (!manifestPieceCidForCatalog) {
+        throw new StoreError(500, "Missing manifest piece CID for catalog");
+      }
+      const title = titleFromListingDoc(listingDocFromSession(this));
+      const catWrite = await addCatalogEntryWithSessionKey({
+        claimedUser: this.clientAddress,
+        sessionPrivateKey: this.sessionPrivateKey,
+        assetId: this.assetId,
+        providerId: this.providerId,
+        manifestCid: manifestPieceCidForCatalog,
+        title,
+      });
+      catalogTxHash = catWrite.txHash;
+      const foundId = await findCatalogEntryIdForAssetManifest({
+        creatorAddress: this.clientAddress,
+        assetId: this.assetId,
+        manifestCid: manifestPieceCidForCatalog,
+        maxAttempts: 35,
+        intervalMs: 600,
+      });
+      if (foundId == null) {
+        throw new StoreError(
+          500,
+          "Catalog entry not visible after add",
+          "RPC may be behind; check catalog and remove duplicate entry if needed.",
+        );
+      }
+      catalogEntryId = foundId;
+    } catch (e) {
+      throw e;
+    }
+
+    try {
       await this.flushFinalizePdpBatch();
+    } catch (e) {
+      await rollbackCatalogEntryIfPending(this, catalogEntryId);
+      throw e;
     }
 
-    const commit = await this.commitPendingPieces();
-    const liveFiles = this.fileMappings.filter((f) => {
-      const p = this.piecesByCid.get(f.pieceCid);
-      return p != null && !p.abandoned;
-    });
-    const playback = extractPlaybackUrls(
-      liveFiles,
-      this.posterStagedFile?.path ?? null,
-      this.posterAnimStagedFile?.path ?? null,
-    );
-    const manifestMap = liveFiles.find((f) => f.path === "manifest.json");
-    const manifestPieceCid =
-      typeof manifestMap?.pieceCid === "string" ? manifestMap.pieceCid : null;
-    let catalogTransactionHash = null;
-
-    if (!isCatalogConfigured()) {
-      throw new StoreError(
-        500,
-        "Missing catalog contract address in config",
-        "Set window.__FILSTREAM_CONFIG__.catalogContractAddress before uploading.",
+    try {
+      await this._waitForVariantUploadsIdle();
+      this._throwIfVariantUploadFailed();
+      const commit = await this.commitPendingPieces();
+      const liveFiles = this.fileMappings.filter((f) => {
+        const p = this.piecesByCid.get(f.pieceCid);
+        return p != null && !p.abandoned;
+      });
+      const playback = extractPlaybackUrls(
+        liveFiles,
+        this.posterStagedFile?.path ?? null,
+        this.posterAnimStagedFile?.path ?? null,
       );
-    }
-    if (!manifestPieceCid) {
-      throw new StoreError(500, "Missing manifest piece CID after commit");
-    }
-    const title = titleFromListingDoc(listingDocFromSession(this));
-    const catWrite = await addCatalogEntryWithSessionKey({
-      claimedUser: this.clientAddress,
-      sessionPrivateKey: this.sessionPrivateKey,
-      assetId: this.assetId,
-      providerId: this.providerId,
-      manifestCid: manifestPieceCid,
-      title,
-    });
-    catalogTransactionHash = catWrite.txHash;
-    this.finalized = true;
+      const manifestMap = liveFiles.find((f) => f.path === "manifest.json");
+      const manifestPieceCid =
+        typeof manifestMap?.pieceCid === "string" ? manifestMap.pieceCid : null;
+      if (!manifestPieceCid) {
+        throw new StoreError(500, "Missing manifest piece CID after commit");
+      }
+      this.finalized = true;
 
-    return {
-      finalized: true,
-      committedCount: commit.committedCount,
-      transactionHash: commit.transactionHash,
-      catalogTransactionHash,
-      videoId: this.assetId,
-      assetId: this.assetId,
-      masterAppUrl: playback.masterAppUrl,
-      manifestUrl: playback.manifestUrl,
-      manifestPieceCid,
-      posterUrl: playback.posterUrl,
-      posterAnimUrl: playback.posterAnimUrl,
-      dataSetId: this.dataSetId,
-    };
+      return {
+        finalized: true,
+        committedCount: commit.committedCount,
+        transactionHash: commit.transactionHash,
+        catalogTransactionHash: catalogTxHash,
+        videoId: this.assetId,
+        assetId: this.assetId,
+        masterAppUrl: playback.masterAppUrl,
+        manifestUrl: playback.manifestUrl,
+        manifestPieceCid,
+        posterUrl: playback.posterUrl,
+        posterAnimUrl: playback.posterAnimUrl,
+        dataSetId: this.dataSetId,
+      };
+    } catch (e) {
+      await rollbackCatalogEntryIfPending(this, catalogEntryId);
+      throw e;
+    }
   }
 
   async deleteUploadDatabase() {
