@@ -53,6 +53,7 @@ import {
   proposeDonateTransfer,
   resolveViewerProvider,
 } from "../filstream-viewer-donate.mjs";
+import "../components/movie-link-showcase.mjs";
 
 const shaka = (
   await import("https://esm.sh/shaka-player@4.7.11/dist/shaka-player.ui.js")
@@ -1036,54 +1037,22 @@ function createCreatorAvatarElement(creator, className) {
   return placeholder;
 }
 
-function createCatalogCard(row, opts = {}) {
+function createMovieLinkShowcaseElement(row, opts = {}) {
+  const el = document.createElement("movie-link-showcase");
   const showCreator = opts.showCreator !== false;
   const variant = opts.variant === "watch" ? "watch" : "discover";
   const safeTitle =
     String(row.title ?? "").trim() || String(row.assetId ?? "").trim() || "Untitled";
-  const a = document.createElement("a");
-  a.className = "viewer-catalog-card";
-  if (variant === "watch") {
-    a.classList.add("viewer-catalog-card--watch");
-  }
-  if (currentVideoId && row.assetId === currentVideoId) {
-    a.classList.add("viewer-catalog-card--current");
-  }
-  a.href = buildViewerUrlForVideoId(row.assetId);
-  a.title = safeTitle;
-
-  const thumbWrap = document.createElement("div");
-  thumbWrap.className = "viewer-catalog-card-thumb-wrap";
-  const thumb = document.createElement("img");
-  thumb.className = "viewer-catalog-card-thumb viewer-catalog-card-thumb--still";
-  thumb.alt = "";
-  thumb.loading = "lazy";
-  thumb.decoding = "async";
-  thumb.dataset.videoId = row.assetId;
-  thumbWrap.appendChild(thumb);
-
-  const body = document.createElement("div");
-  body.className = "viewer-catalog-card-body";
-  const title = document.createElement("div");
-  title.className = "viewer-catalog-card-title";
-  title.textContent = safeTitle;
-  body.appendChild(title);
-
-  if (showCreator) {
-    const creatorLine = document.createElement("div");
-    creatorLine.className = "viewer-catalog-card-creator";
-    creatorLine.appendChild(
-      createCreatorAvatarElement(row.creator, "viewer-catalog-card-creator-avatar"),
-    );
-    const creatorName = document.createElement("span");
-    creatorName.className = "viewer-catalog-card-creator-name";
-    creatorName.textContent = bylineNameForCreator(row.creator);
-    creatorLine.appendChild(creatorName);
-    body.appendChild(creatorLine);
-  }
-
-  a.append(thumbWrap, body);
-  return a;
+  el.assetId = row.assetId;
+  el.href = buildViewerUrlForVideoId(row.assetId);
+  el.videoTitle = safeTitle;
+  el.showCreator = showCreator;
+  el.creatorAddress = row.creator;
+  el.creatorDisplayName = bylineNameForCreator(row.creator);
+  el.creatorAvatarUrl = profileUrlForCreator(row.creator);
+  el.variant = variant;
+  el.current = Boolean(currentVideoId && row.assetId === currentVideoId);
+  return el;
 }
 
 /**
@@ -1202,13 +1171,13 @@ function renderCatalogDiscovery(active) {
     p.textContent = "No videos match this search.";
     latestSection.appendChild(p);
   } else {
-    const strip = document.createElement("div");
-    strip.className = "viewer-catalog-strip";
+    const grid = document.createElement("div");
+    grid.className = "viewer-catalog-grid";
     for (const row of latestRows) {
-      strip.appendChild(createCatalogCard(row, { showCreator: true }));
+      grid.appendChild(createMovieLinkShowcaseElement(row, { showCreator: true }));
       renderedRows.push(row);
     }
-    latestSection.appendChild(strip);
+    latestSection.appendChild(grid);
   }
   catalogAside.appendChild(latestSection);
 
@@ -1268,14 +1237,14 @@ function renderCatalogDiscovery(active) {
     creatorHead.appendChild(creatorCount);
     creatorSection.appendChild(creatorHead);
 
-    const strip = document.createElement("div");
-    strip.className = "viewer-catalog-strip";
+    const grid = document.createElement("div");
+    grid.className = "viewer-catalog-grid";
     const rows = sortEntriesNewestFirst(bucket.rows);
     for (const row of rows) {
-      strip.appendChild(createCatalogCard(row, { showCreator: false }));
+      grid.appendChild(createMovieLinkShowcaseElement(row, { showCreator: false }));
       renderedRows.push(row);
     }
-    creatorSection.appendChild(strip);
+    creatorSection.appendChild(grid);
     catalogAside.appendChild(creatorSection);
   }
 
@@ -1348,7 +1317,9 @@ function renderCatalogWatch(active) {
   list.className = "viewer-watch-list";
   const renderedRows = sameCreator;
   for (const row of renderedRows) {
-    list.appendChild(createCatalogCard(row, { showCreator: false, variant: "watch" }));
+    list.appendChild(
+      createMovieLinkShowcaseElement(row, { showCreator: false, variant: "watch" }),
+    );
   }
   catalogAside.appendChild(list);
   void hydrateCatalogPosters(renderedRows);
@@ -1371,9 +1342,12 @@ async function hydrateCatalogPosters(rows) {
   if (!catalogAside) return;
   /** @type {Map<string, HTMLImageElement[]>} */
   const imagesByVideoId = new Map();
-  const cards = catalogAside.querySelectorAll(".viewer-catalog-card-thumb--still");
-  for (const node of cards) {
-    const img = /** @type {HTMLImageElement} */ (node);
+  const hosts = catalogAside.querySelectorAll("movie-link-showcase");
+  for (const host of hosts) {
+    const img = /** @type {HTMLImageElement | null} */ (
+      host.shadowRoot?.querySelector(".viewer-catalog-card-thumb--still")
+    );
+    if (!img) continue;
     const videoId = String(img.dataset.videoId || "").trim();
     if (!videoId) continue;
     const list = imagesByVideoId.get(videoId) ?? [];
