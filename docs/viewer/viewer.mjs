@@ -8,35 +8,24 @@
  * - manifest.json is fetched once per `videoId` and then reused from cache
  */
 import {
-  CATALOG_CREATOR_PROFILE_SYNC_LIMIT,
-  CATALOG_FULL_REFRESH_MS,
-  CATALOG_PAGE_SIZE,
-} from "../filstream-constants.mjs";
+  FILSTREAM_BRAND,
+  hydrateFilstreamHeaderProfile,
+  mountFilstreamHeader,
+} from "../filstream-brand.mjs";
 import {
   broadcastCopyFromMeta,
   formatUploadDateLabel,
 } from "../filstream-broadcast-view.mjs";
 import {
-  hydrateFilstreamHeaderProfile,
-  FILSTREAM_BRAND,
-  mountFilstreamHeader,
-} from "../filstream-brand.mjs";
-import {
-  buildCreatorUrlForAddress,
-  buildDiscoverHomeUrlWithSearchQuery,
-  buildViewerUrlForVideoId,
-  getFilstreamStoreConfig,
-} from "../filstream-config.mjs";
-import {
   cacheCatalogEntries,
   findCachedEntryByVideoId,
   loadCachedCatalogEntries,
-  loadCatalogCursor,
   loadCachedCreatorProfiles,
+  loadCatalogCursor,
   loadLastFullRefreshAtMs,
   loadManifestCache,
-  saveCatalogCursor,
   saveCachedCreatorProfiles,
+  saveCatalogCursor,
   saveLastFullRefreshAtMs,
   saveManifestCache,
 } from "../filstream-catalog-cache.mjs";
@@ -48,6 +37,17 @@ import {
   readCatalogUsername,
   resolveManifestUrl,
 } from "../filstream-catalog-chain.mjs";
+import {
+  buildCreatorUrlForAddress,
+  buildDiscoverHomeUrlWithSearchQuery,
+  buildViewerUrlForVideoId,
+  getFilstreamStoreConfig,
+} from "../filstream-config.mjs";
+import {
+  CATALOG_CREATOR_PROFILE_SYNC_LIMIT,
+  CATALOG_FULL_REFRESH_MS,
+  CATALOG_PAGE_SIZE,
+} from "../filstream-constants.mjs";
 import {
   donateConfigFromMeta,
   proposeDonateTransfer,
@@ -1135,7 +1135,7 @@ function renderViewerMeta(metaDoc, entry = null) {
       const link = document.createElement("a");
       link.href = buildCreatorUrlForAddress(creator);
       link.className = "viewer-creator-name";
-      link.textContent = `By ${creatorName}`;
+      link.textContent = creatorName;
 
       cluster.append(avatarLink, link);
       bylineCatalogEl.appendChild(cluster);
@@ -1335,11 +1335,6 @@ function renderCatalogWatch(active) {
         normalizeCreatorKey(row.creator) === normalizeCreatorKey(current.creator),
     ),
   );
-
-  const count = document.createElement("p");
-  count.className = "viewer-watch-count";
-  count.textContent = `${sameCreator.length} other video${sameCreator.length === 1 ? "" : "s"}`;
-  catalogAside.appendChild(count);
 
   if (!sameCreator.length) {
     const p = document.createElement("p");
