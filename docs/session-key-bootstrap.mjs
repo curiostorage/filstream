@@ -91,11 +91,13 @@ export function minExpirationSummaryLocal(expMap) {
 /**
  * @param {import("./eip6963.mjs").Eip1193Provider} provider
  * @param {string} txHash
- * @param {{ timeoutMs?: number, intervalMs?: number }} [opts]
+ * @param {{ timeoutMs?: number, intervalMs?: number, timeoutMessage?: string }} [opts]
  */
-async function waitForProviderReceipt(provider, txHash, opts = {}) {
+export async function waitForProviderReceipt(provider, txHash, opts = {}) {
   const timeoutMs = opts.timeoutMs ?? 180_000;
   const intervalMs = opts.intervalMs ?? 1_500;
+  const timeoutMessage =
+    opts.timeoutMessage ?? "Timed out waiting for transaction receipt";
   const start = Date.now();
   for (;;) {
     const receipt = await provider.request({
@@ -106,10 +108,98 @@ async function waitForProviderReceipt(provider, txHash, opts = {}) {
       return /** @type {Record<string, unknown>} */ (receipt);
     }
     if (Date.now() - start > timeoutMs) {
-      throw new Error("Timed out waiting for session-key authorization tx receipt");
+      throw new Error(timeoutMessage);
     }
     await new Promise((resolve) => setTimeout(resolve, intervalMs));
   }
+}
+
+/**
+ * @param {Record<string, unknown>} receipt
+ * @returns {boolean}
+ */
+export function receiptSucceeded(receipt) {
+  const status = receipt?.status;
+  return status === "0x1" || status === 1 || status === 1n;
+}
+
+/**
+ * @param {{ syncExpirations: (permissions: string[]) => Promise<void>, expirations: Record<string, bigint | undefined> }} sessionKey
+ * @param {string[]} permissions
+ * @param {{ afterLoginSync?: () => void }} [hooks]
+ * @returns {Promise<Record<string, string>>}
+ */
+export async function finalizeSessionKeyAfterLoginMined(
+  sessionKey,
+  permissions,
+  hooks,
+) {
+  hooks?.afterLoginSync?.();
+  await sessionKey.syncExpirations(permissions);
+  /** @type {Record<string, string>} */
+  const sessionExpirations = {};
+  const raw = sessionKey.expirations;
+  for (const perm of permissions) {
+    const exp = raw[perm];
+    if (exp != null) {
+      sessionExpirations[perm] = exp.toString();
+    }
+  }
+  return sessionExpirations;
+}
+
+/**
+ * Submit `loginAndFund` only (no receipt wait). Pair with {@link waitForProviderReceipt}
+ * and {@link finalizeSessionKeyAfterLoginMined} for chained funding in the same block.
+ *
+ * @param {import("./eip6963.mjs").Eip1193Provider} provider
+ * @param {string} rootAddress
+ * @param {{ onTransactionSubmitted?: (txHash: string) => void }} [hooks]
+ * @returns {Promise<{
+ *   txHash: string,
+ *   sessionPrivateKey: string,
+ *   sessionKey: object,
+ *   permissions: string[],
+ * }>}
+ */
+export async function submitSessionLoginAndFundTransaction(
+  provider,
+  rootAddress,
+  hooks,
+) {
+  const cfg = getFilstreamStoreConfig();
+  const chain = getChain(cfg.storeChainId);
+  await ensureWalletChain(provider, chain);
+
+  const normalizedRoot = getAddress(/** @type {`0x${string}`} */ (rootAddress));
+
+  const walletClient = createWalletClient({
+    account: normalizedRoot,
+    chain,
+    transport: custom(provider),
+  });
+
+  const sessionPrivateKey = generatePrivateKey();
+  const sessionKey = fromSecp256k1({
+    privateKey: sessionPrivateKey,
+    root: normalizedRoot,
+    chain,
+    transport: http(cfg.storeRpcUrl),
+  });
+
+  const expiresAt = BigInt(Math.floor(Date.now() / 1000) + 3600);
+  const sessionFundValue = BigInt(cfg.sessionKeyFundAttoFil);
+  const permissions = filstreamSessionPermissions();
+
+  const txHash = await walletClient.writeContract({
+    address: chain.contracts.sessionKeyRegistry.address,
+    abi: chain.contracts.sessionKeyRegistry.abi,
+    functionName: "loginAndFund",
+    args: [sessionKey.address, expiresAt, permissions, FILSTREAM_SESSION_ORIGIN],
+    value: sessionFundValue,
+  });
+  hooks?.onTransactionSubmitted?.(txHash);
+  return { txHash, sessionPrivateKey, sessionKey, permissions };
 }
 
 /**
@@ -324,57 +414,19 @@ export async function revokeSessionKeyWithWallet(input) {
  * @returns {Promise<{ sessionPrivateKey: string, sessionExpirations: Record<string, string> }>}
  */
 export async function authorizeSessionKeyForUpload(provider, rootAddress, hooks) {
-  const cfg = getFilstreamStoreConfig();
-  const chain = getChain(cfg.storeChainId);
-  await ensureWalletChain(provider, chain);
-
-  const normalizedRoot = getAddress(/** @type {`0x${string}`} */ (rootAddress));
-
-  const walletClient = createWalletClient({
-    account: normalizedRoot,
-    chain,
-    transport: custom(provider),
+  const { txHash, sessionPrivateKey, sessionKey, permissions } =
+    await submitSessionLoginAndFundTransaction(provider, rootAddress, hooks);
+  const receipt = await waitForProviderReceipt(provider, txHash, {
+    timeoutMessage: "Timed out waiting for session-key authorization tx receipt",
   });
-
-  const sessionPrivateKey = generatePrivateKey();
-  const sessionKey = fromSecp256k1({
-    privateKey: sessionPrivateKey,
-    root: normalizedRoot,
-    chain,
-    transport: http(cfg.storeRpcUrl),
-  });
-
-  const expiresAt = BigInt(Math.floor(Date.now() / 1000) + 3600);
-  const sessionFundValue = BigInt(cfg.sessionKeyFundAttoFil);
-  const permissions = filstreamSessionPermissions();
-
-  const txHash = await walletClient.writeContract({
-    address: chain.contracts.sessionKeyRegistry.address,
-    abi: chain.contracts.sessionKeyRegistry.abi,
-    functionName: "loginAndFund",
-    args: [sessionKey.address, expiresAt, permissions, FILSTREAM_SESSION_ORIGIN],
-    value: sessionFundValue,
-  });
-  hooks?.onTransactionSubmitted?.(txHash);
-  const receipt = await waitForProviderReceipt(provider, txHash);
-  const status = receipt?.status;
-  if (!(status === "0x1" || status === 1 || status === 1n)) {
+  if (!receiptSucceeded(receipt)) {
     throw new Error(`Session-key authorization reverted: ${txHash}`);
   }
-
-  hooks?.afterLoginSync?.();
-  await sessionKey.syncExpirations(permissions);
-
-  /** @type {Record<string, string>} */
-  const sessionExpirations = {};
-  const raw = sessionKey.expirations;
-  for (const perm of permissions) {
-    const exp = raw[perm];
-    if (exp != null) {
-      sessionExpirations[perm] = exp.toString();
-    }
-  }
-
+  const sessionExpirations = await finalizeSessionKeyAfterLoginMined(
+    sessionKey,
+    permissions,
+    hooks,
+  );
   return {
     sessionPrivateKey,
     sessionExpirations,
