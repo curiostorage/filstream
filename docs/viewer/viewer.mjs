@@ -104,6 +104,8 @@ let syncInFlight = false;
 let syncIntervalId = 0;
 let isVideoPlaying = false;
 let destroyed = false;
+/** Stops {@link installPlaybackEndClamp} listeners when aborted. */
+let playbackEndClampAbort = null;
 const cfg = getFilstreamStoreConfig();
 const syncIntervalMs = Math.max(5_000, cfg.catalogSyncIntervalMs);
 
@@ -830,6 +832,59 @@ function nudgeShakaBufferingPollAfterLoad(mediaEl) {
   mediaEl.addEventListener("canplay", nudge, { once: true });
 }
 
+function stopPlaybackEndClamp() {
+  playbackEndClampAbort?.abort();
+  playbackEndClampAbort = null;
+}
+
+/**
+ * Stopgap: when segment retrieval returns 200 (full piece) instead of 206, the
+ * buffered timeline can extend past the real HLS duration and the player may
+ * loop extra data. Clamp playback to Shaka's manifest-derived seek range end.
+ *
+ * @param {import("shaka-player").Player} player
+ * @param {HTMLVideoElement} video
+ */
+function installPlaybackEndClamp(player, video) {
+  stopPlaybackEndClamp();
+  const ac = new AbortController();
+  playbackEndClampAbort = ac;
+  const { signal } = ac;
+
+  const nearEndSlackSec = 0.12;
+  const seekBackResetSec = 0.45;
+  let clampedUntilSeekBack = false;
+
+  const onTimeUpdate = () => {
+    if (signal.aborted) return;
+    let end;
+    try {
+      end = player.seekRange().end;
+    } catch {
+      return;
+    }
+    if (!Number.isFinite(end) || end <= 0) return;
+
+    if (video.currentTime < end - seekBackResetSec) {
+      clampedUntilSeekBack = false;
+    }
+    if (video.currentTime < end - nearEndSlackSec) return;
+    if (clampedUntilSeekBack) return;
+    clampedUntilSeekBack = true;
+
+    video.pause();
+    try {
+      if (video.currentTime > end) {
+        video.currentTime = end;
+      }
+    } catch {
+      /* ignore */
+    }
+  };
+
+  video.addEventListener("timeupdate", onTimeUpdate, { signal });
+}
+
 async function ensurePlayer() {
   if (shakaPlayer) return shakaPlayer;
   if (!shakaContainerEl || !videoEl) {
@@ -1467,6 +1522,7 @@ async function resolveEntryForVideo(videoId) {
  */
 async function openVideoById(videoId) {
   currentVideoId = videoId.trim();
+  stopPlaybackEndClamp();
   applyViewerModeLayout();
   renderCatalogSidebar();
   if (!currentVideoId) {
@@ -1499,6 +1555,9 @@ async function openVideoById(videoId) {
   const player = await ensurePlayer();
   await loadMasterWithAppleMseFallback(player, master);
   nudgeShakaBufferingPollAfterLoad(videoEl);
+  if (videoEl) {
+    installPlaybackEndClamp(player, videoEl);
+  }
   renderViewerMeta(merged ?? manifestDoc, entry);
   setStatus("");
 }
@@ -1531,6 +1590,7 @@ try {
 
 window.addEventListener("beforeunload", () => {
   destroyed = true;
+  stopPlaybackEndClamp();
   if (syncIntervalId) {
     clearInterval(syncIntervalId);
     syncIntervalId = 0;
