@@ -4,7 +4,7 @@
  * streamed to Synapse via ReadableStream, deleting each IDB record after it is read.
  */
 import {
-  buildViewerUrlForVideoId,
+  buildAbsoluteViewerUrlForVideoId,
   ensureFilstreamId,
   getFilstreamStoreConfig,
 } from "./filstream-config.mjs";
@@ -2775,8 +2775,8 @@ export class BrowserFilstreamUploadSession {
 
       try {
         if (publishedMeta) {
-          const viewerRedirect = buildViewerUrlForVideoId(this.assetId);
-          const embedPlayer = buildViewerUrlForVideoId(this.assetId, { embed: true });
+          const viewerRedirect = buildAbsoluteViewerUrlForVideoId(this.assetId);
+          const embedPlayer = buildAbsoluteViewerUrlForVideoId(this.assetId, { embed: true });
           const pb =
             typeof publishedMeta.playback === "object" &&
             publishedMeta.playback !== null &&

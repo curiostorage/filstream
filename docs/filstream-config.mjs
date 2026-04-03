@@ -148,6 +148,22 @@ export function buildViewerUrlForVideoId(videoId, opts = {}) {
 }
 
 /**
+ * Same as {@link buildViewerUrlForVideoId} but resolved against `viewBaseUrl` so links work from
+ * non-app origins (e.g. `share.html` served as a PDP piece, Open Graph meta tags).
+ *
+ * @param {string} videoId
+ * @param {{ embed?: boolean }} [opts]
+ * @returns {string}
+ */
+export function buildAbsoluteViewerUrlForVideoId(videoId, opts = {}) {
+  const rel = buildViewerUrlForVideoId(videoId, opts);
+  const base = getFilstreamStoreConfig().viewBaseUrl.trim();
+  if (!base) return rel;
+  const normalized = base.endsWith("/") ? base : `${base}/`;
+  return new URL(rel, normalized).href;
+}
+
+/**
  * Creator page URL: `creator.html?creator=<wallet-address>` (relative).
  *
  * @param {string} creatorAddress

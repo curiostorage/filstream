@@ -5,6 +5,7 @@
  * Catalog discovery is on-chain (`CatalogRegistry`) with IndexedDB cache:
  * - entries are synced every ~30s when visible (or when hidden but video is playing)
  * - creator username/profile picture are refreshed for visible creators on the same cadence
+ * - discover / “more from creator” sidebars skip DOM rebuild when the visible data is unchanged (no blink on no-op sync)
  * - manifest.json is fetched once per `videoId` and then reused from cache
  */
 import {
@@ -30,14 +31,17 @@ import {
   saveManifestCache,
 } from "../filstream-catalog-cache.mjs";
 import {
+  buildPieceRetrievalUrl,
   isCatalogConfigured,
   readCatalogLatest,
   readCatalogNewerThan,
   readCatalogProfilePicturePieceCid,
   readCatalogUsername,
   resolveManifestUrl,
+  resolveProviderServiceUrl,
 } from "../filstream-catalog-chain.mjs";
 import {
+  buildAbsoluteViewerUrlForVideoId,
   buildCreatorUrlForAddress,
   buildDiscoverHomeUrlWithSearchQuery,
   buildViewerUrlForVideoId,
@@ -95,6 +99,8 @@ let shakaPlayer = null;
 let shakaUiOverlay = null;
 /** @type {import("../filstream-catalog-chain.mjs").CatalogEntry[]} */
 let catalogEntries = [];
+/** Fingerprint of the last sidebar paint; avoids tearing down the DOM when periodic sync is a no-op. */
+let lastRenderedCatalogSidebarSignature = "";
 /** @type {Map<string, { username: string, profilePieceCid: string, profileUrl: string, updatedAtMs: number }>} */
 const creatorProfileCache = new Map();
 let currentVideoId = requestedVideoId;
@@ -261,6 +267,27 @@ function sortEntriesNewestFirst(rows) {
   });
 }
 
+function computeCatalogSidebarSignature() {
+  const active = sortEntriesNewestFirst(catalogEntries.filter((x) => x.active));
+  const catalogPart = active.map((e) => ({
+    entryId: e.entryId,
+    createdAt: e.createdAt,
+    updatedAt: e.updatedAt,
+    creator: e.creator,
+    assetId: e.assetId,
+    providerId: e.providerId,
+    manifestCid: e.manifestCid,
+    title: e.title,
+    active: e.active,
+  }));
+  return JSON.stringify({
+    mode: inWatchMode() ? "watch" : "discover",
+    videoId: currentVideoId || "",
+    q: catalogSearchQuery.trim(),
+    catalog: catalogPart,
+  });
+}
+
 function matchesCreatorSearch(creator, query) {
   const q = String(query || "").trim().toLowerCase();
   if (!q) return true;
@@ -385,6 +412,40 @@ function posterUrlFromDoc(doc) {
   return typeof playbackPoster === "string" && playbackPoster.trim() !== ""
     ? playbackPoster.trim()
     : null;
+}
+
+/**
+ * URL of the uploaded `share.html` piece (Open Graph / Twitter Card). Falls back to the public viewer URL.
+ *
+ * @param {unknown} metaDoc
+ * @param {import("../filstream-catalog-chain.mjs").CatalogEntry | null} entry
+ * @returns {Promise<string>}
+ */
+async function resolveSharePageUrl(metaDoc, entry) {
+  const fallback = () =>
+    entry?.assetId ? buildAbsoluteViewerUrlForVideoId(entry.assetId) : "";
+  if (!metaDoc || typeof metaDoc !== "object" || metaDoc === null || !entry) {
+    return fallback();
+  }
+  const files = /** @type {Record<string, unknown>} */ (metaDoc).files;
+  if (!Array.isArray(files)) return fallback();
+  for (const f of files) {
+    if (!f || typeof f !== "object" || f === null) continue;
+    const fr = /** @type {Record<string, unknown>} */ (f);
+    if (fr.path !== "share.html") continue;
+    const ru = fr.retrievalUrl;
+    if (typeof ru === "string" && ru.trim() !== "") return ru.trim();
+    const cid = fr.pieceCid;
+    if (typeof cid === "string" && cid.trim() !== "") {
+      try {
+        const serviceUrl = await resolveProviderServiceUrl(entry.providerId);
+        return buildPieceRetrievalUrl(serviceUrl, cid.trim());
+      } catch {
+        return fallback();
+      }
+    }
+  }
+  return fallback();
 }
 
 function posterAnimUrlFromDoc(doc) {
@@ -541,7 +602,12 @@ async function performCreatorProfileSync() {
 
 async function refreshEntriesFromCache() {
   catalogEntries = await loadCachedCatalogEntries({ limit: 250, activeOnly: false });
-  await hydrateCreatorProfilesFromCache(catalogEntries);
+  const profileHydrationChanged = await hydrateCreatorProfilesFromCache(catalogEntries);
+  if (embedMode) return;
+  const nextSig = computeCatalogSidebarSignature();
+  if (nextSig === lastRenderedCatalogSidebarSignature && !profileHydrationChanged) {
+    return;
+  }
   renderCatalogSidebar();
 }
 
@@ -623,7 +689,7 @@ async function syncCatalogOnce(force = false) {
       if (loadedMeta && currentVideoId) {
         const currentEntry = await findCachedEntryByVideoId(currentVideoId);
         if (currentEntry?.active) {
-          renderViewerMeta(loadedMeta, currentEntry);
+          await renderViewerMeta(loadedMeta, currentEntry);
         }
       }
     }
@@ -934,7 +1000,11 @@ async function ensurePlayer() {
   return shakaPlayer;
 }
 
-function renderViewerActions(videoId) {
+/**
+ * @param {string} videoId
+ * @param {string} sharePageUrl — `share.html` retrieval URL (OG) or viewer URL fallback
+ */
+function renderViewerActions(videoId, sharePageUrl) {
   if (!viewerActionsEl) return;
   if (embedMode || !videoId) {
     viewerActionsEl.hidden = true;
@@ -953,7 +1023,10 @@ function renderViewerActions(videoId) {
     '<svg width="20" height="20" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M18 16a3 3 0 0 0-2.816 1.98L8.91 14.77a3.02 3.02 0 0 0 0-1.54l6.273-3.21A3 3 0 1 0 14 8a3.02 3.02 0 0 0 .09.77L7.816 12A3 3 0 1 0 8 15a3.02 3.02 0 0 0-.09-.77l6.273 3.21A3 3 0 1 0 18 16Z"/></svg>';
   shareBtn.addEventListener("click", async () => {
     try {
-      const url = buildViewerUrlForVideoId(videoId);
+      const url =
+        typeof sharePageUrl === "string" && sharePageUrl.trim() !== ""
+          ? sharePageUrl.trim()
+          : buildAbsoluteViewerUrlForVideoId(videoId);
       const mode = await copyTextToClipboardBestEffort(url);
       if (mode === "clipboard") {
         setStatus("Share URL copied.", "");
@@ -1145,7 +1218,7 @@ function createCatalogCard(row, opts = {}) {
  * @param {unknown} metaDoc
  * @param {import("../filstream-catalog-chain.mjs").CatalogEntry | null} [entry]
  */
-function renderViewerMeta(metaDoc, entry = null) {
+async function renderViewerMeta(metaDoc, entry = null) {
   const meta = mergeMetaLikeDocument(metaDoc);
   loadedMeta = meta;
   if (!meta || !metaSection) return;
@@ -1200,7 +1273,8 @@ function renderViewerMeta(metaDoc, entry = null) {
     }
   }
   renderDonateBlock(meta);
-  renderViewerActions(currentVideoId || "");
+  const shareUrl = await resolveSharePageUrl(metaDoc, entry);
+  renderViewerActions(currentVideoId || "", shareUrl);
 }
 
 function renderCatalogDiscovery(active) {
@@ -1414,9 +1488,10 @@ function renderCatalogSidebar() {
   const active = sortEntriesNewestFirst(catalogEntries.filter((x) => x.active));
   if (inWatchMode()) {
     renderCatalogWatch(active);
-    return;
+  } else {
+    renderCatalogDiscovery(active);
   }
-  renderCatalogDiscovery(active);
+  lastRenderedCatalogSidebarSignature = computeCatalogSidebarSignature();
 }
 
 /**
@@ -1584,7 +1659,7 @@ async function openVideoById(videoId) {
   if (videoEl) {
     installPlaybackEndClamp(player, videoEl);
   }
-  renderViewerMeta(merged ?? manifestDoc, entry);
+  awaitrenderViewerMeta(merged ?? manifestDoc, entry);
   setStatus("");
 }
 
