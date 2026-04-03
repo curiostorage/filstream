@@ -1,7 +1,7 @@
 /**
  * Creator page (on-chain catalog):
  * - `creator.html?creator=0x...` to view a specific channel
- * - no query param: follows connected wallet, or first available creator
+ * - no query param: wallet-first owner mode (no implicit fallback channel)
  *
  * Edit capabilities (owner only):
  * - update username (`setMyUsername`)
@@ -10,6 +10,7 @@
  */
 import { mountFilstreamHeader } from "../filstream-brand.mjs";
 import {
+  buildCreatorUrlForAddress,
   buildViewerUrlForVideoId,
   ensureFilstreamId,
   getFilstreamStoreConfig,
@@ -30,9 +31,15 @@ import {
   publishCreatorPosterImage,
   resolveOrCreateDataSet,
 } from "../browser-store.mjs";
-import { loadManifestCache, saveManifestCache } from "../filstream-catalog-cache.mjs";
+import {
+  loadCachedCatalogEntries,
+  loadCachedCreatorProfiles,
+  loadManifestCache,
+  saveManifestCache,
+} from "../filstream-catalog-cache.mjs";
 import { authorizeSessionKeyForUpload } from "../session-key-bootstrap.mjs";
 import {
+  clearSessionKeyFromStorage,
   expirationsForWizard,
   isSessionKeyRecoverable,
   loadSessionKeyFromStorage,
@@ -60,6 +67,9 @@ const editHint = document.getElementById("creator-edit-hint");
 const enableEditBtn = /** @type {HTMLButtonElement | null} */ (
   document.getElementById("creator-enable-edit")
 );
+const disconnectBtn = /** @type {HTMLButtonElement | null} */ (
+  document.getElementById("creator-disconnect")
+);
 const sessionKeyNoteEl = document.getElementById("creator-sessionkey-note");
 const editForm = document.getElementById("creator-edit-form");
 const nameInput = /** @type {HTMLInputElement | null} */ (document.getElementById("creator-name-input"));
@@ -75,6 +85,12 @@ const saveStatus = document.getElementById("creator-save-status");
 const movieEditList = document.getElementById("creator-movie-edit-list");
 const catalogSection = document.getElementById("creator-catalog-section");
 const movieListEl = document.getElementById("creator-movie-list");
+const emptyStateSection = document.getElementById("creator-empty-state");
+const emptyStateConnectBtn = /** @type {HTMLButtonElement | null} */ (
+  document.getElementById("creator-empty-connect")
+);
+const browseSection = document.getElementById("creator-browse-section");
+const browseListEl = document.getElementById("creator-browse-list");
 
 // Legacy dev-only paste box remains hidden in on-chain mode.
 document.getElementById("creator-dev-paste-box")?.setAttribute("hidden", "");
@@ -91,12 +107,29 @@ let creatorProfilePicturePieceCid = "";
 let creatorProfilePictureUrl = "";
 /** @type {import("../filstream-catalog-chain.mjs").CatalogEntry[]} */
 let creatorEntries = [];
+/** @type {{ creator: string, activeCount: number, latestCreatedAt: number, username: string }[]} */
+let browseCreators = [];
 /** @type {string | null} */
 let sessionPrivateKey = null;
 /** @type {Record<number, boolean>} */
 const deleteBusyByEntry = {};
 let profileSaveBusy = false;
 let profilePosterBusy = false;
+const CREATOR_DISCONNECTED_STORAGE_KEY = "filstream_creator_disconnected_v1";
+
+function isCreatorDisconnected() {
+  if (typeof localStorage === "undefined") return false;
+  return localStorage.getItem(CREATOR_DISCONNECTED_STORAGE_KEY) === "1";
+}
+
+function setCreatorDisconnected(next) {
+  if (typeof localStorage === "undefined") return;
+  if (next) {
+    localStorage.setItem(CREATOR_DISCONNECTED_STORAGE_KEY, "1");
+  } else {
+    localStorage.removeItem(CREATOR_DISCONNECTED_STORAGE_KEY);
+  }
+}
 
 function setStatus(msg, kind) {
   if (!statusEl) return;
@@ -159,6 +192,29 @@ function normalizeAddressOrNull(value) {
   }
 }
 
+function normalizeCreatorKey(value) {
+  return String(value || "").trim().toLowerCase();
+}
+
+function clearLoadedCreatorState() {
+  creatorAddress = null;
+  creatorEntries = [];
+  creatorUsername = "";
+  creatorProfilePicturePieceCid = "";
+  creatorProfilePictureUrl = "";
+}
+
+function hideCreatorContentSections() {
+  if (heroEl) heroEl.hidden = true;
+  if (editSection) editSection.hidden = true;
+  if (catalogSection) catalogSection.hidden = true;
+}
+
+function hideLandingSections() {
+  if (emptyStateSection) emptyStateSection.hidden = true;
+  if (browseSection) browseSection.hidden = true;
+}
+
 function isOwner() {
   return Boolean(
     creatorAddress && connectedAddress && sameEthAddress(creatorAddress, connectedAddress),
@@ -177,7 +233,17 @@ function writeCreatorToUrl(addr) {
   window.history.replaceState({}, "", u.href);
 }
 
+function clearCreatorFromUrl() {
+  const u = new URL(window.location.href);
+  u.searchParams.delete("creator");
+  window.history.replaceState({}, "", u.href);
+}
+
 async function refreshConnectedAccount() {
+  if (isCreatorDisconnected()) {
+    connectedAddress = null;
+    return;
+  }
   const eth = window.ethereum;
   if (!eth || typeof eth.request !== "function") {
     connectedAddress = null;
@@ -247,8 +313,128 @@ async function resolveCreatorAddress() {
   const fromQuery = queryCreatorAddress();
   if (fromQuery) return fromQuery;
   if (connectedAddress) return connectedAddress;
-  const latest = await readCatalogLatest({ limit: 1, activeOnly: true });
-  return latest[0]?.creator ?? null;
+  return null;
+}
+
+/**
+ * @param {import("../filstream-catalog-chain.mjs").CatalogEntry[]} rows
+ * @returns {{ creator: string, activeCount: number, latestCreatedAt: number }[]}
+ */
+function collectBrowseCreators(rows) {
+  /** @type {Map<string, { creator: string, activeCount: number, latestCreatedAt: number }>} */
+  const buckets = new Map();
+  for (const row of rows) {
+    if (!row.active) continue;
+    const creator = normalizeAddressOrNull(row.creator);
+    if (!creator) continue;
+    const key = normalizeCreatorKey(creator);
+    const prev = buckets.get(key);
+    if (!prev) {
+      buckets.set(key, {
+        creator,
+        activeCount: 1,
+        latestCreatedAt: row.createdAt,
+      });
+      continue;
+    }
+    prev.activeCount += 1;
+    if (row.createdAt > prev.latestCreatedAt) {
+      prev.latestCreatedAt = row.createdAt;
+    }
+  }
+  return [...buckets.values()]
+    .sort((a, b) => {
+      if (a.activeCount !== b.activeCount) return b.activeCount - a.activeCount;
+      if (a.latestCreatedAt !== b.latestCreatedAt) return b.latestCreatedAt - a.latestCreatedAt;
+      return normalizeCreatorKey(a.creator).localeCompare(normalizeCreatorKey(b.creator));
+    })
+    .slice(0, 12);
+}
+
+async function loadBrowseCreatorData() {
+  /** @type {import("../filstream-catalog-chain.mjs").CatalogEntry[]} */
+  let sourceRows = [];
+  try {
+    sourceRows = await loadCachedCatalogEntries({ limit: 250, activeOnly: true });
+  } catch {
+    sourceRows = [];
+  }
+  if (!sourceRows.length) {
+    try {
+      sourceRows = await readCatalogLatest({ limit: 100, activeOnly: true });
+    } catch {
+      sourceRows = [];
+    }
+  }
+  const buckets = collectBrowseCreators(sourceRows);
+  if (!buckets.length) {
+    browseCreators = [];
+    return;
+  }
+
+  let profileRows = [];
+  try {
+    profileRows = await loadCachedCreatorProfiles(buckets.map((x) => x.creator));
+  } catch {
+    profileRows = [];
+  }
+  const usernamesByCreator = new Map(
+    profileRows.map((row) => [
+      normalizeCreatorKey(row.creator),
+      typeof row.username === "string" ? row.username.trim() : "",
+    ]),
+  );
+
+  browseCreators = buckets.map((row) => ({
+    ...row,
+    username: usernamesByCreator.get(normalizeCreatorKey(row.creator)) || "",
+  }));
+}
+
+function renderBrowseCreators() {
+  if (!browseSection || !browseListEl) return;
+  if (connectedAddress) {
+    browseSection.hidden = true;
+    browseListEl.innerHTML = "";
+    return;
+  }
+  browseSection.hidden = false;
+  browseListEl.innerHTML = "";
+
+  if (!browseCreators.length) {
+    const p = document.createElement("p");
+    p.className = "creator-status";
+    p.textContent = "No creators found yet.";
+    browseListEl.appendChild(p);
+    return;
+  }
+
+  for (const row of browseCreators) {
+    const a = document.createElement("a");
+    a.className = "creator-browse-card";
+    a.href = buildCreatorUrlForAddress(row.creator);
+
+    const name = document.createElement("span");
+    name.className = "creator-browse-card-name";
+    name.textContent = row.username || shortAddress(row.creator);
+
+    const meta = document.createElement("span");
+    meta.className = "creator-browse-card-meta";
+    meta.textContent = `${row.activeCount} video${row.activeCount === 1 ? "" : "s"} · ${shortAddress(row.creator)}`;
+
+    a.append(name, meta);
+    browseListEl.appendChild(a);
+  }
+}
+
+function renderWalletFirstLanding() {
+  hideCreatorContentSections();
+  if (emptyStateSection) emptyStateSection.hidden = false;
+  if (emptyStateConnectBtn) {
+    emptyStateConnectBtn.disabled = false;
+    emptyStateConnectBtn.textContent = "Connect wallet";
+  }
+  renderBrowseCreators();
 }
 
 async function resolveProfilePictureUrlForPieceCid(pieceCid) {
@@ -349,6 +535,11 @@ function updateActions() {
   if (!enableEditBtn || !heroActionsEl) return;
   heroActionsEl.hidden = false;
   enableEditBtn.hidden = false;
+  if (disconnectBtn) {
+    disconnectBtn.hidden = !connectedAddress;
+    disconnectBtn.disabled = false;
+    disconnectBtn.textContent = "Logout";
+  }
   if (sessionKeyNoteEl) {
     sessionKeyNoteEl.hidden = true;
     sessionKeyNoteEl.textContent = "";
@@ -522,6 +713,7 @@ async function hydrateMoviePosters(activeEntries) {
 }
 
 function renderAll() {
+  hideLandingSections();
   renderHero();
   updateActions();
   renderEditSection();
@@ -538,21 +730,29 @@ function renderAll() {
 async function refreshAll() {
   if (!isCatalogConfigured()) {
     setStatus("Catalog contract is not configured.", "err");
-    if (heroEl) heroEl.hidden = true;
-    if (editSection) editSection.hidden = true;
-    if (catalogSection) catalogSection.hidden = true;
+    hideLandingSections();
+    hideCreatorContentSections();
     return;
   }
   showPageLoadSpinner();
   try {
     await refreshConnectedAccount();
     applyStoredSessionIfValid();
+    const queryCreator = queryCreatorAddress();
+    if (!queryCreator && !connectedAddress) {
+      clearLoadedCreatorState();
+      await loadBrowseCreatorData();
+      renderWalletFirstLanding();
+      updateActions();
+      setStatus("Connect wallet to manage your creator channel.", "");
+      return;
+    }
     creatorAddress = await resolveCreatorAddress();
     if (!creatorAddress) {
-      setStatus("No creator found yet. Upload a video to create one.", "");
-      if (heroEl) heroEl.hidden = true;
-      if (editSection) editSection.hidden = true;
-      if (catalogSection) catalogSection.hidden = true;
+      clearLoadedCreatorState();
+      hideLandingSections();
+      hideCreatorContentSections();
+      setStatus("Could not resolve creator channel.", "err");
       return;
     }
     writeCreatorToUrl(creatorAddress);
@@ -753,6 +953,7 @@ async function handlePrimaryAction() {
   }
   if (!connectedAddress) {
     try {
+      setCreatorDisconnected(false);
       await provider.request({ method: "eth_requestAccounts" });
       await refreshAll();
     } catch (e) {
@@ -776,8 +977,23 @@ async function handlePrimaryAction() {
   }
 }
 
+async function handleDisconnectAction() {
+  setCreatorDisconnected(true);
+  clearSessionKeyFromStorage();
+  sessionPrivateKey = null;
+  connectedAddress = null;
+  clearCreatorFromUrl();
+  await refreshAll();
+}
+
 function bindEvents() {
   enableEditBtn?.addEventListener("click", () => {
+    void handlePrimaryAction();
+  });
+  disconnectBtn?.addEventListener("click", () => {
+    void handleDisconnectAction();
+  });
+  emptyStateConnectBtn?.addEventListener("click", () => {
     void handlePrimaryAction();
   });
   saveBtn?.addEventListener("click", () => {

@@ -9,36 +9,24 @@
  * - manifest.json is fetched once per `videoId` and then reused from cache
  */
 import {
-  CATALOG_CREATOR_PROFILE_SYNC_LIMIT,
-  CATALOG_FULL_REFRESH_MS,
-  CATALOG_PAGE_SIZE,
-} from "../filstream-constants.mjs";
+  FILSTREAM_BRAND,
+  hydrateFilstreamHeaderProfile,
+  mountFilstreamHeader,
+} from "../filstream-brand.mjs";
 import {
   broadcastCopyFromMeta,
   formatUploadDateLabel,
 } from "../filstream-broadcast-view.mjs";
 import {
-  hydrateFilstreamHeaderProfile,
-  FILSTREAM_BRAND,
-  mountFilstreamHeader,
-} from "../filstream-brand.mjs";
-import {
-  buildAbsoluteViewerUrlForVideoId,
-  buildCreatorUrlForAddress,
-  buildDiscoverHomeUrlWithSearchQuery,
-  buildViewerUrlForVideoId,
-  getFilstreamStoreConfig,
-} from "../filstream-config.mjs";
-import {
   cacheCatalogEntries,
   findCachedEntryByVideoId,
   loadCachedCatalogEntries,
-  loadCatalogCursor,
   loadCachedCreatorProfiles,
+  loadCatalogCursor,
   loadLastFullRefreshAtMs,
   loadManifestCache,
-  saveCatalogCursor,
   saveCachedCreatorProfiles,
+  saveCatalogCursor,
   saveLastFullRefreshAtMs,
   saveManifestCache,
 } from "../filstream-catalog-cache.mjs";
@@ -52,6 +40,18 @@ import {
   resolveManifestUrl,
   resolveProviderServiceUrl,
 } from "../filstream-catalog-chain.mjs";
+import {
+  buildAbsoluteViewerUrlForVideoId,
+  buildCreatorUrlForAddress,
+  buildDiscoverHomeUrlWithSearchQuery,
+  buildViewerUrlForVideoId,
+  getFilstreamStoreConfig,
+} from "../filstream-config.mjs";
+import {
+  CATALOG_CREATOR_PROFILE_SYNC_LIMIT,
+  CATALOG_FULL_REFRESH_MS,
+  CATALOG_PAGE_SIZE,
+} from "../filstream-constants.mjs";
 import {
   donateConfigFromMeta,
   proposeDonateTransfer,
@@ -109,6 +109,8 @@ let syncInFlight = false;
 let syncIntervalId = 0;
 let isVideoPlaying = false;
 let destroyed = false;
+/** Stops {@link installPlaybackEndClamp} listeners when aborted. */
+let playbackEndClampAbort = null;
 const cfg = getFilstreamStoreConfig();
 const syncIntervalMs = Math.max(5_000, cfg.catalogSyncIntervalMs);
 
@@ -122,6 +124,23 @@ if (brandMount && !embedMode) {
   initLandingToast();
 } else if (brandMount) {
   brandMount.hidden = true;
+}
+
+async function unregisterLegacyPieceHeadServiceWorker() {
+  if (typeof navigator === "undefined" || !("serviceWorker" in navigator)) {
+    return;
+  }
+  try {
+    const regs = await navigator.serviceWorker.getRegistrations();
+    for (const reg of regs) {
+      const scriptUrl =
+        reg.active?.scriptURL || reg.waiting?.scriptURL || reg.installing?.scriptURL || "";
+      if (!scriptUrl || !scriptUrl.includes("/piece-head-sw.js")) continue;
+      await reg.unregister();
+    }
+  } catch {
+    /* ignore cleanup errors */
+  }
 }
 
 function setStatus(msg, kind) {
@@ -878,6 +897,59 @@ function nudgeShakaBufferingPollAfterLoad(mediaEl) {
   mediaEl.addEventListener("canplay", nudge, { once: true });
 }
 
+function stopPlaybackEndClamp() {
+  playbackEndClampAbort?.abort();
+  playbackEndClampAbort = null;
+}
+
+/**
+ * Stopgap: when segment retrieval returns 200 (full piece) instead of 206, the
+ * buffered timeline can extend past the real HLS duration and the player may
+ * loop extra data. Clamp playback to Shaka's manifest-derived seek range end.
+ *
+ * @param {import("shaka-player").Player} player
+ * @param {HTMLVideoElement} video
+ */
+function installPlaybackEndClamp(player, video) {
+  stopPlaybackEndClamp();
+  const ac = new AbortController();
+  playbackEndClampAbort = ac;
+  const { signal } = ac;
+
+  const nearEndSlackSec = 0.12;
+  const seekBackResetSec = 0.45;
+  let clampedUntilSeekBack = false;
+
+  const onTimeUpdate = () => {
+    if (signal.aborted) return;
+    let end;
+    try {
+      end = player.seekRange().end;
+    } catch {
+      return;
+    }
+    if (!Number.isFinite(end) || end <= 0) return;
+
+    if (video.currentTime < end - seekBackResetSec) {
+      clampedUntilSeekBack = false;
+    }
+    if (video.currentTime < end - nearEndSlackSec) return;
+    if (clampedUntilSeekBack) return;
+    clampedUntilSeekBack = true;
+
+    video.pause();
+    try {
+      if (video.currentTime > end) {
+        video.currentTime = end;
+      }
+    } catch {
+      /* ignore */
+    }
+  };
+
+  video.addEventListener("timeupdate", onTimeUpdate, { signal });
+}
+
 async function ensurePlayer() {
   if (shakaPlayer) return shakaPlayer;
   if (!shakaContainerEl || !videoEl) {
@@ -1191,7 +1263,7 @@ async function renderViewerMeta(metaDoc, entry = null) {
       const link = document.createElement("a");
       link.href = buildCreatorUrlForAddress(creator);
       link.className = "viewer-creator-name";
-      link.textContent = `By ${creatorName}`;
+      link.textContent = creatorName;
 
       cluster.append(avatarLink, link);
       bylineCatalogEl.appendChild(cluster);
@@ -1393,11 +1465,6 @@ function renderCatalogWatch(active) {
     ),
   );
 
-  const count = document.createElement("p");
-  count.className = "viewer-watch-count";
-  count.textContent = `${sameCreator.length} other video${sameCreator.length === 1 ? "" : "s"}`;
-  catalogAside.appendChild(count);
-
   if (!sameCreator.length) {
     const p = document.createElement("p");
     p.className = "viewer-catalog-note";
@@ -1510,6 +1577,33 @@ async function loadManifestForVideo(videoId, entry) {
 }
 
 /**
+ * Best-effort on-chain lookup when local cache/cursor misses a known `videoId`.
+ *
+ * @param {string} videoId
+ * @returns {Promise<import("../filstream-catalog-chain.mjs").CatalogEntry | null>}
+ */
+async function findEntryByVideoIdFromChain(videoId) {
+  const target = String(videoId || "").trim();
+  if (!target || !isCatalogConfigured()) return null;
+  const pageSize = Math.min(250, Math.max(25, CATALOG_PAGE_SIZE));
+  let offset = 0;
+  for (let pageCount = 0; pageCount < 100; pageCount++) {
+    const page = await readCatalogLatest({
+      offset,
+      limit: pageSize,
+      activeOnly: false,
+    });
+    if (!page.length) return null;
+    await cacheCatalogEntries(page);
+    const hit = page.find((row) => row.assetId === target && row.active);
+    if (hit) return hit;
+    offset += page.length;
+    if (page.length < pageSize) return null;
+  }
+  return null;
+}
+
+/**
  * @param {string} videoId
  * @returns {Promise<import("../filstream-catalog-chain.mjs").CatalogEntry | null>}
  */
@@ -1519,6 +1613,8 @@ async function resolveEntryForVideo(videoId) {
   await syncCatalogOnce(true);
   entry = await findCachedEntryByVideoId(videoId);
   if (entry && entry.active) return entry;
+  entry = await findEntryByVideoIdFromChain(videoId);
+  if (entry && entry.active) return entry;
   return null;
 }
 
@@ -1527,6 +1623,7 @@ async function resolveEntryForVideo(videoId) {
  */
 async function openVideoById(videoId) {
   currentVideoId = videoId.trim();
+  stopPlaybackEndClamp();
   applyViewerModeLayout();
   renderCatalogSidebar();
   if (!currentVideoId) {
@@ -1559,7 +1656,10 @@ async function openVideoById(videoId) {
   const player = await ensurePlayer();
   await loadMasterWithAppleMseFallback(player, master);
   nudgeShakaBufferingPollAfterLoad(videoEl);
-  await renderViewerMeta(merged ?? manifestDoc, entry);
+  if (videoEl) {
+    installPlaybackEndClamp(player, videoEl);
+  }
+  awaitrenderViewerMeta(merged ?? manifestDoc, entry);
   setStatus("");
 }
 
@@ -1575,6 +1675,7 @@ async function bootstrapCatalogState() {
 }
 
 try {
+  await unregisterLegacyPieceHeadServiceWorker();
   applyViewerModeLayout();
   await bootstrapCatalogState();
   if (requestedVideoId) {
@@ -1590,6 +1691,7 @@ try {
 
 window.addEventListener("beforeunload", () => {
   destroyed = true;
+  stopPlaybackEndClamp();
   if (syncIntervalId) {
     clearInterval(syncIntervalId);
     syncIntervalId = 0;
