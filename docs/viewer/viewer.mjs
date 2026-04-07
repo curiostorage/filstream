@@ -1659,7 +1659,7 @@ async function openVideoById(videoId) {
   if (videoEl) {
     installPlaybackEndClamp(player, videoEl);
   }
-  awaitrenderViewerMeta(merged ?? manifestDoc, entry);
+  await renderViewerMeta(merged ?? manifestDoc, entry);
   setStatus("");
 }
 
