@@ -47,6 +47,7 @@ import {
 } from "../session-key-storage.mjs";
 import { createSpinnerElement } from "../spinner.mjs";
 import { getAddress } from "../vendor/synapse-browser.mjs";
+import "../components/movie-link-showcase.mjs";
 
 const brandMount = document.getElementById("creator-brand-mount");
 if (brandMount) {
@@ -641,31 +642,20 @@ function renderMovieList() {
   movieListEl.innerHTML = "";
   const active = creatorEntries.filter((x) => x.active);
   if (!active.length) {
+    movieListEl.className = "creator-movie-list";
     movieListEl.innerHTML = '<p class="creator-status">No active videos.</p>';
     return;
   }
+  movieListEl.className = "creator-movie-list viewer-catalog-grid";
   for (const entry of active) {
-    const a = document.createElement("a");
-    a.className = "creator-catalog-row";
-    a.href = buildViewerUrlForVideoId(entry.assetId);
-    a.target = "_blank";
-    a.rel = "noopener noreferrer";
-
-    const posterWrap = document.createElement("div");
-    posterWrap.className = "creator-catalog-poster-wrap";
-    const poster = document.createElement("img");
-    poster.className = "creator-catalog-poster creator-catalog-poster--still";
-    poster.alt = "";
-    poster.loading = "lazy";
-    poster.decoding = "async";
-    posterWrap.appendChild(poster);
-
-    const title = document.createElement("div");
-    title.className = "creator-catalog-title";
-    title.textContent = entry.title;
-
-    a.append(posterWrap, title);
-    movieListEl.appendChild(a);
+    const el = document.createElement("movie-link-showcase");
+    el.assetId = entry.assetId;
+    el.href = buildViewerUrlForVideoId(entry.assetId);
+    el.videoTitle = entry.title;
+    el.showCreator = false;
+    el.variant = "discover";
+    el.openInNewTab = true;
+    movieListEl.appendChild(el);
   }
   void hydrateMoviePosters(active);
 }
@@ -675,26 +665,29 @@ function renderMovieList() {
  */
 async function hydrateMoviePosters(activeEntries) {
   if (!movieListEl) return;
-  const rows = movieListEl.querySelectorAll(".creator-catalog-row");
+  const rows = movieListEl.querySelectorAll("movie-link-showcase");
   for (let i = 0; i < rows.length && i < activeEntries.length; i++) {
     const entry = activeEntries[i];
-    const row = rows[i];
+    const host = rows[i];
+    const root = host.shadowRoot;
+    if (!root) continue;
     const img = /** @type {HTMLImageElement | null} */ (
-      row.querySelector(".creator-catalog-poster--still")
+      root.querySelector(".viewer-catalog-card-thumb--still")
     );
     if (!img) continue;
-    const wrap = row.querySelector(".creator-catalog-poster-wrap");
+    const wrap = root.querySelector(".viewer-catalog-card-thumb-wrap");
     try {
       const doc = await manifestDocForEntry(entry);
       const posterUrl = posterFromManifestDoc(doc);
       const animUrl = posterAnimFromManifestDoc(doc);
       if (posterUrl) img.src = posterUrl;
       if (posterUrl && animUrl && wrap instanceof HTMLElement) {
-        wrap.classList.add("creator-catalog-poster-wrap--anim");
-        let motion = wrap.querySelector(".creator-catalog-poster--motion");
+        wrap.classList.add("viewer-catalog-card-thumb-wrap--anim");
+        let motion = wrap.querySelector(".viewer-catalog-card-thumb--motion");
         if (!(motion instanceof HTMLImageElement)) {
           motion = document.createElement("img");
-          motion.className = "creator-catalog-poster creator-catalog-poster--motion";
+          motion.className =
+            "viewer-catalog-card-thumb viewer-catalog-card-thumb--motion";
           motion.alt = "";
           motion.loading = "lazy";
           motion.decoding = "async";
