@@ -2,33 +2,15 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>FilStream viewer</title>
+  <title>Redirecting…</title>
   <script>
     (function () {
-      var p = new URLSearchParams(location.search);
-      var hasVideo = (p.get("videoId") || "").trim() !== "";
-      var embed = p.get("embed") === "true";
-      if (!hasVideo && !embed) {
-        var u = new URL("index.html", location.href);
-        u.search = location.search;
-        u.hash = location.hash;
-        location.replace(u.href);
-      }
+      var next = new URL("view/" + location.search + location.hash, location.href);
+      location.replace(next.href);
     })();
   </script>
-  <link rel="icon" href="favicon.svg" type="image/svg+xml" />
-  <link
-    rel="stylesheet"
-    href="https://cdn.jsdelivr.net/npm/shaka-player@4.7.11/dist/controls.css"
-  />
-  <link rel="stylesheet" href="viewer/viewer.css" />
 </head>
 <body>
-  <script>
-    window.__FILSTREAM_CONFIG__ = window.__FILSTREAM_CONFIG__ || {};
-  </script>
-  <filstream-viewer-app></filstream-viewer-app>
-  <script type="module" src="components/viewer.mjs"></script>
+  <p><a href="view/">Continue to viewer</a></p>
 </body>
 </html>

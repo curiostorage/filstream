@@ -108,8 +108,8 @@ export function getFilstreamStoreConfig() {
 }
 
 /**
- * Relative path to the catalog discover home (`index.html`), same directory as other app pages.
- * Intentionally not derived from `viewBaseUrl` so localhost and any host/path work without jumping to production.
+ * Relative path to the catalog discover home (`index.html` at site root). Resolves correctly from
+ * routed app pages (`view/`, `user/`, `upload/`) when those documents use `<base href="../">`.
  *
  * @returns {string}
  */
@@ -132,7 +132,7 @@ export function buildDiscoverHomeUrlWithSearchQuery(rawQuery) {
 }
 
 /**
- * Primary playback URL: `viewer.html?videoId=<asset-id>` (relative, same directory as `index.html`).
+ * Primary playback URL: `view/?videoId=<asset-id>` (relative to site root; works with `<base href="../">` on routed pages).
  *
  * @param {string} videoId
  * @param {{ embed?: boolean }} [opts]
@@ -144,7 +144,7 @@ export function buildViewerUrlForVideoId(videoId, opts = {}) {
   if (id) sp.set("videoId", id);
   if (opts.embed === true) sp.set("embed", "true");
   const qs = sp.toString();
-  return qs ? `viewer.html?${qs}` : "viewer.html";
+  return qs ? `view/?${qs}` : "view/";
 }
 
 /**
@@ -164,7 +164,7 @@ export function buildAbsoluteViewerUrlForVideoId(videoId, opts = {}) {
 }
 
 /**
- * Creator page URL: `creator.html?creator=<wallet-address>` (relative).
+ * Creator page URL: `user/?creator=<wallet-address>` (relative to site root).
  *
  * @param {string} creatorAddress
  * @returns {string}
@@ -174,7 +174,7 @@ export function buildCreatorUrlForAddress(creatorAddress) {
   const sp = new URLSearchParams();
   if (addr) sp.set("creator", addr);
   const qs = sp.toString();
-  return qs ? `creator.html?${qs}` : "creator.html";
+  return qs ? `user/?${qs}` : "user/";
 }
 
 /**

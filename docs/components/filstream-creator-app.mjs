@@ -23,7 +23,7 @@ export class FilstreamCreatorApp extends LitElement {
             <button type="button" id="creator-empty-connect" class="creator-primary-btn">
               Connect wallet
             </button>
-            <a href="viewer.html" class="creator-empty-link">Browse all videos</a>
+            <a href="view/" class="creator-empty-link">Browse all videos</a>
           </div>
         </section>
         <section id="creator-browse-section" class="creator-browse-section" hidden aria-label="Browse creators">

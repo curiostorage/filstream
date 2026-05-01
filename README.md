@@ -19,7 +19,7 @@ They’re your movies. Share them with the world without a gatekeeper company or
 - **Browser-first pipeline:** Transcoding and segmentation run in the page; encoder output feeds an upload session that stages packed media in **IndexedDB** and streams it to Synapse `store()` as a `ReadableStream`. You stay in one tab for encode → fund → store.
 - **Wallet + session model:** The root account is your **client** account; **session keys** sign upload operations with scoped expiry and permissions—so the UX can be smooth without putting long-lived keys in hot paths.
 - **Static + config-driven:** Pages ship as static HTML/JS/CSS; public RPC, chain, provider, and viewer base URL come from **`window.__FILSTREAM_CONFIG__`** (defaults in [`docs/filstream-config.mjs`](docs/filstream-config.mjs)), aligned with Filecoin Calibration.
-- **Shareable playback:** Published links use the static viewer: `viewer.html?videoId=<asset-id>` with playback resolved from on-chain catalog + `manifest.json`.
+- **Shareable playback:** Published links use the static viewer: `view/?videoId=<asset-id>` with playback resolved from on-chain catalog + `manifest.json`.
 - **Creator + catalog:** The repo includes a creator flow and shared catalog/metadata helpers so publishing and discovery stay coherent with the upload path.
 
 ---
@@ -32,7 +32,7 @@ They’re your movies. Share them with the world without a gatekeeper company or
 | [`docs/core.mjs`](docs/core.mjs) | Encode/segment pipeline feeding the store session |
 | [`docs/browser-store.mjs`](docs/browser-store.mjs) | IndexedDB staging, Synapse session, streaming `store()` |
 | [`docs/vendor/synapse-browser.mjs`](docs/vendor/synapse-browser.mjs) | Bundled Synapse SDK for the browser (rebuild via [`bundle-synapse/`](bundle-synapse/)) |
-| [`docs/viewer/`](docs/viewer/) + [`docs/viewer.html`](docs/viewer.html) | Static playback UI |
+| [`docs/components/filstream-catalog-app.css`](docs/components/filstream-catalog-app.css) + [`docs/view/`](docs/view/) | Discover + catalog + playback (`view/` loads `index.html`) |
 | [`docs/filstream-config.mjs`](docs/filstream-config.mjs) | Public upload defaults (`__FILSTREAM_CONFIG__`) |
 | [`docs/env.example`](docs/env.example) | Field names and legacy `STORE_*` mapping |
 | [`main.go`](main.go) | Tiny static file server for local dev (`docs/` → `http://localhost:8080`) |
@@ -53,13 +53,13 @@ From the repo root:
 go run .
 ```
 
-Serves [`docs/`](docs/) at `http://localhost:8080` (landing at `/`, upload wizard at `/upload.html`, static viewer at `/viewer.html`).
+Serves [`docs/`](docs/) at `http://localhost:8080` (landing at `/`, upload wizard at `/upload/`, creator at `/user/`, static viewer at `/view/`; legacy `*.html` entry points redirect).
 
 **Synapse upload runs in the browser** via [`docs/browser-store.mjs`](docs/browser-store.mjs) and [`docs/vendor/synapse-browser.mjs`](docs/vendor/synapse-browser.mjs).
 
 ## GitHub Pages
 
-The [`docs/`](docs/) folder is the published site root for `https://curiostorage.github.io/filstream/`. Shared playback links use `viewer.html?videoId=<asset-id>`.
+The [`docs/`](docs/) folder is the published site root for `https://curiostorage.github.io/filstream/`. Shared playback links use `view/?videoId=<asset-id>` (older `viewer.html?...` URLs redirect to `view/`).
 
 ## Runtime Overview
 
@@ -68,7 +68,7 @@ The [`docs/`](docs/) folder is the published site root for `https://curiostorage
 
 ## Session init (browser)
 
-The UI calls `createBrowserUploadSession({ assetId, clientAddress, sessionPrivateKey, sessionExpirations })` when the first store-bound event is queued. Public RPC/chain/provider settings use [`filstream-config.mjs`](docs/filstream-config.mjs) defaults unless you set `window.__FILSTREAM_CONFIG__` in [`docs/upload.html`](docs/upload.html) (see [`docs/env.example`](docs/env.example)).
+The UI calls `createBrowserUploadSession({ assetId, clientAddress, sessionPrivateKey, sessionExpirations })` when the first store-bound event is queued. Public RPC/chain/provider settings use [`filstream-config.mjs`](docs/filstream-config.mjs) defaults unless you set `window.__FILSTREAM_CONFIG__` in [`docs/upload/index.html`](docs/upload/index.html) (see [`docs/env.example`](docs/env.example)).
 
 Rules:
 

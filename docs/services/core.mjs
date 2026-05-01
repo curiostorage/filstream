@@ -1060,7 +1060,7 @@ export async function resetFilstreamPlayback() {
 
 /**
  * Destroy only the Shaka Player (does not revoke blob URLs — listing artifacts stay valid).
- * Call when leaving local preview (e.g. Await); Review attaches a new player to the retrieval URL.
+ * Call when leaving local preview (e.g. Upload step); Review attaches a new player to the retrieval URL.
  */
 export async function destroyActivePipelinePlayer() {
   if (player) {

@@ -2,10 +2,10 @@
  * Final published layout: video + poster + title + description + download + viewer donate.
  * Consumes parsed listing/manifest metadata plus playback/download URLs; intended for local preview or Review.
  * When `reviewIframeSrc` is set (Review embed), only the iframe is rendered — title/description/donate
- * live in `viewer.html`.
+ * live in `view/` (catalog app).
  */
 import { html } from "https://cdn.jsdelivr.net/npm/lit-html@3.2.1/+esm";
-import { viewerDonateBlock } from "./filstream-viewer-donate.mjs";
+import { catalogDonateBlock } from "./filstream-catalog-donate.mjs";
 
 /**
  * @param {string} jsonText
@@ -112,7 +112,7 @@ export function broadcastViewTemplate(props) {
     }
   }
 
-  /* Standalone `viewer.html` shows title, description, donate; embed is iframe-only. */
+  /* Standalone catalog app (`view/`) shows title, description, donate; embed is iframe-only. */
   if (reviewIframeSrc) {
     return html`
       <section
@@ -171,7 +171,7 @@ export function broadcastViewTemplate(props) {
               </button>`
             : null}
           ${viewerDonate
-            ? viewerDonateBlock({
+            ? catalogDonateBlock({
                 meta,
                 getWalletList,
                 viewerBusy: viewerDonate.busy,

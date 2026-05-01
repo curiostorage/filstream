@@ -2,18 +2,15 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>FilStream — CalibrationNet edition</title>
-  <link rel="icon" href="favicon.svg" type="image/svg+xml" />
-  <link rel="stylesheet" href="style.css" />
+  <title>Redirecting…</title>
+  <script>
+    (function () {
+      var next = new URL("upload/" + location.search + location.hash, location.href);
+      location.replace(next.href);
+    })();
+  </script>
 </head>
 <body>
-  <script>
-    window.__FILSTREAM_CONFIG__ = window.__FILSTREAM_CONFIG__ || {};
-  </script>
-  <filstream-upload-app></filstream-upload-app>
-  <!-- Optional: override defaults from services/filstream-config.mjs (see env.example). -->
-  <!-- UI: upload-entry.mjs → filstream-upload-app + ui.mjs. Pipeline: services/core.mjs. -->
-  <script type="module" src="components/upload-entry.mjs"></script>
+  <p><a href="upload/">Continue to upload</a></p>
 </body>
 </html>

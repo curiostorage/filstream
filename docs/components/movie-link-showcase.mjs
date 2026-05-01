@@ -1,5 +1,5 @@
 /**
- * Single movie tile matching the viewer Discover card.
+ * Single movie tile matching the catalog Discover card.
  */
 import { LitElement, html, nothing, css } from "https://cdn.jsdelivr.net/npm/lit@3.2.1/+esm";
 
@@ -141,16 +141,16 @@ export class MovieLinkShowcase extends LitElement {
       text-overflow: ellipsis;
     }
 
-    :host-context(.viewer-layout--watch) .viewer-catalog-card--watch {
+    :host-context(.catalog-app--watch) .viewer-catalog-card--watch {
       flex-direction: row;
     }
 
-    :host-context(.viewer-layout--watch) .viewer-catalog-card--watch .viewer-catalog-card-thumb-wrap {
+    :host-context(.catalog-app--watch) .viewer-catalog-card--watch .viewer-catalog-card-thumb-wrap {
       width: 150px;
       flex-shrink: 0;
     }
 
-    :host-context(.viewer-layout--watch) .viewer-catalog-card--watch .viewer-catalog-card-body {
+    :host-context(.catalog-app--watch) .viewer-catalog-card--watch .viewer-catalog-card-body {
       justify-content: center;
     }
   `;

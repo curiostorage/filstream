@@ -1,3 +1,8 @@
+/**
+ * Global styles for `<filstream-catalog-app>` (discover + catalog + playback).
+ * Colocated with `filstream-catalog-app.mjs` / `catalog-page.mjs`. Playback/donate tiles still use
+ * the `viewer-*` / `viewer-catalog-*` class prefix where those names predate this file.
+ */
 :root {
   color-scheme: dark;
   --bg: #0f1115;
@@ -18,35 +23,35 @@ body {
   font: 15px/1.45 system-ui, sans-serif;
 }
 
-.viewer-layout {
+.catalog-app {
   max-width: 1380px;
   margin: 0 auto;
   padding: 1rem;
 }
 
-.viewer-layout--watch {
+.catalog-app--watch {
   display: flex;
   gap: 1.25rem;
   align-items: flex-start;
 }
 
-.viewer-main {
+.catalog-app-main {
   flex: 1;
   min-width: 0;
 }
 
-.viewer-layout--watch .viewer-catalog {
+.catalog-app--watch .viewer-catalog {
   flex-shrink: 0;
   width: 360px;
   margin-top: 2rem;
 }
 
-.viewer-layout--discover .viewer-player-block,
-.viewer-layout--discover .viewer-meta {
+.catalog-app--discover .viewer-player-block,
+.catalog-app--discover .viewer-meta {
   display: none;
 }
 
-.viewer-brand {
+.catalog-app-brand {
   margin: 0 0 1rem;
 }
 
@@ -326,6 +331,35 @@ body {
   margin: 0;
 }
 
+/* Ephemeral copy / status (share & embed on /view/) */
+.filstream-catalog-toast {
+  position: fixed;
+  left: 50%;
+  bottom: 1.35rem;
+  transform: translateX(-50%);
+  z-index: 200;
+  max-width: min(22rem, calc(100vw - 2rem));
+  margin: 0;
+  padding: 0.65rem 1.1rem;
+  border-radius: 999px;
+  border: 1px solid #3c4043;
+  background: #1a1d24;
+  box-shadow: 0 6px 24px rgb(0 0 0 / 0.45);
+  font-size: 0.9rem;
+  font-weight: 500;
+  color: #e8eaed;
+  pointer-events: none;
+}
+
+.filstream-catalog-toast[hidden] {
+  display: none !important;
+}
+
+.filstream-catalog-toast[data-kind="err"] {
+  border-color: #c5221f;
+  color: #f28b82;
+}
+
 .viewer-status {
   margin: 0 0 0.75rem;
   font-size: 0.88rem;
@@ -346,7 +380,6 @@ body {
 .viewer-shaka-container {
   position: relative;
   width: 100%;
-  max-height: 80vh;
   border-radius: 12px;
   overflow: hidden;
   background: #000;
@@ -355,7 +388,6 @@ body {
 .viewer-shaka-container video {
   display: block;
   width: 100%;
-  max-height: 80vh;
 }
 
 /* Theater: fill viewport via CSS (not browser fullscreen). Toggled by Shaka control. */
@@ -376,7 +408,16 @@ body {
   max-height: none;
   height: 100%;
   width: 100%;
-  object-fit: contain;
+  object-fit: cover;
+  object-position: center;
+}
+
+/* Shaka wraps the `<video>`; stretch the inner stack so `object-fit: cover` fills the viewport. */
+.viewer-shaka-container.viewer-shaka-theater .shaka-video-container,
+.viewer-shaka-container.viewer-shaka-theater .shaka-scrim-container {
+  width: 100%;
+  height: 100%;
+  max-height: none !important;
 }
 
 /* Shaka overflow: FilStream row (logo + label) */
@@ -454,46 +495,46 @@ button.viewer-action-btn--round {
 }
 
 /* embed=true: video + Shaka controls only */
-.viewer-embed {
+.catalog-app-embed {
   background: #000;
 }
 
-.viewer-embed body {
+.catalog-app-embed body {
   min-height: 100vh;
   margin: 0;
   background: #000;
 }
 
-.viewer-embed .viewer-layout {
+.catalog-app-embed .catalog-app {
   max-width: none;
   margin: 0;
   padding: 0;
 }
 
-.viewer-embed .viewer-main {
+.catalog-app-embed .catalog-app-main {
   padding: 0;
 }
 
-.viewer-embed .viewer-brand {
+.catalog-app-embed .catalog-app-brand {
   display: none;
 }
 
-.viewer-embed .viewer-status:not(.err) {
+.catalog-app-embed .viewer-status:not(.err) {
   display: none;
 }
 
-.viewer-embed .viewer-meta,
-.viewer-embed .viewer-catalog,
-.viewer-embed .viewer-actions {
+.catalog-app-embed .viewer-meta,
+.catalog-app-embed .viewer-catalog,
+.catalog-app-embed .viewer-actions {
   display: none !important;
 }
 
-.viewer-embed .viewer-shaka-container {
+.catalog-app-embed .viewer-shaka-container {
   border-radius: 0;
   max-height: none;
 }
 
-.viewer-embed .viewer-shaka-container video {
+.catalog-app-embed .viewer-shaka-container video {
   display: block;
   width: 100%;
   max-height: none;
@@ -828,11 +869,11 @@ button.viewer-action-btn--round {
 }
 
 @media (max-width: 1120px) {
-  .viewer-layout--watch {
+  .catalog-app--watch {
     display: block;
   }
 
-  .viewer-layout--watch .viewer-catalog {
+  .catalog-app--watch .viewer-catalog {
     width: 100%;
     margin-top: 1.2rem;
   }

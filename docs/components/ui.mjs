@@ -588,7 +588,7 @@ function fundStepSessionAuthReady() {
   return readStoreSessionAuth() != null;
 }
 
-/** Fund step complete: ready to advance to Define (minimal wallet UI only). */
+/** Fund step complete: ready to advance to Describe (minimal wallet UI only). */
 function fundStepGateComplete() {
   return (
     fundStepSessionAuthReady() &&
@@ -976,7 +976,7 @@ async function flushListingFlowAfterTranscode() {
   const listing = buildListingEmitPayloadFromWizard();
   if (!listing) {
     wizardState.defineListingFlowPending = false;
-    setWizardStatus("Poster missing. Go back to Define and add a poster.", "err");
+    setWizardStatus("Poster missing. Go back to Describe and add a poster.", "err");
     renderWizard();
     return;
   }
@@ -1501,9 +1501,9 @@ const wizardState = {
   useSeekPosition: false,
   defineNextBusy: false,
   defineNextError: "",
-  /** User clicked Define Next before transcode meta existed; step 4 shows progress until upload runs. */
+  /** User clicked Describe Next before transcode meta existed; step 4 shows progress until upload runs. */
   defineListingFlowPending: false,
-  /** @type {unknown | null} parsed listing payload after Define → Next */
+  /** @type {unknown | null} parsed listing payload after Describe → Next */
   publishedMeta: null,
   /** While `finalizeStoreUpload` runs — queue + on-chain commit. */
   storageUploadActive: false,
@@ -1512,7 +1512,7 @@ const wizardState = {
   storeUploadLabel: "",
   /** Short finalize phase hint shown after stats (e.g. draining queue, on-chain commit). */
   storeUploadPhaseNote: "",
-  /** Review/open link target (`viewer.html?videoId=`). */
+  /** Review/open link target (`view/?videoId=`). */
   reviewVideoId: "",
 };
 
@@ -2236,9 +2236,9 @@ function renderWizard() {
             <span class="sep" aria-hidden="true">→</span>
             <li class=${stepClass(2)}>2 · Fund</li>
             <span class="sep" aria-hidden="true">→</span>
-            <li class=${stepClass(3)}>3 · Define</li>
+            <li class=${stepClass(3)}>3 · Describe</li>
             <span class="sep" aria-hidden="true">→</span>
-            <li class=${stepClass(4)}>4 · Await</li>
+            <li class=${stepClass(4)}>4 · Upload</li>
             <span class="sep" aria-hidden="true">→</span>
             <li class=${stepClass(5)}>5 · Review</li>
           </ol>
