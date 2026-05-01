@@ -1,6 +1,6 @@
 /**
  * Standalone bundle: Filcoin piece commitment (CommP) as a multiformats CID.
- * Output: docs/piece-cid-from-bytes.mjs (run `npm run build` in bundle-synapse).
+ * Output: docs/services/piece-cid-from-bytes.mjs (run `npm run build` in bundle-synapse).
  */
 import * as Piece from "@web3-storage/data-segment/piece";
 

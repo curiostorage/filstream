@@ -1,0 +1,119 @@
+import { LitElement, html } from "https://cdn.jsdelivr.net/npm/lit@3.2.1/+esm";
+import { initCreatorPage } from "./creator-impl.mjs";
+
+export class FilstreamCreatorApp extends LitElement {
+  createRenderRoot() {
+    return this;
+  }
+
+  render() {
+    return html`
+      <div id="root" class="creator-layout">
+        <header id="creator-brand-mount" class="creator-brand" role="banner"></header>
+        <div class="creator-status-line">
+          <span id="creator-page-spinner" class="creator-spinner-slot" hidden aria-hidden="true"></span>
+          <p class="creator-status" id="creator-status">Loading…</p>
+        </div>
+        <section id="creator-empty-state" class="creator-empty-state" hidden aria-label="Manage channel">
+          <h1 class="creator-empty-title">Manage your creator channel</h1>
+          <p class="creator-empty-copy">
+            Connect your wallet first to open your channel dashboard and edit your creator profile.
+          </p>
+          <div class="creator-empty-actions">
+            <button type="button" id="creator-empty-connect" class="creator-primary-btn">
+              Connect wallet
+            </button>
+            <a href="viewer.html" class="creator-empty-link">Browse all videos</a>
+          </div>
+        </section>
+        <section id="creator-browse-section" class="creator-browse-section" hidden aria-label="Browse creators">
+          <h2 class="creator-catalog-head">Browse creators</h2>
+          <div id="creator-browse-list" class="creator-browse-list"></div>
+        </section>
+        <section class="creator-hero" id="creator-hero" hidden>
+          <div class="creator-hero-poster-wrap">
+            <img id="creator-poster" class="creator-hero-poster" alt="" width="168" height="252" hidden />
+          </div>
+          <div class="creator-hero-text">
+            <h1 class="creator-title">
+              <span id="creator-title">Catalog</span>
+              <span class="creator-title-role" id="creator-title-role" aria-live="polite"></span>
+            </h1>
+            <p class="creator-dataset-line" id="creator-dataset-label"></p>
+            <div class="creator-hero-actions" id="creator-hero-actions" hidden>
+              <button type="button" id="creator-enable-edit" class="creator-primary-btn" hidden>
+                Sign-in to edit
+              </button>
+              <button type="button" id="creator-disconnect" class="creator-secondary-btn" hidden>
+                Logout
+              </button>
+              <p id="creator-sessionkey-note" class="creator-sessionkey-note" hidden></p>
+            </div>
+          </div>
+        </section>
+        <section id="creator-edit-section" class="creator-edit-section" hidden aria-label="Edit catalog">
+          <p class="creator-edit-hint" id="creator-edit-hint"></p>
+          <div id="creator-edit-form" class="creator-edit-form" hidden>
+            <label class="creator-field">
+              <span>Creator / channel name</span>
+              <input type="text" id="creator-name-input" autocomplete="off" />
+            </label>
+            <label class="creator-field">
+              <span>Creator poster</span>
+              <input type="hidden" id="creator-poster-url" value="" autocomplete="off" />
+              <div class="creator-poster-row">
+                <input
+                  type="file"
+                  id="creator-poster-file"
+                  class="creator-poster-file"
+                  accept="image/*"
+                  hidden
+                />
+                <button type="button" id="creator-poster-browse" class="creator-poster-btn">Browse…</button>
+                <span class="creator-poster-status" id="creator-poster-status" aria-live="polite"></span>
+              </div>
+            </label>
+            <div class="creator-movie-editor-head">
+              <span>Videos (newest first)</span>
+              <button type="button" id="creator-save-btn" class="creator-primary-btn">Save name</button>
+            </div>
+            <div class="creator-save-status-row">
+              <span id="creator-save-spinner-mount" class="creator-spinner-slot" hidden aria-hidden="true"></span>
+              <p class="creator-save-status" id="creator-save-status" aria-live="polite"></p>
+            </div>
+            <ul id="creator-movie-edit-list" class="creator-movie-edit-list"></ul>
+            <div class="creator-dev-paste-box" id="creator-dev-paste-box" hidden>
+              <p class="creator-dev-paste-heading">for development only</p>
+              <p class="creator-dev-paste-desc">
+                Paste a catalog <code>movies[]</code> object (JSON), then add it to the list. Use Save catalog to
+                publish.
+              </p>
+              <textarea
+                id="creator-dev-paste-json"
+                class="creator-dev-paste-textarea"
+                rows="8"
+                spellcheck="false"
+                autocomplete="off"
+                placeholder='{ "title": "…", "videoId": "asset_…" }'
+              ></textarea>
+              <div class="creator-dev-paste-actions">
+                <button type="button" id="creator-dev-paste-add" class="creator-row-btn">Add pasted movie</button>
+              </div>
+              <p class="creator-dev-paste-status" id="creator-dev-paste-status" aria-live="polite"></p>
+            </div>
+          </div>
+        </section>
+        <section class="creator-catalog-section" id="creator-catalog-section" hidden aria-label="Movies in this catalog">
+          <h2 class="creator-catalog-head">Movies</h2>
+          <div id="creator-movie-list" class="creator-movie-list"></div>
+        </section>
+      </div>
+    `;
+  }
+
+  firstUpdated() {
+    initCreatorPage(this);
+  }
+}
+
+customElements.define("filstream-creator-app", FilstreamCreatorApp);

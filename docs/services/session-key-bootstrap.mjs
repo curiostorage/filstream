@@ -17,7 +17,7 @@ import {
   DefaultFwssPermissions,
   fromSecp256k1,
   privateKeyToAccount,
-} from "./vendor/synapse-browser.mjs";
+} from "../vendor/synapse-browser.mjs";
 import { getFilstreamStoreConfig } from "./filstream-config.mjs";
 import {
   FILSTREAM_CATALOG_ADD_PERMISSION,

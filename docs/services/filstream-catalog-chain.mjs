@@ -15,7 +15,7 @@ import {
   http,
   numberToHex,
   privateKeyToAccount,
-} from "./vendor/synapse-browser.mjs";
+} from "../vendor/synapse-browser.mjs";
 import { getFilstreamStoreConfig } from "./filstream-config.mjs";
 
 export const FILSTREAM_CATALOG_ADD_PERMISSION = SHARED_FILSTREAM_CATALOG_ADD_PERMISSION;

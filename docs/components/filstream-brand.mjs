@@ -1,18 +1,21 @@
 /**
- * FilStream name, tagline, and logo — shared by the wizard (`ui.mjs`) and `viewer/viewer.mjs`.
+ * FilStream name, tagline, and logo — shared by `components/ui.mjs` and `components/viewer-impl.mjs`.
  */
 import { html } from "https://cdn.jsdelivr.net/npm/lit-html@3.2.1/+esm";
 import {
   buildCreatorUrlForAddress,
   buildDiscoverHomeUrlWithSearchQuery,
   getFilstreamStoreConfig,
-} from "./filstream-config.mjs";
+} from "../services/filstream-config.mjs";
 import {
   readCatalogProfilePicturePieceCid,
   resolveManifestUrl,
-} from "./filstream-catalog-chain.mjs";
-import { FILSTREAM_BRAND as SHARED_FILSTREAM_BRAND } from "./filstream-constants.mjs";
-import { loadWalletFromStorage } from "./session-key-storage.mjs";
+} from "../services/filstream-catalog-chain.mjs";
+import { FILSTREAM_BRAND as SHARED_FILSTREAM_BRAND } from "../services/filstream-constants.mjs";
+import {
+  loadWalletFromStorage,
+} from "../services/session-key-storage.mjs";
+import { getAddress } from "../vendor/synapse-browser.mjs";
 
 export const FILSTREAM_BRAND = SHARED_FILSTREAM_BRAND;
 
@@ -65,21 +68,84 @@ async function resolveProfilePictureUrlForPieceCid(pieceCid) {
   }
 }
 
+function restoreProfileNavLabel(link) {
+  link.classList.remove("site-header-profile--thumb");
+  link.removeAttribute("aria-label");
+  link.querySelector(".site-header-profile-img")?.remove();
+  link.querySelector(".site-header-profile-initial")?.remove();
+  if (!link.querySelector(".site-header-profile-label")) {
+    const span = document.createElement("span");
+    span.className = "site-header-profile-label";
+    span.textContent = "My Profile";
+    link.replaceChildren(span);
+  }
+}
+
 /**
- * Replaces "My Profile" text with a poster thumb when available.
+ * @returns {Promise<string>}
+ */
+async function resolveWalletAddressForHeader() {
+  const stored = loadWalletFromStorage();
+  const rawStored =
+    stored?.address && typeof stored.address === "string" ? stored.address.trim() : "";
+  if (rawStored && /^0x[a-fA-F0-9]{40}$/i.test(rawStored)) {
+    try {
+      return getAddress(/** @type {`0x${string}`} */ (rawStored));
+    } catch {
+      /* fall through */
+    }
+  }
+  const eth = window.ethereum;
+  if (!eth || typeof eth.request !== "function") return "";
+  try {
+    const accounts = /** @type {string[]} */ (await eth.request({ method: "eth_accounts" }));
+    const a = typeof accounts?.[0] === "string" ? accounts[0].trim() : "";
+    if (!a || !/^0x[a-fA-F0-9]{40}$/i.test(a)) return "";
+    return getAddress(/** @type {`0x${string}`} */ (a));
+  } catch {
+    return "";
+  }
+}
+
+function monogramFromEthAddress(addr) {
+  const t = String(addr || "").trim();
+  if (!/^0x[a-fA-F0-9]{40}$/i.test(t)) return "?";
+  return t.slice(2, 3).toUpperCase();
+}
+
+/**
+ * Replaces "My Profile" text with a profile image when available, or a wallet monogram when
+ * a stored address exists but no picture is set yet.
  *
  * @param {HTMLElement | null} root
+ * @param {{ force?: boolean }} [opts]
  */
-export async function hydrateFilstreamHeaderProfile(root) {
+export async function hydrateFilstreamHeaderProfile(root, opts = {}) {
   if (!root) return;
   const link = root.querySelector(".site-header-profile");
   if (!(link instanceof HTMLAnchorElement)) return;
-  if (link.querySelector(".site-header-profile-img")) return;
+  const force = opts.force === true;
 
-  const wallet = loadWalletFromStorage();
-  const addr = wallet?.address && typeof wallet.address === "string" ? wallet.address.trim() : "";
+  if (!force && link.querySelector(".site-header-profile-img, .site-header-profile-initial")) {
+    return;
+  }
+
+  if (force) {
+    link.querySelector(".site-header-profile-img")?.remove();
+    link.querySelector(".site-header-profile-initial")?.remove();
+    link.classList.remove("site-header-profile--thumb");
+    link.removeAttribute("aria-label");
+  }
+
+  const addr = await resolveWalletAddressForHeader();
+  const defaultProfileHref =
+    filstreamAppNavLinks().find((x) => x.id === "creator")?.href ?? "creator.html";
   if (addr) {
     link.href = buildCreatorUrlForAddress(addr);
+  } else {
+    link.href = defaultProfileHref;
+    restoreProfileNavLabel(link);
+    return;
   }
 
   let pieceCid = "";
@@ -91,19 +157,29 @@ export async function hydrateFilstreamHeaderProfile(root) {
     }
   }
   const picUrl = pieceCid ? await resolveProfilePictureUrlForPieceCid(pieceCid) : "";
-  if (!picUrl) return;
 
   link.classList.add("site-header-profile--thumb");
-  link.textContent = "";
   link.setAttribute("aria-label", "My Profile");
-  const img = document.createElement("img");
-  img.className = "site-header-profile-img";
-  img.src = picUrl;
-  img.alt = "";
-  img.width = 32;
-  img.height = 32;
-  img.decoding = "async";
-  link.appendChild(img);
+
+  if (picUrl) {
+    link.replaceChildren();
+    const img = document.createElement("img");
+    img.className = "site-header-profile-img";
+    img.src = picUrl;
+    img.alt = "";
+    img.width = 32;
+    img.height = 32;
+    img.decoding = "async";
+    link.appendChild(img);
+    return;
+  }
+
+  link.replaceChildren();
+  const initial = document.createElement("div");
+  initial.className = "site-header-profile-initial";
+  initial.textContent = monogramFromEthAddress(addr);
+  initial.setAttribute("aria-hidden", "true");
+  link.appendChild(initial);
 }
 
 function navigateHomeWithSearchQuery(raw) {
@@ -186,8 +262,11 @@ export function filstreamHeaderLit(opts = {}) {
                   link.id === "creator" ? " site-header-profile" : ""
                 }`}
                 href=${link.href}
-                >${link.label}</a
               >
+                ${link.id === "creator"
+                  ? html`<span class="site-header-profile-label">${link.label}</span>`
+                  : link.label}
+              </a>
             `,
           )}
         </nav>

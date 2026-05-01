@@ -18,43 +18,17 @@
     })();
   </script>
   <link rel="icon" href="favicon.svg" type="image/svg+xml" />
-  <link rel="stylesheet" href="viewer/viewer.css" />
   <link
     rel="stylesheet"
     href="https://cdn.jsdelivr.net/npm/shaka-player@4.7.11/dist/controls.css"
   />
+  <link rel="stylesheet" href="viewer/viewer.css" />
 </head>
 <body>
   <script>
     window.__FILSTREAM_CONFIG__ = window.__FILSTREAM_CONFIG__ || {};
   </script>
-  <div id="root" class="viewer-layout">
-    <div class="viewer-main">
-      <header id="viewer-brand-mount" class="viewer-brand" role="banner"></header>
-      <p class="viewer-status" id="viewer-status">Loading…</p>
-      <div class="viewer-player-block">
-        <div id="viewer-shaka-container" class="viewer-shaka-container">
-          <video id="viewer-video" playsinline></video>
-        </div>
-      </div>
-      <section id="viewer-meta" class="viewer-meta" hidden aria-label="About this video">
-        <h1 id="viewer-title" class="broadcast-title"></h1>
-        <p id="viewer-upload-date" class="broadcast-upload-date" hidden></p>
-        <div id="viewer-byline" class="viewer-byline" hidden>
-          <div id="viewer-byline-catalog" class="viewer-byline-catalog"></div>
-          <div class="viewer-byline-trailing">
-            <div id="viewer-donate-root" class="viewer-byline-donate"></div>
-            <div id="viewer-actions" class="viewer-actions" hidden aria-label="Share and embed"></div>
-          </div>
-        </div>
-        <div class="viewer-description-box">
-          <div id="viewer-description" class="broadcast-description"></div>
-        </div>
-      </section>
-    </div>
-    <aside id="viewer-catalog" class="viewer-catalog" hidden aria-label="Catalog"></aside>
-  </div>
-
-  <script type="module" src="viewer/viewer.mjs"></script>
+  <filstream-viewer-app></filstream-viewer-app>
+  <script type="module" src="components/viewer.mjs"></script>
 </body>
 </html>

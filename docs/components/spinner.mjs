@@ -2,17 +2,15 @@
  * Shared FilStream wait spinner (rotating bounce dots, #18C8FF — favicon accent).
  */
 import { html } from "https://cdn.jsdelivr.net/npm/lit-html@3.2.1/+esm";
-import {
-  SPINNER_CSS,
-  SPINNER_STYLE_ID as STYLE_ID,
-} from "./filstream-constants.mjs";
+import { SPINNER_CSS } from "../services/filstream-constants.mjs";
+
+let spinnerStylesInjected = false;
 
 /** Idempotent: injects keyframes + spinner rules once. */
 export function ensureSpinnerStyles() {
-  if (typeof document === "undefined") return;
-  if (document.getElementById(STYLE_ID)) return;
+  if (typeof document === "undefined" || spinnerStylesInjected) return;
+  spinnerStylesInjected = true;
   const el = document.createElement("style");
-  el.id = STYLE_ID;
   el.textContent = SPINNER_CSS;
   document.head.appendChild(el);
 }

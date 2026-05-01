@@ -8,12 +8,12 @@
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
-  <div id="wizard-root"></div>
-  <!-- Optional: override defaults from filstream-config.mjs (see env.example). -->
   <script>
     window.__FILSTREAM_CONFIG__ = window.__FILSTREAM_CONFIG__ || {};
   </script>
-  <!-- UI: ui.mjs + upload-configure.mjs (EIP-6963). Pipeline: core.mjs. -->
-  <script type="module" src="ui.mjs"></script>
+  <filstream-upload-app></filstream-upload-app>
+  <!-- Optional: override defaults from services/filstream-config.mjs (see env.example). -->
+  <!-- UI: upload-entry.mjs → filstream-upload-app + ui.mjs. Pipeline: services/core.mjs. -->
+  <script type="module" src="components/upload-entry.mjs"></script>
 </body>
 </html>

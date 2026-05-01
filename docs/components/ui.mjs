@@ -3,12 +3,12 @@
  * Wallet/configure: `upload-configure.mjs`. Transcode + preview: `convert-progress.mjs`. Pipeline: `core.mjs`.
  */
 import { html, render } from "https://cdn.jsdelivr.net/npm/lit-html@3.2.1/+esm";
-import { captureListingAnimatedWebp } from "./animated-webp.mjs";
+import { captureListingAnimatedWebp } from "../services/animated-webp.mjs";
 import {
   createBrowserUploadSession,
   resolveOrCreateDataSet,
   StoreError,
-} from "./browser-store.mjs";
+} from "../services/browser-store.mjs";
 import { applyStreamMode, convertProgressPanel } from "./convert-progress.mjs";
 import {
   destroyActivePipelinePlayer,
@@ -21,13 +21,13 @@ import {
   SEGMENT_FLUSH_EVENT,
   SEGMENT_READY_EVENT,
   TRANSCODE_COMPLETE_EVENT,
-} from "./core.mjs";
+} from "../services/core.mjs";
 import {
   connectInjectedProvider,
   EIP6963_LEGACY_PROVIDER_UUID,
   requestInjectedProviders,
   subscribeInjectedWallets,
-} from "./eip6963.mjs";
+} from "../services/eip6963.mjs";
 import { filstreamHeaderLit, hydrateFilstreamHeaderProfile } from "./filstream-brand.mjs";
 import { broadcastViewTemplate } from "./filstream-broadcast-view.mjs";
 import {
@@ -35,7 +35,7 @@ import {
   ensureFilstreamId,
   getFilstreamStoreConfig,
   resolveVideoIdFromFinalize,
-} from "./filstream-config.mjs";
+} from "../services/filstream-config.mjs";
 import {
   FUNDING_MIN_TOPUP_WEI,
   FUNDING_TARGET_DENOMINATOR,
@@ -48,7 +48,7 @@ import {
   USDFC_DECIMALS,
   USDFC_ONE,
   WIZARD_MAX_STEP,
-} from "./filstream-constants.mjs";
+} from "../services/filstream-constants.mjs";
 import { publishMetadataForm } from "./publish-metadata.mjs";
 import {
   authorizeSessionKeyForUpload,
@@ -60,7 +60,7 @@ import {
   sweepSessionKeyBalanceToRoot,
   minExpirationSummaryLocal,
   waitForProviderReceipt,
-} from "./session-key-bootstrap.mjs";
+} from "../services/session-key-bootstrap.mjs";
 import {
   FILSTREAM_SESSION_CHANNEL_NAME,
   FILSTREAM_SESSION_CLEANUP_LOCK_KEY,
@@ -77,14 +77,17 @@ import {
   saveSessionKeyToStorage,
   sessionKeyIdFromPrivateKey,
   saveWalletToStorage,
-} from "./session-key-storage.mjs";
+} from "../services/session-key-storage.mjs";
 import { uploadConfigurePanel } from "./upload-configure.mjs";
 import {
   custom,
   getAddress,
   getChain,
   Synapse,
-} from "./vendor/synapse-browser.mjs";
+} from "../vendor/synapse-browser.mjs";
+
+/** @type {HTMLElement | null} */
+let wizardMountEl = null;
 
 /**
  * Stringify a thrown value that may not be `instanceof Error` (e.g. viem RPC objects).
@@ -200,7 +203,7 @@ const storeRuntime = {
   uploadId: "",
   assetId: "",
   sessionKeyId: "",
-  /** @type {import("./browser-store.mjs").BrowserFilstreamUploadSession | null} */
+  /** @type {import("../services/browser-store.mjs").BrowserFilstreamUploadSession | null} */
   session: null,
   initPromise: null,
   queue: Promise.resolve(),
@@ -686,7 +689,7 @@ function computeFundingTargetAmount(expectedDeposit) {
  * not the public RPC transport used by session-key storage operations.
  *
  * @param {string} clientAddress
- * @returns {import("./vendor/synapse-browser.mjs").Synapse}
+ * @returns {import("../vendor/synapse-browser.mjs").Synapse}
  */
 function createFundingSynapseForWallet(clientAddress) {
   if (!wizardState.eip1193Provider) {
@@ -1015,7 +1018,7 @@ function sessionExpiresSummary() {
 /**
  * Restore wallet + session key after reload if `eth_accounts` still matches stored auth state.
  *
- * @param {Array<{ info: { uuid: string, name: string, icon: string, rdns: string }, provider: import("./eip6963.mjs").Eip1193Provider }>} list
+ * @param {Array<{ info: { uuid: string, name: string, icon: string, rdns: string }, provider: import("../services/eip6963.mjs").Eip1193Provider }>} list
  */
 function attemptRestoreWalletFromStorage(list) {
   if (wizardState.walletAddress) return;
@@ -1023,7 +1026,7 @@ function attemptRestoreWalletFromStorage(list) {
   if (!stored) return;
 
   const found = list.find((w) => w.info.uuid === stored.walletUuid);
-  /** @type {import("./eip6963.mjs").Eip1193Provider | null} */
+  /** @type {import("../services/eip6963.mjs").Eip1193Provider | null} */
   let provider =
     found && typeof found.provider?.request === "function" ? found.provider : null;
 
@@ -2207,7 +2210,7 @@ function handleDisconnectWallet() {
 }
 
 function renderWizard() {
-  const root = document.getElementById("wizard-root");
+  const root = wizardMountEl;
   if (!root) return;
   const v = ensureVideoEl();
   const srcSeek = ensureSourcePreviewVideoEl();
@@ -2287,12 +2290,12 @@ function renderWizard() {
                     @keydown=${(e) => {
                       if (e.key === "Enter" || e.key === " ") {
                         e.preventDefault();
-                        document.getElementById("wiz-file-input")?.click();
+                        root.querySelector("#wiz-file-input")?.click();
                       }
                     }}
                     @click=${(e) => {
                       if (e.target.closest("label.browse")) return;
-                      document.getElementById("wiz-file-input")?.click();
+                      root.querySelector("#wiz-file-input")?.click();
                     }}
                   >
                     <div class="dropzone-inner">
@@ -2503,7 +2506,7 @@ function renderWizard() {
   );
   queueMicrotask(() => {
     void hydrateFilstreamHeaderProfile(
-      document.querySelector("[data-filstream-header]"),
+      root.querySelector("[data-filstream-header]"),
     );
     syncSourcePreviewSrc();
     const vid = ensureVideoEl();
@@ -2650,8 +2653,20 @@ async function onWizardFileChosen(file) {
   });
 }
 
-ensureInjectedWalletSubscription();
-installStoreEventBridge();
-installSessionCoordination();
-renderWizard();
-void probeVideoEncoderHardwareAcceleration();
+/**
+ * Called from `upload-entry.mjs` after `#wizard-root` exists inside `<filstream-upload-app>`.
+ *
+ * @param {HTMLElement} mountEl
+ */
+export function startUploadWizard(mountEl) {
+  if (!(mountEl instanceof HTMLElement)) {
+    throw new TypeError("startUploadWizard: expected HTMLElement");
+  }
+  if (wizardMountEl) return;
+  wizardMountEl = mountEl;
+  ensureInjectedWalletSubscription();
+  installStoreEventBridge();
+  installSessionCoordination();
+  renderWizard();
+  void probeVideoEncoderHardwareAcceleration();
+}

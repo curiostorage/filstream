@@ -2,7 +2,7 @@
  * Browser-side FilStream upload config (`window.__FILSTREAM_CONFIG__`).
  *
  * Defaults match `docs/env.example` / Filecoin Calibration.
- * Override any key in an inline script before `ui.mjs` loads.
+ * Override any key in an inline script before `components/ui.mjs` loads.
  *
  * Mapping from legacy `STORE_*` names:
  * - STORE_RPC_URL → storeRpcUrl
@@ -145,6 +145,22 @@ export function buildViewerUrlForVideoId(videoId, opts = {}) {
   if (opts.embed === true) sp.set("embed", "true");
   const qs = sp.toString();
   return qs ? `viewer.html?${qs}` : "viewer.html";
+}
+
+/**
+ * Same as {@link buildViewerUrlForVideoId} but resolved against `viewBaseUrl` so links work from
+ * non-app origins (e.g. `share.html` served as a PDP piece, Open Graph meta tags).
+ *
+ * @param {string} videoId
+ * @param {{ embed?: boolean }} [opts]
+ * @returns {string}
+ */
+export function buildAbsoluteViewerUrlForVideoId(videoId, opts = {}) {
+  const rel = buildViewerUrlForVideoId(videoId, opts);
+  const base = getFilstreamStoreConfig().viewBaseUrl.trim();
+  if (!base) return rel;
+  const normalized = base.endsWith("/") ? base : `${base}/`;
+  return new URL(rel, normalized).href;
 }
 
 /**

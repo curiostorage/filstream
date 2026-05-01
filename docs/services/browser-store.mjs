@@ -4,7 +4,7 @@
  * streamed to Synapse via ReadableStream, deleting each IDB record after it is read.
  */
 import {
-  buildViewerUrlForVideoId,
+  buildAbsoluteViewerUrlForVideoId,
   ensureFilstreamId,
   getFilstreamStoreConfig,
 } from "./filstream-config.mjs";
@@ -35,7 +35,7 @@ import {
   getAddress,
   getChain,
   privateKeyToAccount,
-} from "./vendor/synapse-browser.mjs";
+} from "../vendor/synapse-browser.mjs";
 
 /**
  * @typedef {object} DataSetCandidate
@@ -1720,7 +1720,7 @@ export class BrowserFilstreamUploadSession {
     this.lastEventAt = new Date().toISOString();
     /**
      * Optional: invoked when PDP piece count, unpieced buffers, or upload in-flight count may have changed.
-     * Assigned from `ui.mjs` for live pipeline counts during long `store()` calls.
+     * Assigned from `components/ui.mjs` for live pipeline counts during long `store()` calls.
      *
      * @type {(() => void) | null | undefined}
      */
@@ -2775,8 +2775,8 @@ export class BrowserFilstreamUploadSession {
 
       try {
         if (publishedMeta) {
-          const viewerRedirect = buildViewerUrlForVideoId(this.assetId);
-          const embedPlayer = buildViewerUrlForVideoId(this.assetId, { embed: true });
+          const viewerRedirect = buildAbsoluteViewerUrlForVideoId(this.assetId);
+          const embedPlayer = buildAbsoluteViewerUrlForVideoId(this.assetId, { embed: true });
           const pb =
             typeof publishedMeta.playback === "object" &&
             publishedMeta.playback !== null &&
