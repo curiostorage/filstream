@@ -28,7 +28,7 @@ function ensureWebPXMux() {
         return;
       }
       const s = document.createElement("script");
-      s.src = new URL("./vendor/webpxmux/webpxmux.min.js", import.meta.url).href;
+      s.src = new URL("../vendor/webpxmux/webpxmux.min.js", import.meta.url).href;
       s.async = true;
       s.onload = () => {
         const Ctor = globalThis.WebPXMux;
@@ -195,7 +195,7 @@ export async function captureListingAnimatedWebp(video, w, h) {
   }
 
   const WebPXMux = await ensureWebPXMux();
-  const wasmHref = new URL("./vendor/webpxmux/webpxmux.wasm", import.meta.url).href;
+  const wasmHref = new URL("../vendor/webpxmux/webpxmux.wasm", import.meta.url).href;
   const xMux = /** @type {{
     waitRuntime: () => Promise<void>,
     encodeFrames: (f: unknown) => Promise<Uint8Array>,

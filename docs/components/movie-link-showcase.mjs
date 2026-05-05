@@ -253,3 +253,22 @@ export class MovieLinkShowcase extends LitElement {
 }
 
 customElements.define("movie-link-showcase", MovieLinkShowcase);
+
+/**
+ * Wait for `movie-link-showcase` elements under `root` to finish Lit's pending update so
+ * shadow DOM (poster `<img>`, etc.) exists before imperative hydration runs.
+ *
+ * @param {ParentNode | null | undefined} root
+ * @returns {Promise<void>}
+ */
+export async function awaitMovieLinkShowcaseUpdates(root) {
+  if (!root) return;
+  const hosts = root.querySelectorAll("movie-link-showcase");
+  await Promise.all(
+    [...hosts].map((node) => {
+      const el = /** @type {{ updateComplete?: Promise<unknown> }} */ (node);
+      const p = el.updateComplete;
+      return typeof p?.then === "function" ? p.catch(() => {}) : Promise.resolve();
+    }),
+  );
+}

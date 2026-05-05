@@ -5,65 +5,17 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>FilStream — Own your movies</title>
   <link rel="icon" href="favicon.svg" type="image/svg+xml" />
-  <link rel="stylesheet" href="viewer/viewer.css" />
   <link
     rel="stylesheet"
     href="https://cdn.jsdelivr.net/npm/shaka-player@4.7.11/dist/controls.css"
   />
+  <link rel="stylesheet" href="viewer/viewer.css" />
 </head>
 <body>
   <script>
     window.__FILSTREAM_CONFIG__ = window.__FILSTREAM_CONFIG__ || {};
   </script>
-  <div id="root" class="viewer-layout">
-    <div class="viewer-main">
-      <header id="viewer-brand-mount" class="viewer-brand" role="banner"></header>
-      <p class="viewer-status" id="viewer-status">Loading…</p>
-      <div class="viewer-player-block">
-        <div id="viewer-shaka-container" class="viewer-shaka-container">
-          <video id="viewer-video" playsinline></video>
-        </div>
-      </div>
-      <section id="viewer-meta" class="viewer-meta" hidden aria-label="About this video">
-        <h1 id="viewer-title" class="broadcast-title"></h1>
-        <p id="viewer-upload-date" class="broadcast-upload-date" hidden></p>
-        <div id="viewer-byline" class="viewer-byline" hidden>
-          <div id="viewer-byline-catalog" class="viewer-byline-catalog"></div>
-          <div class="viewer-byline-trailing">
-            <div id="viewer-donate-root" class="viewer-byline-donate"></div>
-            <div id="viewer-actions" class="viewer-actions" hidden aria-label="Share and embed"></div>
-          </div>
-        </div>
-        <div class="viewer-description-box">
-          <div id="viewer-description" class="broadcast-description"></div>
-        </div>
-      </section>
-    </div>
-    <aside id="viewer-catalog" class="viewer-catalog" hidden aria-label="Catalog"></aside>
-  </div>
-
-  <aside
-    id="filstream-landing-toast"
-    class="filstream-landing-toast"
-    role="dialog"
-    aria-labelledby="filstream-landing-toast-title"
-    aria-modal="false"
-    hidden
-  >
-    <button type="button" class="filstream-landing-toast-dismiss" aria-label="Dismiss">×</button>
-    <h2 id="filstream-landing-toast-title" class="filstream-landing-toast-title">Own your movies</h2>
-    <ul class="filstream-landing-toast-list">
-      <li>No Terms of Service</li>
-      <li>No gatekeepers</li>
-      <li>No central owning company</li>
-      <li>Get 100% of ads revenue if you want them (coming soon)</li>
-      <li>Just pay for space on Filecoin: about 0.10 USDFC for an hour-long movie per year.</li>
-    </ul>
-    <p class="filstream-landing-toast-cta">
-      <a class="btn btn-primary" href="upload.html">Upload a movie</a>
-    </p>
-  </aside>
-
-  <script type="module" src="viewer/viewer.mjs"></script>
+  <filstream-viewer-app landing-toast></filstream-viewer-app>
+  <script type="module" src="components/viewer.mjs"></script>
 </body>
 </html>

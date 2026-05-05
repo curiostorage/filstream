@@ -2,7 +2,7 @@
  * Browser-side FilStream upload config (`window.__FILSTREAM_CONFIG__`).
  *
  * Defaults match `docs/env.example` / Filecoin Calibration.
- * Override any key in an inline script before `ui.mjs` loads.
+ * Override any key in an inline script before `components/ui.mjs` loads.
  *
  * Mapping from legacy `STORE_*` names:
  * - STORE_RPC_URL → storeRpcUrl

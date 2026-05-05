@@ -3,8 +3,8 @@
  * connects a wallet and proposes an ERC-20 `transfer` to the creator’s Fund-step wallet (`meta.listing.fundWalletAddress` / `meta.donate.recipient`).
  */
 import { html } from "https://cdn.jsdelivr.net/npm/lit-html@3.2.1/+esm";
-import { connectInjectedProvider } from "./eip6963.mjs";
-import { USDFC_DONATE_TOKEN } from "./filstream-chain-config.mjs";
+import { connectInjectedProvider } from "../services/eip6963.mjs";
+import { USDFC_DONATE_TOKEN } from "../services/filstream-chain-config.mjs";
 
 /**
  * @param {string} human e.g. "1" or "0.5"
@@ -84,7 +84,7 @@ export function donateConfigFromMeta(meta) {
   return { enabled: false };
 }
 
-/** @param {import("./eip6963.mjs").Eip1193Provider} provider */
+/** @param {import("../services/eip6963.mjs").Eip1193Provider} provider */
 async function ensureChain(provider, chainId, chainName) {
   const idHex = "0x" + BigInt(chainId).toString(16);
   try {
@@ -113,7 +113,7 @@ async function ensureChain(provider, chainId, chainName) {
 }
 
 /**
- * @param {import("./eip6963.mjs").Eip1193Provider} provider
+ * @param {import("../services/eip6963.mjs").Eip1193Provider} provider
  * @param {Exclude<ReturnType<typeof donateConfigFromMeta>, { enabled: false }>} cfg
  */
 export async function proposeDonateTransfer(provider, cfg) {
@@ -163,7 +163,7 @@ export function resolveViewerProvider(preferred) {
  * Lit template: donate primary CTA for broadcast / publish previews.
  * @param {{
  *   meta: unknown,
- *   getWalletList?: () => import("./eip6963.mjs").Eip6963AnnouncedWallet[],
+ *   getWalletList?: () => import("../services/eip6963.mjs").Eip6963AnnouncedWallet[],
  *   viewerBusy: boolean,
  *   viewerError: string,
  *   viewerTxHash: string,

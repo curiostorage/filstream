@@ -214,6 +214,20 @@ body {
   display: block;
 }
 
+.site-header-profile-initial {
+  width: 2rem;
+  height: 2rem;
+  border-radius: 999px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #2d3139;
+  color: #e8eaed;
+  font-size: 0.85rem;
+  font-weight: 600;
+  line-height: 1;
+}
+
 @media (max-width: 900px) {
   .site-header-bar--with-search {
     grid-template-columns: minmax(0, 1fr) auto;

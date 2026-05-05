@@ -4,7 +4,7 @@ import path from "node:path";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const outFile = path.join(__dirname, "..", "docs", "vendor", "synapse-browser.mjs");
-const pieceCidOut = path.join(__dirname, "..", "docs", "piece-cid-from-bytes.mjs");
+const pieceCidOut = path.join(__dirname, "..", "docs", "services", "piece-cid-from-bytes.mjs");
 
 await esbuild.build({
   entryPoints: [path.join(__dirname, "entry.mjs")],

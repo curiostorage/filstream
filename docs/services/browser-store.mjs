@@ -35,7 +35,7 @@ import {
   getAddress,
   getChain,
   privateKeyToAccount,
-} from "./vendor/synapse-browser.mjs";
+} from "../vendor/synapse-browser.mjs";
 
 /**
  * @typedef {object} DataSetCandidate
@@ -1720,7 +1720,7 @@ export class BrowserFilstreamUploadSession {
     this.lastEventAt = new Date().toISOString();
     /**
      * Optional: invoked when PDP piece count, unpieced buffers, or upload in-flight count may have changed.
-     * Assigned from `ui.mjs` for live pipeline counts during long `store()` calls.
+     * Assigned from `components/ui.mjs` for live pipeline counts during long `store()` calls.
      *
      * @type {(() => void) | null | undefined}
      */

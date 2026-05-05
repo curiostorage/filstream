@@ -9,7 +9,7 @@ import {
   FILSTREAM_WALLET_STORAGE_KEY as SHARED_FILSTREAM_WALLET_STORAGE_KEY,
   SESSION_RECOVER_MAX_AGE_MS as SHARED_SESSION_RECOVER_MAX_AGE_MS,
 } from "./filstream-constants.mjs";
-import { getAddress, privateKeyToAccount } from "./vendor/synapse-browser.mjs";
+import { getAddress, privateKeyToAccount } from "../vendor/synapse-browser.mjs";
 
 export const FILSTREAM_SESSION_STORAGE_KEY = SHARED_FILSTREAM_SESSION_STORAGE_KEY;
 export const FILSTREAM_SESSION_CHANNEL_NAME = SHARED_FILSTREAM_SESSION_CHANNEL_NAME;
