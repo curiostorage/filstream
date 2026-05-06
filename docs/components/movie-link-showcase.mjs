@@ -61,6 +61,17 @@ export class MovieLinkShowcase extends LitElement {
       background: #232935;
     }
 
+    .viewer-catalog-card-watched-bar {
+      position: absolute;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      height: 2px;
+      background: #f03;
+      pointer-events: none;
+      z-index: 6;
+    }
+
     .viewer-catalog-card-thumb-wrap--anim .viewer-catalog-card-thumb--still,
     .viewer-catalog-card-thumb-wrap--anim .viewer-catalog-card-thumb--motion {
       position: absolute;
@@ -69,6 +80,7 @@ export class MovieLinkShowcase extends LitElement {
       height: 100%;
       object-fit: cover;
       transition: opacity 0.15s ease;
+      z-index: 1;
     }
 
     .viewer-catalog-card-thumb-wrap--anim .viewer-catalog-card-thumb--motion {
@@ -170,6 +182,8 @@ export class MovieLinkShowcase extends LitElement {
     variant: { type: String },
     /** Highlight when this row is the active video (watch UI). */
     current: { type: Boolean, reflect: true },
+    /** User has reached ≥95% playback (local watch history). */
+    watched95: { type: Boolean, attribute: "watched-95" },
     /** Open the viewer in a new tab (e.g. creator channel list). */
     openInNewTab: { type: Boolean, attribute: "open-in-new-tab" },
   };
@@ -185,6 +199,7 @@ export class MovieLinkShowcase extends LitElement {
     this.creatorAvatarUrl = "";
     this.variant = "discover";
     this.current = false;
+    this.watched95 = false;
     this.openInNewTab = false;
   }
 
@@ -222,6 +237,9 @@ export class MovieLinkShowcase extends LitElement {
             decoding="async"
             data-video-id=${this.assetId || nothing}
           />
+          ${this.watched95
+            ? html`<div class="viewer-catalog-card-watched-bar" aria-hidden="true"></div>`
+            : nothing}
         </div>
         <div class="viewer-catalog-card-body">
           <div class="viewer-catalog-card-title">${safeTitle}</div>
