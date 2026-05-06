@@ -1,5 +1,5 @@
 /**
- * Viewer-side donate control (not the uploader). Reads `donate` from published listing/manifest metadata;
+ * Catalog / playback donate control (not the uploader). Reads `donate` from published listing/manifest metadata;
  * connects a wallet and proposes an ERC-20 `transfer` to the creator’s Fund-step wallet (`meta.listing.fundWalletAddress` / `meta.donate.recipient`).
  */
 import { html } from "https://cdn.jsdelivr.net/npm/lit-html@3.2.1/+esm";
@@ -170,7 +170,7 @@ export function resolveViewerProvider(preferred) {
  *   onDonateClick: () => void,
  * }} props
  */
-export function viewerDonateBlock(props) {
+export function catalogDonateBlock(props) {
   const {
     meta,
     viewerBusy,

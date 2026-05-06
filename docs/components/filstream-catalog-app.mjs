@@ -1,7 +1,11 @@
 import { LitElement, html } from "https://cdn.jsdelivr.net/npm/lit@3.2.1/+esm";
-import { initViewerPage } from "./viewer-impl.mjs";
+import { initCatalogPage } from "./catalog-page.mjs";
 
-export class FilstreamViewerApp extends LitElement {
+/**
+ * Discover + catalog + playback shell (landing at `index.html`, deep links at `view/`).
+ * Light DOM; global styles in `filstream-catalog-app.css`.
+ */
+export class FilstreamCatalogApp extends LitElement {
   static properties = {
     landingToast: { type: Boolean, reflect: true, attribute: "landing-toast" },
   };
@@ -17,9 +21,9 @@ export class FilstreamViewerApp extends LitElement {
 
   render() {
     return html`
-      <div id="root" class="viewer-layout">
-        <div class="viewer-main">
-          <header id="viewer-brand-mount" class="viewer-brand" role="banner"></header>
+      <div id="root" class="catalog-app">
+        <div class="catalog-app-main">
+          <header id="viewer-brand-mount" class="catalog-app-brand" role="banner"></header>
           <p class="viewer-status" id="viewer-status">Loading…</p>
           <div class="viewer-player-block">
             <div id="viewer-shaka-container" class="viewer-shaka-container">
@@ -67,7 +71,7 @@ export class FilstreamViewerApp extends LitElement {
                 <li>Just pay for space on Filecoin: about 0.10 USDFC for an hour-long movie per year.</li>
               </ul>
               <p class="filstream-landing-toast-cta">
-                <a class="btn btn-primary" href="upload.html">Upload a movie</a>
+                <a class="btn btn-primary" href="upload/">Upload a movie</a>
               </p>
             </aside>
           `
@@ -76,8 +80,8 @@ export class FilstreamViewerApp extends LitElement {
   }
 
   async firstUpdated() {
-    await initViewerPage(this);
+    await initCatalogPage(this);
   }
 }
 
-customElements.define("filstream-viewer-app", FilstreamViewerApp);
+customElements.define("filstream-catalog-app", FilstreamCatalogApp);

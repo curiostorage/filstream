@@ -1,5 +1,5 @@
 /**
- * FilStream name, tagline, and logo — shared by `components/ui.mjs` and `components/viewer-impl.mjs`.
+ * FilStream name, tagline, and logo — shared by `components/ui.mjs` and `components/catalog-page.mjs`.
  */
 import { html } from "https://cdn.jsdelivr.net/npm/lit-html@3.2.1/+esm";
 import {
@@ -38,8 +38,8 @@ export function projectSiteHref() {
 }
 
 const APP_NAV_LINKS = /** @type {const} */ ([
-  { id: "upload", label: "Upload", file: "upload.html" },
-  { id: "creator", label: "My Profile", file: "creator.html" },
+  { id: "upload", label: "Upload", file: "upload/" },
+  { id: "creator", label: "My Profile", file: "user/" },
 ]);
 
 /**
@@ -139,7 +139,7 @@ export async function hydrateFilstreamHeaderProfile(root, opts = {}) {
 
   const addr = await resolveWalletAddressForHeader();
   const defaultProfileHref =
-    filstreamAppNavLinks().find((x) => x.id === "creator")?.href ?? "creator.html";
+    filstreamAppNavLinks().find((x) => x.id === "creator")?.href ?? "user/";
   if (addr) {
     link.href = buildCreatorUrlForAddress(addr);
   } else {

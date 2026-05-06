@@ -966,7 +966,7 @@ function parseOptionalJsonObject(raw) {
 }
 
 /**
- * Listing metadata captured on Define step (in-memory listing payload prior to finalize).
+ * Listing metadata captured on Describe step (in-memory listing payload prior to finalize).
  *
  * @param {BrowserFilstreamUploadSession} session
  * @returns {Record<string, unknown> | null}

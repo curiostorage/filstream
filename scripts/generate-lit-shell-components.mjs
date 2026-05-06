@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 /**
  * Legacy entry point. Page chrome is plain HTML plus linked stylesheets:
- * - `docs/style.css` — upload wizard (`upload.html`)
- * - `docs/viewer/viewer.css` — discover / viewer (`index.html`, `viewer.html`)
- * - `docs/creator/creator.css` — creator dashboard (`creator.html`)
+ * - `docs/style.css` — upload wizard (`upload/`)
+ * - `docs/components/filstream-catalog-app.css` — discover + catalog + playback (`index.html`, `view/`)
+ * - `docs/creator/creator.css` — creator dashboard (`user/`)
  *
  * LitElement components keep `static styles` in their module; lit-html panels rely
  * on the stylesheet for the page that hosts them.

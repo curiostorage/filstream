@@ -57,23 +57,23 @@ function stripOldPrefix(src) {
   return src.slice(end + 2); // keep one \n before /**
 }
 
-const viewerCss = gitShow("docs/viewer/viewer.css");
+const catalogAppCss = gitShow("docs/components/filstream-catalog-app.css");
 const creatorCss = gitShow("docs/creator/creator.css");
 const wizardCss = gitShow("docs/style.css");
 
-const viewerPath = path.join(root, "docs", "components", "viewer.mjs");
+const catalogAppPath = path.join(root, "docs", "components", "catalog-app.mjs");
 const creatorPath = path.join(root, "docs", "components", "creator.mjs");
 const uiPath = path.join(root, "docs", "components", "ui.mjs");
 
-let viewerSrc = fs.readFileSync(viewerPath, "utf8");
-viewerSrc =
+let catalogAppSrc = fs.readFileSync(catalogAppPath, "utf8");
+catalogAppSrc =
   makePrefix({
-    styleId: "filstream-viewer-global-css",
-    constName: "filstreamViewerGlobalStyles",
-    css: viewerCss,
+    styleId: "filstream-catalog-app-global-css",
+    constName: "filstreamCatalogAppGlobalStyles",
+    css: catalogAppCss,
     includeLitImport: true,
-  }) + stripOldPrefix(viewerSrc);
-fs.writeFileSync(viewerPath, viewerSrc);
+  }) + stripOldPrefix(catalogAppSrc);
+fs.writeFileSync(catalogAppPath, catalogAppSrc);
 
 let creatorSrc = fs.readFileSync(creatorPath, "utf8");
 creatorSrc =
@@ -100,4 +100,4 @@ const styleBlock = makePrefix({
 });
 fs.writeFileSync(uiPath, `${uiImports}\n\n${styleBlock}${uiBody}`);
 
-console.log("embed-lit-global-styles: wrote viewer.mjs, creator.mjs, ui.mjs");
+console.log("embed-lit-global-styles: wrote catalog-app.mjs, creator.mjs, ui.mjs");

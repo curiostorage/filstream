@@ -162,8 +162,8 @@ export function convertProgressPanel(props) {
     phase === "encoding"
       ? "Transcode"
       : phase === "define"
-        ? "Define"
-        : "Await";
+        ? "Describe"
+        : "Upload";
   const ariaPanel =
     phase === "encoding"
       ? "Transcoding progress"

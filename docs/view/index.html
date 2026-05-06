@@ -1,9 +1,23 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
+  <base href="../" />
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>FilStream — Own your movies</title>
+  <title>FilStream viewer</title>
+  <script>
+    (function () {
+      var p = new URLSearchParams(location.search);
+      var hasVideo = (p.get("videoId") || "").trim() !== "";
+      var embed = p.get("embed") === "true";
+      if (!hasVideo && !embed) {
+        var u = new URL("index.html", document.baseURI);
+        u.search = location.search;
+        u.hash = location.hash;
+        location.replace(u.href);
+      }
+    })();
+  </script>
   <link rel="icon" href="favicon.svg" type="image/svg+xml" />
   <link
     rel="stylesheet"
@@ -15,7 +29,7 @@
   <script>
     window.__FILSTREAM_CONFIG__ = window.__FILSTREAM_CONFIG__ || {};
   </script>
-  <filstream-catalog-app landing-toast></filstream-catalog-app>
+  <filstream-catalog-app></filstream-catalog-app>
   <script type="module" src="components/catalog-app.mjs"></script>
 </body>
 </html>

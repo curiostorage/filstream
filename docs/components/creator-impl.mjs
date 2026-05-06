@@ -1,6 +1,6 @@
 /**
  * Creator page (on-chain catalog):
- * - `creator.html?creator=0x...` to view a specific channel
+ * - `user/?creator=0x...` to view a specific channel
  * - no query param: wallet-first owner mode (no implicit fallback channel)
  *
  * Edit capabilities (owner only):

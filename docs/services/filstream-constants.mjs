@@ -317,26 +317,26 @@ export const FUNDING_TARGET_NUMERATOR = 120n;
 export const FUNDING_TARGET_DENOMINATOR = 100n;
 
 /**
- * Viewer sidebar page size for catalog reads.
- * Used by: `viewer/viewer.mjs`.
+ * Catalog sidebar page size for on-chain catalog reads.
+ * Used by: `components/catalog-page.mjs`.
  */
 export const CATALOG_PAGE_SIZE = 100;
 
 /**
- * Viewer cadence for occasional full catalog refresh.
- * Used by: `viewer/viewer.mjs`.
+ * Cadence for occasional full catalog refresh.
+ * Used by: `components/catalog-page.mjs`.
  */
 export const CATALOG_FULL_REFRESH_MS = 10 * 60 * 1000;
 
 /**
- * Maximum unique creators refreshed per viewer sync tick for username/profile updates.
- * Set to current viewer cache cap so all currently listed creators are covered.
- * Used by: `viewer/viewer.mjs`.
+ * Maximum unique creators refreshed per catalog sync tick for username/profile updates.
+ * Set to current catalog cache cap so all currently listed creators are covered.
+ * Used by: `components/catalog-page.mjs`.
  */
 export const CATALOG_CREATOR_PROFILE_SYNC_LIMIT = 250;
 
 /**
- * IndexedDB database name for viewer/creator catalog cache.
+ * IndexedDB database name for catalog / creator cache.
  * Used by: `filstream-catalog-cache.mjs`.
  */
 export const CATALOG_CACHE_DB_NAME = "filstream_catalog_cache_v1";
@@ -483,7 +483,7 @@ export const MIN_DURATION_FOR_ANIM_SEC = START_SEC + 0.05;
 
 /**
  * Max width for catalog mini-poster images.
- * Used by: `animated-webp.mjs`, CSS in `viewer.css`/`creator.css`.
+ * Used by: `animated-webp.mjs`, CSS in `filstream-catalog-app.css`/`creator.css`.
  */
 export const CATALOG_ANIM_MAX_WIDTH_PX = 168;
 
@@ -563,7 +563,7 @@ export const USDFC_DONATE_TOKEN = {
 
 /**
  * Shared FilStream brand data.
- * Used by: `filstream-brand.mjs`, `viewer/viewer.mjs`.
+ * Used by: `filstream-brand.mjs`, `components/catalog-page.mjs`.
  */
 export const FILSTREAM_BRAND = {
   name: "FilStream",

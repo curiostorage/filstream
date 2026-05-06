@@ -1,6 +1,6 @@
 /**
- * Viewer entry:
- * - Discover: `index.html` · Playback: `viewer.html?videoId=<asset-id>[&embed=true]`
+ * Catalog app page logic (discover + playback):
+ * - Discover: `index.html` · Playback: `view/?videoId=<asset-id>[&embed=true]`
  *
  * Catalog discovery is on-chain (`CatalogRegistry`) with IndexedDB cache:
  * - entries are synced every ~30s when visible (or when hidden but video is playing)
@@ -59,7 +59,7 @@ import {
   donateConfigFromMeta,
   proposeDonateTransfer,
   resolveViewerProvider,
-} from "./filstream-viewer-donate.mjs";
+} from "./filstream-catalog-donate.mjs";
 
 const shaka = (
   await import("https://esm.sh/shaka-player@4.7.11/dist/shaka-player.ui.js")
@@ -71,7 +71,7 @@ const requestedVideoId = (params.get("videoId") || "").trim();
 const LANDING_TOAST_STORAGE_KEY = "filstream-welcome-dismissed";
 
 if (embedMode) {
-  document.documentElement.classList.add("viewer-embed");
+  document.documentElement.classList.add("catalog-app-embed");
 }
 
 const G_REF = /** @type {{ host: import("lit").LitElement | null }} */ ({ host: null });
@@ -107,7 +107,7 @@ let catalogAside = null;
 /** @type {HTMLElement | null} */
 let brandMount = null;
 
-function cacheViewerRefs() {
+function cacheCatalogPageRefs() {
   const h = G_REF.host;
   if (!h) return;
   statusEl = h.querySelector("#viewer-status");
@@ -178,6 +178,38 @@ function setStatus(msg, kind) {
   statusEl.className = `viewer-status${kind === "err" ? " err" : ""}`;
 }
 
+const CATALOG_TOAST_ID = "filstream-catalog-toast";
+/** @type {ReturnType<typeof setTimeout> | undefined} */
+let catalogToastHideTimer;
+
+/**
+ * @param {string} message
+ * @param {{ kind?: "ok" | "err", durationMs?: number }} [opts]
+ */
+function showCatalogToast(message, opts = {}) {
+  const kind = opts.kind === "err" ? "err" : "ok";
+  const durationMs =
+    typeof opts.durationMs === "number" && opts.durationMs > 0 ? opts.durationMs : 2600;
+  let el = document.getElementById(CATALOG_TOAST_ID);
+  if (!el) {
+    el = document.createElement("div");
+    el.id = CATALOG_TOAST_ID;
+    el.className = "filstream-catalog-toast";
+    el.setAttribute("role", kind === "err" ? "alert" : "status");
+    el.setAttribute("hidden", "");
+    document.body.appendChild(el);
+  }
+  el.setAttribute("role", kind === "err" ? "alert" : "status");
+  el.textContent = message;
+  el.dataset.kind = kind;
+  el.removeAttribute("hidden");
+  if (catalogToastHideTimer !== undefined) clearTimeout(catalogToastHideTimer);
+  catalogToastHideTimer = window.setTimeout(() => {
+    el?.setAttribute("hidden", "");
+    catalogToastHideTimer = undefined;
+  }, durationMs);
+}
+
 function syncDiscoverSearchToUrl() {
   if (embedMode) return;
   if (inWatchMode()) return;
@@ -238,12 +270,12 @@ function inWatchMode() {
   return Boolean(currentVideoId);
 }
 
-function applyViewerModeLayout() {
+function applyCatalogPageLayout() {
   if (embedMode) return;
   const watch = inWatchMode();
   if (rootEl) {
-    rootEl.classList.toggle("viewer-layout--watch", watch);
-    rootEl.classList.toggle("viewer-layout--discover", !watch);
+    rootEl.classList.toggle("catalog-app--watch", watch);
+    rootEl.classList.toggle("catalog-app--discover", !watch);
   }
   if (playerBlockEl instanceof HTMLElement) {
     playerBlockEl.hidden = !watch;
@@ -1065,14 +1097,14 @@ function renderViewerActions(videoId, sharePageUrl) {
           : buildAbsoluteViewerUrlForVideoId(videoId);
       const mode = await copyTextToClipboardBestEffort(url);
       if (mode === "clipboard") {
-        setStatus("Share URL copied.", "");
+        showCatalogToast("URL copied");
       } else if (mode === "prompt") {
-        setStatus("Share URL ready to copy.", "");
+        showCatalogToast("URL ready — copy from the prompt");
       } else {
-        setStatus("Share copy cancelled.", "err");
+        showCatalogToast("Copy cancelled", { kind: "err" });
       }
     } catch {
-      setStatus("Could not copy share URL.", "err");
+      showCatalogToast("Could not copy URL", { kind: "err" });
     }
   };
   const onEmbedClick = async () => {
@@ -1080,14 +1112,14 @@ function renderViewerActions(videoId, sharePageUrl) {
       const url = buildViewerUrlForVideoId(videoId, { embed: true });
       const mode = await copyTextToClipboardBestEffort(url);
       if (mode === "clipboard") {
-        setStatus("Embed URL copied.", "");
+        showCatalogToast("Embed URL copied");
       } else if (mode === "prompt") {
-        setStatus("Embed URL ready to copy.", "");
+        showCatalogToast("Embed URL ready — copy from the prompt");
       } else {
-        setStatus("Embed copy cancelled.", "err");
+        showCatalogToast("Copy cancelled", { kind: "err" });
       }
     } catch {
-      setStatus("Could not copy embed URL.", "err");
+      showCatalogToast("Could not copy embed URL", { kind: "err" });
     }
   };
   render(
@@ -1662,7 +1694,7 @@ async function resolveEntryForVideo(videoId) {
 async function openVideoById(videoId) {
   currentVideoId = videoId.trim();
   stopPlaybackEndClamp();
-  applyViewerModeLayout();
+  applyCatalogPageLayout();
   renderCatalogSidebar();
   if (!currentVideoId) {
     setStatus("", "");
@@ -1713,9 +1745,9 @@ async function bootstrapCatalogState() {
 }
 
 /** @param {import("lit").LitElement} host */
-export async function initViewerPage(host) {
+export async function initCatalogPage(host) {
   G_REF.host = host;
-  cacheViewerRefs();
+  cacheCatalogPageRefs();
   if (brandMount && !embedMode) {
     mountFilstreamHeader(brandMount, { active: "", searchManaged: true });
     void hydrateFilstreamHeaderProfile(
@@ -1729,7 +1761,7 @@ export async function initViewerPage(host) {
 
   try {
     await unregisterLegacyPieceHeadServiceWorker();
-    applyViewerModeLayout();
+    applyCatalogPageLayout();
     await bootstrapCatalogState();
     if (requestedVideoId) {
       await openVideoById(requestedVideoId);

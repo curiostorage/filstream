@@ -1,5 +1,5 @@
 /**
- * Define step — listing fields + source preview + Next to Await.
+ * Describe step — listing fields + source preview + Next to Upload.
  */
 import { html } from "https://cdn.jsdelivr.net/npm/lit-html@3.2.1/+esm";
 
@@ -47,7 +47,7 @@ export function publishMetadataForm(props) {
 
   return html`
     <section class="publish-metadata" aria-labelledby="publish-metadata-title">
-      <h2 id="publish-metadata-title" class="publish-metadata-head">Define</h2>
+      <h2 id="publish-metadata-title" class="publish-metadata-head">Describe</h2>
 
       <label class="publish-field">
         <span class="publish-field-label">Title</span>
@@ -183,7 +183,7 @@ export function publishMetadataForm(props) {
           ${nextBusy ? "Saving…" : "Next"}
         </button>
         <p class="publish-define-next-hint" title="Poster required; then pipeline upload continues.">
-          Saves poster → Await.
+          Saves poster → Upload.
         </p>
       </div>
     </section>
