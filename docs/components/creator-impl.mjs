@@ -53,6 +53,7 @@ import { repeat } from "https://cdn.jsdelivr.net/npm/lit-html@3.2.1/directives/r
 import { spinnerLit } from "./spinner.mjs";
 import { getAddress } from "../vendor/synapse-browser.mjs";
 import { awaitMovieLinkShowcaseUpdates } from "./movie-link-showcase.mjs";
+import { hasWatchedTo95Percent } from "../services/filstream-watch-history.mjs";
 
 const G_REF = /** @type {{ host: import("lit").LitElement | null }} */ ({ host: null });
 
@@ -725,6 +726,7 @@ function renderMovieList() {
             .showCreator=${false}
             .variant=${"discover"}
             .openInNewTab=${true}
+            .watched95=${hasWatchedTo95Percent(entry.assetId)}
           ></movie-link-showcase>
         `,
       )}

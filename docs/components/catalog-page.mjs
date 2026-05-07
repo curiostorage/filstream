@@ -56,6 +56,13 @@ import {
   CATALOG_PAGE_SIZE,
 } from "../services/filstream-constants.mjs";
 import {
+  clearResumePosition,
+  getResumePositionSeconds,
+  hasWatchedTo95Percent,
+  markWatchedTo95Percent,
+  setResumePositionSeconds,
+} from "../services/filstream-watch-history.mjs";
+import {
   donateConfigFromMeta,
   proposeDonateTransfer,
   resolveViewerProvider,
@@ -152,6 +159,13 @@ let isVideoPlaying = false;
 let destroyed = false;
 /** Stops {@link installPlaybackEndClamp} listeners when aborted. */
 let playbackEndClampAbort = null;
+/** Stops {@link installWatchHistoryTracking} listeners when aborted. */
+let watchHistoryTrackingAbort = null;
+/** Stops {@link installResumePlaybackTracking} listeners and the 5s save interval. */
+let resumePlaybackAbort = null;
+let resumePlaybackIntervalId = 0;
+/** Bumps {@link computeCatalogSidebarSignature} when a new “watched” marker is saved. */
+let watchHistorySidebarRevision = 0;
 const cfg = getFilstreamStoreConfig();
 const syncIntervalMs = Math.max(5_000, cfg.catalogSyncIntervalMs);
 
@@ -346,6 +360,7 @@ function computeCatalogSidebarSignature() {
     videoId: currentVideoId || "",
     q: catalogSearchQuery.trim(),
     catalog: catalogPart,
+    watchRev: watchHistorySidebarRevision,
   });
 }
 
@@ -963,6 +978,200 @@ function stopPlaybackEndClamp() {
   playbackEndClampAbort = null;
 }
 
+function stopWatchHistoryTracking() {
+  watchHistoryTrackingAbort?.abort();
+  watchHistoryTrackingAbort = null;
+}
+
+function stopResumePlaybackTracking() {
+  if (resumePlaybackIntervalId) {
+    clearInterval(resumePlaybackIntervalId);
+    resumePlaybackIntervalId = 0;
+  }
+  resumePlaybackAbort?.abort();
+  resumePlaybackAbort = null;
+}
+
+/**
+ * @param {import("shaka-player").Player} player
+ * @param {HTMLVideoElement} video
+ */
+function mediaDurationOrSeekEnd(player, video) {
+  let dur = video.duration;
+  if (!Number.isFinite(dur) || dur <= 0) {
+    try {
+      const end = player.seekRange().end;
+      if (Number.isFinite(end) && end > 0) dur = end;
+    } catch {
+      /* ignore */
+    }
+  }
+  return Number.isFinite(dur) && dur > 0 ? dur : null;
+}
+
+/**
+ * @param {import("shaka-player").Player} player
+ * @param {HTMLVideoElement} video
+ * @param {string} videoId
+ * @param {AbortSignal} signal
+ */
+function applyResumePlaybackOnLoad(player, video, videoId, signal) {
+  const id = String(videoId || "").trim();
+  if (!id) return;
+  const raw = getResumePositionSeconds(id);
+  if (raw == null || raw < 0) return;
+  if (raw === 0) {
+    clearResumePosition(id);
+    return;
+  }
+
+  const run = () => {
+    if (signal.aborted) return;
+    const dur = mediaDurationOrSeekEnd(player, video);
+    if (dur == null) return;
+    const endFloor = Math.floor(dur);
+    if (raw >= endFloor - 1) {
+      clearResumePosition(id);
+      return;
+    }
+    const clamped = Math.min(raw, Math.max(0, endFloor - 2));
+    try {
+      video.currentTime = clamped;
+    } catch {
+      /* ignore */
+    }
+  };
+
+  queueMicrotask(run);
+  video.addEventListener("loadedmetadata", run, { once: true, signal });
+}
+
+/**
+ * Every 5s while playing, save `position-<videoId>` (whole seconds). Clear at start, end, or `ended`.
+ *
+ * @param {import("shaka-player").Player} player
+ * @param {HTMLVideoElement} video
+ * @param {string} videoId
+ */
+function installResumePlaybackTracking(player, video, videoId) {
+  stopResumePlaybackTracking();
+  const id = String(videoId || "").trim();
+  if (!id) return;
+
+  const ac = new AbortController();
+  resumePlaybackAbort = ac;
+  const { signal } = ac;
+
+  applyResumePlaybackOnLoad(player, video, id, signal);
+
+  /** Avoid saving until real playback has started (resume seek + buffer may lag behind `play`). */
+  let persistEnabled = false;
+  video.addEventListener(
+    "playing",
+    () => {
+      persistEnabled = true;
+    },
+    { once: true, signal },
+  );
+
+  const persistTick = () => {
+    if (signal.aborted || !persistEnabled || video.paused || video.ended) return;
+    const dur = mediaDurationOrSeekEnd(player, video);
+    const sec = Math.floor(video.currentTime);
+    if (sec <= 0) {
+      clearResumePosition(id);
+      return;
+    }
+    if (dur != null && sec >= Math.floor(dur) - 1) {
+      clearResumePosition(id);
+      return;
+    }
+    setResumePositionSeconds(id, sec);
+  };
+
+  const startInterval = () => {
+    if (signal.aborted) return;
+    if (resumePlaybackIntervalId) {
+      clearInterval(resumePlaybackIntervalId);
+      resumePlaybackIntervalId = 0;
+    }
+    resumePlaybackIntervalId = window.setInterval(persistTick, 5000);
+  };
+
+  const stopInterval = () => {
+    if (resumePlaybackIntervalId) {
+      clearInterval(resumePlaybackIntervalId);
+      resumePlaybackIntervalId = 0;
+    }
+  };
+
+  video.addEventListener(
+    "play",
+    () => {
+      startInterval();
+    },
+    { signal },
+  );
+  video.addEventListener("pause", stopInterval, { signal });
+  video.addEventListener(
+    "ended",
+    () => {
+      clearResumePosition(id);
+      stopInterval();
+    },
+    { signal },
+  );
+}
+
+/**
+ * When playback crosses 95% of duration, persist a marker so catalog preview tiles show the bar.
+ *
+ * @param {import("shaka-player").Player} player
+ * @param {HTMLVideoElement} video
+ * @param {string} videoId
+ */
+function installWatchHistoryTracking(player, video, videoId) {
+  stopWatchHistoryTracking();
+  const id = String(videoId || "").trim();
+  if (!id) return;
+
+  const ratio = () => {
+    let dur = video.duration;
+    if (!Number.isFinite(dur) || dur <= 0) {
+      try {
+        const end = player.seekRange().end;
+        if (Number.isFinite(end) && end > 0) dur = end;
+      } catch {
+        /* ignore */
+      }
+    }
+    if (!Number.isFinite(dur) || dur <= 0) return null;
+    return video.currentTime / dur;
+  };
+
+  const onProgress = () => {
+    const r = ratio();
+    if (r == null || r < 0.95) return;
+    try {
+      if (markWatchedTo95Percent(id)) {
+        watchHistorySidebarRevision += 1;
+      }
+      if (!embedMode) {
+        renderCatalogSidebar();
+      }
+    } finally {
+      stopWatchHistoryTracking();
+    }
+  };
+
+  const ac = new AbortController();
+  watchHistoryTrackingAbort = ac;
+  const { signal } = ac;
+
+  video.addEventListener("timeupdate", onProgress, { signal });
+  video.addEventListener("loadedmetadata", onProgress, { signal });
+}
+
 /**
  * Stopgap: when segment retrieval returns 200 (full piece) instead of 206, the
  * buffered timeline can extend past the real HLS duration and the player may
@@ -1268,6 +1477,7 @@ function movieShowcaseLit(row, opts = {}) {
       .creatorAvatarUrl=${profileUrlForCreator(row.creator)}
       .variant=${variant}
       .current=${Boolean(currentVideoId && row.assetId === currentVideoId)}
+      .watched95=${hasWatchedTo95Percent(row.assetId)}
     ></movie-link-showcase>
   `;
 }
@@ -1694,6 +1904,8 @@ async function resolveEntryForVideo(videoId) {
 async function openVideoById(videoId) {
   currentVideoId = videoId.trim();
   stopPlaybackEndClamp();
+  stopWatchHistoryTracking();
+  stopResumePlaybackTracking();
   applyCatalogPageLayout();
   renderCatalogSidebar();
   if (!currentVideoId) {
@@ -1728,6 +1940,8 @@ async function openVideoById(videoId) {
   nudgeShakaBufferingPollAfterLoad(videoEl);
   if (videoEl) {
     installPlaybackEndClamp(player, videoEl);
+    installWatchHistoryTracking(player, videoEl, currentVideoId);
+    installResumePlaybackTracking(player, videoEl, currentVideoId);
   }
   await renderViewerMeta(merged ?? manifestDoc, entry);
   setStatus("");
@@ -1778,6 +1992,8 @@ export async function initCatalogPage(host) {
 window.addEventListener("beforeunload", () => {
   destroyed = true;
   stopPlaybackEndClamp();
+  stopWatchHistoryTracking();
+  stopResumePlaybackTracking();
   if (syncIntervalId) {
     clearInterval(syncIntervalId);
     syncIntervalId = 0;
