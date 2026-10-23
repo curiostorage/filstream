@@ -29,6 +29,7 @@ import {
   setCatalogProfilePicturePieceCidWithWallet,
   setCatalogUsernameWithWallet,
 } from "../services/filstream-catalog-chain.mjs";
+import { relocatePieceRetrievalUrl } from "../services/ipni-piece-url.mjs";
 import {
   createSynapseForSession,
   publishCreatorPosterImage,
@@ -501,6 +502,20 @@ function renderWalletFirstLanding() {
   renderBrowseCreators();
 }
 
+/**
+ * @param {string | null} url
+ * @returns {Promise<string>}
+ */
+async function relocatePieceUrlOrEmpty(url) {
+  const raw = String(url || "").trim();
+  if (!raw) return "";
+  try {
+    return await relocatePieceRetrievalUrl(raw);
+  } catch {
+    return "";
+  }
+}
+
 async function resolveProfilePictureUrlForPieceCid(pieceCid) {
   const cid = String(pieceCid || "").trim();
   if (!cid) return "";
@@ -755,8 +770,8 @@ async function hydrateMoviePosters(activeEntries) {
     const wrap = root.querySelector(".viewer-catalog-card-thumb-wrap");
     try {
       const doc = await manifestDocForEntry(entry);
-      const posterUrl = posterFromManifestDoc(doc);
-      const animUrl = posterAnimFromManifestDoc(doc);
+      const posterUrl = await relocatePieceUrlOrEmpty(posterFromManifestDoc(doc) || "");
+      const animUrl = await relocatePieceUrlOrEmpty(posterAnimFromManifestDoc(doc) || "");
       if (posterUrl) img.src = posterUrl;
       if (posterUrl && animUrl && wrap instanceof HTMLElement) {
         wrap.classList.add("viewer-catalog-card-thumb-wrap--anim");

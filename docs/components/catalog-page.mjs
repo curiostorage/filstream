@@ -34,15 +34,18 @@ import {
   saveManifestCache,
 } from "../services/filstream-catalog-cache.mjs";
 import {
-  buildPieceRetrievalUrl,
   isCatalogConfigured,
   readCatalogLatest,
   readCatalogNewerThan,
   readCatalogProfilePicturePieceCid,
   readCatalogUsername,
   resolveManifestUrl,
-  resolveProviderServiceUrl,
 } from "../services/filstream-catalog-chain.mjs";
+import {
+  isRetiredPieceRetrievalUrl,
+  relocatePieceRetrievalUrl,
+  resolvePieceRetrievalUrl,
+} from "../services/ipni-piece-url.mjs";
 import {
   buildAbsoluteViewerUrlForVideoId,
   buildCreatorUrlForAddress,
@@ -68,9 +71,44 @@ import {
   resolveViewerProvider,
 } from "./filstream-catalog-donate.mjs";
 
-const shaka = (
-  await import("https://esm.sh/shaka-player@4.7.11/dist/shaka-player.ui.js")
-).default;
+/**
+ * UMD build. A top-level import from esm.sh blocks the whole catalog when that
+ * rewrite times out, so the player is loaded only when playback starts.
+ */
+const SHAKA_UI_URL =
+  "https://cdn.jsdelivr.net/npm/shaka-player@4.7.11/dist/shaka-player.ui.js";
+
+/** @type {any} */
+let shaka = null;
+/** @type {Promise<any> | null} */
+let shakaLoad = null;
+
+function loadShaka() {
+  if (shaka) return Promise.resolve(shaka);
+  if (!shakaLoad) {
+    shakaLoad = new Promise((resolve, reject) => {
+      const script = document.createElement("script");
+      script.src = SHAKA_UI_URL;
+      script.async = true;
+      script.onload = () => {
+        const loaded = /** @type {{ shaka?: any }} */ (globalThis).shaka;
+        if (!loaded?.Player || !loaded?.ui) {
+          shakaLoad = null;
+          reject(new Error("Shaka Player loaded without its UI"));
+          return;
+        }
+        shaka = loaded;
+        resolve(loaded);
+      };
+      script.onerror = () => {
+        shakaLoad = null;
+        reject(new Error("Could not load the video player"));
+      };
+      document.head.appendChild(script);
+    });
+  }
+  return shakaLoad;
+}
 
 const params = new URLSearchParams(window.location.search);
 const embedMode = params.get("embed") === "true";
@@ -322,7 +360,10 @@ function bylineNameForCreator(addr) {
 
 function profileUrlForCreator(addr) {
   const url = profileStateForCreator(addr)?.profileUrl ?? "";
-  return typeof url === "string" && url.trim() !== "" ? url.trim() : "";
+  if (typeof url !== "string") return "";
+  const trimmed = url.trim();
+  if (!trimmed || isRetiredPieceRetrievalUrl(trimmed)) return "";
+  return trimmed;
 }
 
 function creatorInitialForAddress(addr) {
@@ -510,12 +551,17 @@ async function resolveSharePageUrl(metaDoc, entry) {
     const fr = /** @type {Record<string, unknown>} */ (f);
     if (fr.path !== "share.html") continue;
     const ru = fr.retrievalUrl;
-    if (typeof ru === "string" && ru.trim() !== "") return ru.trim();
+    if (typeof ru === "string" && ru.trim() !== "") {
+      try {
+        return await relocatePieceRetrievalUrl(ru.trim());
+      } catch {
+        return fallback();
+      }
+    }
     const cid = fr.pieceCid;
     if (typeof cid === "string" && cid.trim() !== "") {
       try {
-        const serviceUrl = await resolveProviderServiceUrl(entry.providerId);
-        return buildPieceRetrievalUrl(serviceUrl, cid.trim());
+        return await resolvePieceRetrievalUrl(cid.trim());
       } catch {
         return fallback();
       }
@@ -646,7 +692,8 @@ async function performCreatorProfileSync() {
     let profileUrl = prev.profileUrl;
     if (
       profilePieceCid !== prev.profilePieceCid ||
-      (profilePieceCid && !prev.profileUrl)
+      (profilePieceCid && !prev.profileUrl) ||
+      isRetiredPieceRetrievalUrl(prev.profileUrl)
     ) {
       profileUrl = profilePieceCid
         ? await resolveProfilePictureUrlForPieceCid(profilePieceCid)
@@ -800,7 +847,10 @@ function buildViewerUrlWithoutEmbed() {
   return buildViewerUrlForVideoId(videoId);
 }
 
-class TheaterModeButton extends shaka.ui.Element {
+function registerShakaCustomUi() {
+  if (!shaka?.ui) return;
+
+  class TheaterModeButton extends shaka.ui.Element {
   /**
    * @param {HTMLElement} parent
    * @param {*} controls
@@ -883,7 +933,6 @@ FilstreamSiteButton.Factory = class {
   }
 };
 
-function registerShakaCustomUi() {
   if (!filstreamOverflowRegistered && shaka.ui?.OverflowMenu?.registerElement) {
     filstreamOverflowRegistered = true;
     shaka.ui.OverflowMenu.registerElement("filstream", new FilstreamSiteButton.Factory());
@@ -1220,23 +1269,66 @@ function installPlaybackEndClamp(player, video) {
   video.addEventListener("timeupdate", onTimeUpdate, { signal });
 }
 
+/**
+ * @param {string} url
+ * @returns {Promise<string>}
+ */
+async function relocatePieceUrlOrEmpty(url) {
+  const raw = String(url || "").trim();
+  if (!raw) return "";
+  try {
+    return await relocatePieceRetrievalUrl(raw);
+  } catch {
+    return "";
+  }
+}
+
+/** @type {WeakSet<object>} */
+const playersWithIpniFilter = new WeakSet();
+
+/**
+ * Native HLS would request the hosts baked into playlists. MSE asks this filter
+ * first, which swaps every `/piece/{cid}` URL for a provider IPNI currently lists.
+ *
+ * @param {import("shaka-player").Player} player
+ */
+function installIpniPieceRequestFilter(player) {
+  if (playersWithIpniFilter.has(player)) return;
+  const engine = player.getNetworkingEngine?.();
+  if (!engine || typeof engine.registerRequestFilter !== "function") return;
+  playersWithIpniFilter.add(player);
+  engine.registerRequestFilter(async (_type, request) => {
+    const uris = Array.isArray(request.uris) ? request.uris : [];
+    request.uris = await Promise.all(
+      uris.map(async (uri) => {
+        const raw = typeof uri === "string" ? uri : "";
+        if (!raw) return raw;
+        return relocatePieceRetrievalUrl(raw);
+      }),
+    );
+  });
+}
+
 async function ensurePlayer() {
   if (shakaPlayer) return shakaPlayer;
   if (!shakaContainerEl || !videoEl) {
     throw new Error("viewer player elements missing");
   }
+  await loadShaka();
   registerShakaCustomUi();
   shaka.polyfill.installAll();
   shakaPlayer = new shaka.Player();
   shakaUiOverlay = new shaka.ui.Overlay(shakaPlayer, shakaContainerEl, videoEl);
   await shakaPlayer.attach(videoEl);
+  installIpniPieceRequestFilter(shakaPlayer);
   const apple = isApplePlaybackPlatform();
   const reloadStrategy = shaka.config?.CodecSwitchingStrategy?.RELOAD ?? "reload";
   shakaPlayer.configure({
     abr: { enabled: true, useNetworkInformation: false },
     ...(apple
       ? {
-          streaming: { preferNativeHls: true, useNativeHlsOnSafari: true },
+          // Native HLS skips the request filter and would keep calling the retired host.
+          streaming: { preferNativeHls: false, useNativeHlsOnSafari: false },
           mediaSource: { codecSwitchingStrategy: reloadStrategy },
           preferredVideoCodecs: ["avc1", "avc3", "hvc1", "hev1"],
           preferredAudioCodecs: ["mp4a.40.2", "mp4a.40.5"],
@@ -1804,8 +1896,8 @@ async function hydrateCatalogPosters(rows) {
       (async () => {
         try {
           const { manifestDoc } = await loadManifestForVideo(videoId, row);
-          const still = posterUrlFromDoc(manifestDoc);
-          const anim = posterAnimUrlFromDoc(manifestDoc);
+          const still = await relocatePieceUrlOrEmpty(posterUrlFromDoc(manifestDoc) || "");
+          const anim = await relocatePieceUrlOrEmpty(posterAnimUrlFromDoc(manifestDoc) || "");
           for (const img of targets) {
             const wrap = img.parentElement;
             if (still) img.src = still;
@@ -1925,13 +2017,14 @@ async function openVideoById(videoId) {
   renderCatalogSidebar();
   const { manifestDoc } = await loadManifestForVideo(currentVideoId, entry);
   const playback = parsePlaybackBlock(manifestDoc);
-  const master =
+  const masterRaw =
     typeof playback.masterAppUrl === "string" ? playback.masterAppUrl.trim() : "";
-  if (!master) {
+  if (!masterRaw) {
     throw new Error("manifest.json has no playback.masterAppUrl");
   }
+  const master = await relocatePieceRetrievalUrl(masterRaw);
   const merged = mergeMetaLikeDocument(manifestDoc);
-  const poster = posterUrlFromDoc(manifestDoc) || "";
+  const poster = await relocatePieceUrlOrEmpty(posterUrlFromDoc(manifestDoc) || "");
   if (poster && videoEl) {
     videoEl.setAttribute("poster", poster);
   }

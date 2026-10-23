@@ -17,14 +17,13 @@ import {
   privateKeyToAccount,
 } from "../vendor/synapse-browser.mjs";
 import { getFilstreamStoreConfig } from "./filstream-config.mjs";
+import { resolvePieceRetrievalUrl } from "./ipni-piece-url.mjs";
 
 export const FILSTREAM_CATALOG_ADD_PERMISSION = SHARED_FILSTREAM_CATALOG_ADD_PERMISSION;
 export const FILSTREAM_CATALOG_DELETE_PERMISSION = SHARED_FILSTREAM_CATALOG_DELETE_PERMISSION;
 
 /** @type {Synapse | null} */
 let catalogReadSynapseCache = null;
-/** @type {Map<number, string>} */
-const providerServiceUrlCache = new Map();
 const CATALOG_READ_ACCOUNT = "0x0000000000000000000000000000000000000001";
 
 /**
@@ -194,46 +193,16 @@ function catalogReadSynapse() {
 }
 
 /**
- * @param {number} providerId
- * @returns {Promise<string>}
- */
-export async function resolveProviderServiceUrl(providerId) {
-  if (!Number.isFinite(providerId) || providerId <= 0) {
-    throw new Error("Invalid providerId");
-  }
-  const pid = Math.floor(providerId);
-  const hit = providerServiceUrlCache.get(pid);
-  if (hit) return hit;
-  const synapse = catalogReadSynapse();
-  const providerInfo = await synapse.providers.getProvider({ providerId: BigInt(pid) });
-  const serviceURL = providerInfo?.pdp?.serviceURL;
-  if (typeof serviceURL !== "string" || serviceURL.trim() === "") {
-    throw new Error(`Provider ${pid} has no PDP serviceURL`);
-  }
-  const normalized = serviceURL.trim();
-  providerServiceUrlCache.set(pid, normalized);
-  return normalized;
-}
-
-/**
- * @param {string} serviceUrl
- * @param {string} pieceCid
- * @returns {string}
- */
-export function buildPieceRetrievalUrl(serviceUrl, pieceCid) {
-  const cid = String(pieceCid || "").trim();
-  if (!cid) throw new Error("Missing piece CID");
-  return new URL(`piece/${cid}`, serviceUrl).href;
-}
-
-/**
- * @param {number} providerId
+ * Manifest bytes are a piece. `providerId` is the catalog's original storage
+ * provider; retrieval follows IPNI so a moved piece is not fetched from that
+ * provider's old service URL.
+ *
+ * @param {number} _providerId
  * @param {string} manifestCid
  * @returns {Promise<string>}
  */
-export async function resolveManifestUrl(providerId, manifestCid) {
-  const serviceUrl = await resolveProviderServiceUrl(providerId);
-  return buildPieceRetrievalUrl(serviceUrl, manifestCid);
+export async function resolveManifestUrl(_providerId, manifestCid) {
+  return resolvePieceRetrievalUrl(manifestCid);
 }
 
 /**

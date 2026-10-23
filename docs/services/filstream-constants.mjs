@@ -34,6 +34,21 @@ export const DEFAULT_FILSTREAM_PUBLIC_CONFIG = {
 export const FILSTREAM_ID_STORAGE_KEY = "filstream_store_filstream_id_v1";
 
 /**
+ * IPNI find API origin. Piece bytes are located from indexer results, not from a
+ * provider service URL stored at upload time.
+ * Used by: `ipni-piece-url.mjs`.
+ */
+export const IPNI_FIND_ORIGIN = "https://cid.contact";
+
+/**
+ * Retrieval hosts that must not be used. InfraFolio's Calibration PDP server is
+ * shutting down; pieces are moving to other providers announced on IPNI.
+ * Match is exact or any subdomain.
+ * Used by: `ipni-piece-url.mjs`.
+ */
+export const RETIRED_PIECE_RETRIEVAL_HOSTS = ["infrafolio.com"];
+
+/**
  * Synthetic wallet UUID for `window.ethereum` fallback in EIP-6963 discovery.
  * Used by: `eip6963.mjs`, `ui.mjs`.
  */
