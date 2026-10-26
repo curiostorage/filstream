@@ -89,13 +89,22 @@ export function pieceCidFromRetrievalUrl(value) {
 }
 
 /**
+ * Prefer a provider IPNI currently advertises. If the indexer has no usable
+ * URL, keep the original retrieval URL so playback still works while pieces
+ * are moving.
+ *
  * @param {string} url
  * @returns {Promise<string>}
  */
 export async function relocatePieceRetrievalUrl(url) {
-  const cid = pieceCidFromRetrievalUrl(url);
-  if (!cid) return String(url || "");
-  return resolvePieceRetrievalUrl(cid);
+  const raw = String(url || "");
+  const cid = pieceCidFromRetrievalUrl(raw);
+  if (!cid) return raw;
+  try {
+    return await resolvePieceRetrievalUrl(cid);
+  } catch {
+    return raw;
+  }
 }
 
 /**
