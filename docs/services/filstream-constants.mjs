@@ -474,6 +474,14 @@ export const UPLOAD_DB_VERSION = 1;
 export const CREATOR_POSTER_FS_NAME = "filstream_creator_poster";
 
 /**
+ * Warm Storage `addPieces` reverts `TooManyMetadataKeys` above this count.
+ * The bundled Synapse SDK still accepts 5 keys locally, so upload metadata must
+ * stay at or under the on-chain limit.
+ * Used by: `browser-store.mjs`.
+ */
+export const WARM_STORAGE_MAX_PIECE_METADATA_KEYS = 3;
+
+/**
  * LocalStorage key for deferred piece deletion queue.
  * Used by: `browser-store.mjs`.
  */
