@@ -40,6 +40,7 @@ import {
   readCatalogProfilePicturePieceCid,
   readCatalogUsername,
   resolveManifestUrl,
+  resolveProfilePieceUrl,
 } from "../services/filstream-catalog-chain.mjs";
 import {
   isRetiredPieceRetrievalUrl,
@@ -607,14 +608,7 @@ function maxCursorFromEntries(rows) {
 }
 
 async function resolveProfilePictureUrlForPieceCid(pieceCid) {
-  const cid = String(pieceCid || "").trim();
-  if (!cid) return "";
-  try {
-    const cfgLocal = getFilstreamStoreConfig();
-    return await resolveManifestUrl(cfgLocal.storeProviderId, cid);
-  } catch {
-    return "";
-  }
+  return resolveProfilePieceUrl(pieceCid);
 }
 
 function upsertCreatorProfileState(creator, next) {

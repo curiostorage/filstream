@@ -26,6 +26,7 @@ import {
   readCatalogProfilePicturePieceCid,
   readCatalogUsername,
   resolveManifestUrl,
+  resolveProfilePieceUrl,
   setCatalogProfilePicturePieceCidWithWallet,
   setCatalogUsernameWithWallet,
 } from "../services/filstream-catalog-chain.mjs";
@@ -556,14 +557,7 @@ async function relocatePieceUrlOrEmpty(url) {
 }
 
 async function resolveProfilePictureUrlForPieceCid(pieceCid) {
-  const cid = String(pieceCid || "").trim();
-  if (!cid) return "";
-  try {
-    const cfg = getFilstreamStoreConfig();
-    return await resolveManifestUrl(cfg.storeProviderId, cid);
-  } catch {
-    return "";
-  }
+  return resolveProfilePieceUrl(pieceCid);
 }
 
 async function loadCreatorData() {

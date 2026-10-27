@@ -5,6 +5,7 @@ import {
   CATALOG_REGISTRY_ABI,
   FILSTREAM_CATALOG_ADD_PERMISSION as SHARED_FILSTREAM_CATALOG_ADD_PERMISSION,
   FILSTREAM_CATALOG_DELETE_PERMISSION as SHARED_FILSTREAM_CATALOG_DELETE_PERMISSION,
+  PREVIOUS_STORE_PROVIDER_ID,
 } from "./filstream-constants.mjs";
 import {
   Synapse,
@@ -241,6 +242,68 @@ export async function resolveManifestUrl(providerId, manifestCid) {
   } catch {
     const serviceUrl = await resolveProviderServiceUrl(providerId);
     return buildPieceRetrievalUrl(serviceUrl, manifestCid);
+  }
+}
+
+/**
+ * Profile pictures are not tied to a catalog provider id. Prefer IPNI, then the
+ * current upload provider, then the previous upload provider.
+ *
+ * @param {string} pieceCid
+ * @returns {Promise<string>}
+ */
+export async function resolveProfilePieceUrl(pieceCid) {
+  const cid = String(pieceCid || "").trim();
+  if (!cid) return "";
+  try {
+    return await resolvePieceRetrievalUrl(cid);
+  } catch {
+    // Indexer has not advertised this piece yet.
+  }
+  const cfg = getFilstreamStoreConfig();
+  /** @type {number[]} */
+  const providerIds = [];
+  for (const id of [cfg.storeProviderId, PREVIOUS_STORE_PROVIDER_ID]) {
+    if (Number.isInteger(id) && id > 0 && !providerIds.includes(id)) {
+      providerIds.push(id);
+    }
+  }
+  for (const providerId of providerIds) {
+    try {
+      const serviceUrl = await resolveProviderServiceUrl(providerId);
+      const url = buildPieceRetrievalUrl(serviceUrl, cid);
+      if (await pieceUrlResponds(url)) return url;
+    } catch {
+      // Try the next provider that may still have this piece.
+    }
+  }
+  return "";
+}
+
+/**
+ * @param {string} url
+ * @returns {Promise<boolean>}
+ */
+async function pieceUrlResponds(url) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 8000);
+  try {
+    const res = await fetch(url, {
+      method: "GET",
+      headers: { Range: "bytes=0-0" },
+      redirect: "follow",
+      signal: ctrl.signal,
+    });
+    try {
+      await res.body?.cancel();
+    } catch {
+      // Ignore a cancelled probe body.
+    }
+    return res.ok || res.status === 206;
+  } catch {
+    return false;
+  } finally {
+    clearTimeout(timer);
   }
 }
 

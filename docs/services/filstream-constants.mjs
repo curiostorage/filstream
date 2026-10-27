@@ -13,11 +13,15 @@
 /**
  * Default public app config consumed by `getFilstreamStoreConfig()` in `filstream-config.mjs`.
  * Used by: `filstream-config.mjs`.
+ *
+ * `storeProviderId` 9 is ezpdpz-calib (`https://calib.ezpdpz.net`). New datasets and
+ * pieces are created there. Provider 4 (`infrafolio-calib`) is shutting down and is
+ * no longer an approved Calibration warm-storage provider.
  */
 export const DEFAULT_FILSTREAM_PUBLIC_CONFIG = {
   storeRpcUrl: "https://api.calibration.node.glif.io/rpc/v1",
   storeChainId: 314159,
-  storeProviderId: 4,
+  storeProviderId: 9,
   storeSource: "filstream",
   storeFilstreamId: "019d3609-35d7-71b3-b13b-050cbf9a8fe1",
   storeMaxPieceBytes: 133_169_152,
@@ -47,6 +51,14 @@ export const IPNI_FIND_ORIGIN = "https://cid.contact";
  * Used by: `ipni-piece-url.mjs`.
  */
 export const RETIRED_PIECE_RETRIEVAL_HOSTS = ["infrafolio.com"];
+
+/**
+ * Upload provider used before new pieces moved to `storeProviderId`.
+ * Profile pictures record only a piece CID, so reads still check this provider
+ * when the current upload provider does not have the bytes.
+ * Used by: `filstream-catalog-chain.mjs`.
+ */
+export const PREVIOUS_STORE_PROVIDER_ID = 4;
 
 /**
  * Synthetic wallet UUID for `window.ethereum` fallback in EIP-6963 discovery.

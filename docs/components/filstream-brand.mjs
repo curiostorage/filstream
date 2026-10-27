@@ -9,7 +9,7 @@ import {
 } from "../services/filstream-config.mjs";
 import {
   readCatalogProfilePicturePieceCid,
-  resolveManifestUrl,
+  resolveProfilePieceUrl,
 } from "../services/filstream-catalog-chain.mjs";
 import { FILSTREAM_BRAND as SHARED_FILSTREAM_BRAND } from "../services/filstream-constants.mjs";
 import {
@@ -58,14 +58,7 @@ export function filstreamAppNavLinks() {
  * @returns {Promise<string>}
  */
 async function resolveProfilePictureUrlForPieceCid(pieceCid) {
-  const cid = String(pieceCid || "").trim();
-  if (!cid) return "";
-  try {
-    const cfg = getFilstreamStoreConfig();
-    return await resolveManifestUrl(cfg.storeProviderId, cid);
-  } catch {
-    return "";
-  }
+  return resolveProfilePieceUrl(pieceCid);
 }
 
 function restoreProfileNavLabel(link) {
