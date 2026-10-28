@@ -44,6 +44,8 @@ import {
 } from "../services/filstream-catalog-chain.mjs";
 import {
   isRetiredPieceRetrievalUrl,
+  playbackRequestUrl,
+  readPieceForPlayer,
   relocatePieceRetrievalUrl,
   resolvePieceRetrievalUrl,
 } from "../services/ipni-piece-url.mjs";
@@ -1279,10 +1281,37 @@ async function relocatePieceUrlOrEmpty(url) {
 
 /** @type {WeakSet<object>} */
 const playersWithIpniFilter = new WeakSet();
+let filpieceSchemeInstalled = false;
+
+function installFilpieceScheme() {
+  if (filpieceSchemeInstalled || !shaka?.net?.NetworkingEngine?.registerScheme) return;
+  filpieceSchemeInstalled = true;
+  const AbortableOperation = shaka.util?.AbortableOperation;
+  shaka.net.NetworkingEngine.registerScheme(
+    "filpiece",
+    (uri, request) => {
+      const cid = decodeURIComponent(String(uri).slice("filpiece:".length));
+      const abort = new AbortController();
+      const range = request?.headers?.Range || request?.headers?.range || "";
+      const promise = readPieceForPlayer(cid, range, abort.signal).then((body) => ({
+        uri: request.uris?.[0] || uri,
+        originalUri: request.uris?.[0] || uri,
+        data: body.data,
+        status: body.status,
+        headers: body.headers,
+      }));
+      if (typeof AbortableOperation === "function") {
+        return new AbortableOperation(promise, () => abort.abort());
+      }
+      return promise;
+    },
+  );
+}
 
 /**
  * Native HLS would request the hosts baked into playlists. MSE asks this filter
- * first, which swaps every `/piece/{cid}` URL for a provider IPNI currently lists.
+ * first. Each piece body is downloaded once; later retries and byte ranges are
+ * read from that copy.
  *
  * @param {import("shaka-player").Player} player
  */
@@ -1290,6 +1319,7 @@ function installIpniPieceRequestFilter(player) {
   if (playersWithIpniFilter.has(player)) return;
   const engine = player.getNetworkingEngine?.();
   if (!engine || typeof engine.registerRequestFilter !== "function") return;
+  installFilpieceScheme();
   playersWithIpniFilter.add(player);
   engine.registerRequestFilter(async (_type, request) => {
     const uris = Array.isArray(request.uris) ? request.uris : [];
@@ -1297,7 +1327,7 @@ function installIpniPieceRequestFilter(player) {
       uris.map(async (uri) => {
         const raw = typeof uri === "string" ? uri : "";
         if (!raw) return raw;
-        return relocatePieceRetrievalUrl(raw);
+        return playbackRequestUrl(raw);
       }),
     );
   });

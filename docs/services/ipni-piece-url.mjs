@@ -19,9 +19,21 @@ const EMPTY_PAYLOAD_PROTOCOLS = new Set([
   PROTO_FILECOIN_PIECE_HTTP,
 ]);
 
-const POSITIVE_TTL_MS = 10 * 60 * 1000;
 const NEGATIVE_TTL_MS = 2 * 60 * 1000;
 const MAX_CANDIDATES = 8;
+
+/**
+ * Piece id whose bytes have already been downloaded. Later reads, including
+ * player retries and byte-range segment requests, use this instead of the network.
+ * @type {Map<string, Uint8Array>}
+ */
+const pieceBytes = new Map();
+/** @type {Map<string, Promise<Uint8Array>>} */
+const pieceLoads = new Map();
+/** @type {Map<string, string>} */
+const pieceSourceUrl = new Map();
+/** @type {Map<string, string>} */
+const pieceObjectUrls = new Map();
 
 /**
  * @typedef {"piece" | "ipfs"} RetrievalKind
@@ -284,6 +296,8 @@ export function pieceRetrievalUrlsFromIpniFind(pieceCid, findResponse) {
  * @returns {Promise<boolean>}
  */
 async function probePieceUrl(url, timeoutMs) {
+  const known = pieceCidFromRetrievalUrl(url);
+  if (known && pieceBytes.has(known)) return true;
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
@@ -343,6 +357,10 @@ function rememberSticky(url, pieceCid) {
  * @returns {Promise<string>}
  */
 async function lookupUncached(pieceCid) {
+  if (pieceBytes.has(pieceCid)) {
+    const known = pieceSourceUrl.get(pieceCid);
+    if (known) return known;
+  }
   for (const sticky of stickyProviders) {
     const url = retrievalUrl(sticky.base, sticky.kind, pieceCid);
     if (isRetiredPieceRetrievalUrl(url)) continue;
@@ -390,7 +408,8 @@ export function resolvePieceRetrievalUrl(pieceCid) {
   if (pending) return pending;
   const lookup = lookupUncached(cid).then(
     (url) => {
-      positiveCache.set(cid, { url, expires: Date.now() + POSITIVE_TTL_MS });
+      positiveCache.set(cid, { url, expires: Number.POSITIVE_INFINITY });
+      pieceSourceUrl.set(cid, url);
       return url;
     },
     (err) => {
@@ -403,4 +422,194 @@ export function resolvePieceRetrievalUrl(pieceCid) {
   });
   inflight.set(cid, shared);
   return shared;
+}
+
+/**
+ * @param {string} cid
+ * @returns {string}
+ */
+function filpieceUri(cid) {
+  return `filpiece:${encodeURIComponent(cid)}`;
+}
+
+/**
+ * @param {string} url
+ * @param {AbortSignal} [signal]
+ * @returns {Promise<Uint8Array>}
+ */
+async function fetchFullPiece(url, signal) {
+  const res = await fetch(url, { redirect: "follow", signal });
+  if (res.status !== 200) {
+    throw new Error(`Piece HTTP ${res.status}`);
+  }
+  return new Uint8Array(await res.arrayBuffer());
+}
+
+/**
+ * Download a piece once per page session. A confirmed body is reused for every
+ * later player retry and byte-range read.
+ *
+ * @param {string} cid
+ * @param {AbortSignal} [signal]
+ * @returns {Promise<Uint8Array>}
+ */
+export async function loadFullPieceBytes(cid, signal) {
+  const pieceCid = String(cid || "").trim();
+  if (!pieceCid) throw new Error("Missing piece CID");
+  const hit = pieceBytes.get(pieceCid);
+  if (hit) return hit;
+  const pending = pieceLoads.get(pieceCid);
+  if (pending) return pending;
+
+  const job = (async () => {
+    /** @type {string[]} */
+    const urls = [];
+    const push = (url) => {
+      if (typeof url === "string" && url && !urls.includes(url)) urls.push(url);
+    };
+    const known = pieceSourceUrl.get(pieceCid);
+    if (known && !isRetiredPieceRetrievalUrl(known)) push(known);
+    /** @type {unknown} */
+    let lastErr = null;
+    const take = async (url) => {
+      if (signal?.aborted) throw new Error("Piece download aborted");
+      const bytes = await fetchFullPiece(url, signal);
+      pieceBytes.set(pieceCid, bytes);
+      pieceSourceUrl.set(pieceCid, url);
+      positiveCache.set(pieceCid, { url, expires: Number.POSITIVE_INFINITY });
+      return bytes;
+    };
+    for (const url of urls) {
+      try {
+        return await take(url);
+      } catch (err) {
+        lastErr = err;
+      }
+    }
+    try {
+      const found = await resolvePieceRetrievalUrl(pieceCid);
+      if (!urls.includes(found)) return await take(found);
+    } catch (err) {
+      lastErr = err;
+    }
+    if (known && isRetiredPieceRetrievalUrl(known)) {
+      try {
+        return await take(known);
+      } catch (err) {
+        lastErr = err;
+      }
+    }
+    throw new Error(`Piece ${pieceCid} unavailable`, { cause: lastErr ?? undefined });
+  })();
+
+  pieceLoads.set(pieceCid, job);
+  try {
+    return await job;
+  } finally {
+    if (pieceLoads.get(pieceCid) === job) pieceLoads.delete(pieceCid);
+  }
+}
+
+/**
+ * Player request URL. A piece that is already in memory is not looked up again.
+ * Others are served through the `filpiece:` scheme, which downloads the body once.
+ *
+ * @param {string} original
+ * @returns {Promise<string>}
+ */
+export async function playbackRequestUrl(original) {
+  const raw = String(original || "");
+  if (raw.startsWith("filpiece:")) return raw;
+  const cid = pieceCidFromRetrievalUrl(raw);
+  if (!cid) return raw;
+  if (!pieceSourceUrl.has(cid) && !isRetiredPieceRetrievalUrl(raw)) {
+    pieceSourceUrl.set(cid, raw);
+  }
+  if (!pieceBytes.has(cid) && isRetiredPieceRetrievalUrl(raw)) {
+    try {
+      const found = await resolvePieceRetrievalUrl(cid);
+      pieceSourceUrl.set(cid, found);
+    } catch {
+      if (!pieceSourceUrl.has(cid)) pieceSourceUrl.set(cid, raw);
+    }
+  }
+  return filpieceUri(cid);
+}
+
+/**
+ * @param {string} rangeHeader
+ * @param {Uint8Array} bytes
+ * @returns {{ data: ArrayBuffer, status: number, headers: Record<string, string> }}
+ */
+function slicePieceBytes(bytes, rangeHeader) {
+  const total = bytes.byteLength;
+  const range = String(rangeHeader || "").trim();
+  const match = /^bytes=(\d+)-(\d*)$/i.exec(range);
+  if (!match) {
+    const copy = new Uint8Array(bytes);
+    return {
+      data: copy.buffer,
+      status: 200,
+      headers: {
+        "content-type": "application/octet-stream",
+        "content-length": String(total),
+        "accept-ranges": "bytes",
+      },
+    };
+  }
+  const start = Number(match[1]);
+  const end = match[2] === "" ? total - 1 : Math.min(Number(match[2]), total - 1);
+  if (!Number.isFinite(start) || start < 0 || start >= total || end < start) {
+    const copy = new Uint8Array(bytes);
+    return {
+      data: copy.buffer,
+      status: 200,
+      headers: {
+        "content-type": "application/octet-stream",
+        "content-length": String(total),
+        "accept-ranges": "bytes",
+      },
+    };
+  }
+  const copy = bytes.slice(start, end + 1);
+  return {
+    data: copy.buffer,
+    status: 206,
+    headers: {
+      "content-type": "application/octet-stream",
+      "content-length": String(copy.byteLength),
+      "content-range": `bytes ${start}-${end}/${total}`,
+      "accept-ranges": "bytes",
+    },
+  };
+}
+
+/**
+ * @param {string} cid
+ * @param {string} [rangeHeader]
+ * @param {AbortSignal} [signal]
+ */
+export async function readPieceForPlayer(cid, rangeHeader, signal) {
+  const bytes = await loadFullPieceBytes(cid, signal);
+  return slicePieceBytes(bytes, rangeHeader || "");
+}
+
+/**
+ * HTTPS piece URL turned into a same-session object URL after one download.
+ * Repeated image tags on the waiting page must not hit the provider again.
+ *
+ * @param {string} url
+ * @returns {Promise<string>}
+ */
+export async function objectUrlForPieceRetrievalUrl(url) {
+  const raw = String(url || "").trim();
+  const cid = pieceCidFromRetrievalUrl(raw);
+  if (!cid) return raw;
+  const existing = pieceObjectUrls.get(cid);
+  if (existing) return existing;
+  if (!pieceSourceUrl.has(cid)) pieceSourceUrl.set(cid, raw);
+  const bytes = await loadFullPieceBytes(cid);
+  const created = URL.createObjectURL(new Blob([bytes]));
+  pieceObjectUrls.set(cid, created);
+  return created;
 }

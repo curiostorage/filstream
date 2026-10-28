@@ -27,6 +27,8 @@ export const FILSTREAM_CATALOG_DELETE_PERMISSION = SHARED_FILSTREAM_CATALOG_DELE
 let catalogReadSynapseCache = null;
 /** @type {Map<number, string>} */
 const providerServiceUrlCache = new Map();
+/** @type {Map<string, string>} */
+const confirmedProfilePieceUrls = new Map();
 const CATALOG_READ_ACCOUNT = "0x0000000000000000000000000000000000000001";
 
 /**
@@ -255,8 +257,12 @@ export async function resolveManifestUrl(providerId, manifestCid) {
 export async function resolveProfilePieceUrl(pieceCid) {
   const cid = String(pieceCid || "").trim();
   if (!cid) return "";
+  const confirmed = confirmedProfilePieceUrls.get(cid);
+  if (confirmed) return confirmed;
   try {
-    return await resolvePieceRetrievalUrl(cid);
+    const found = await resolvePieceRetrievalUrl(cid);
+    confirmedProfilePieceUrls.set(cid, found);
+    return found;
   } catch {
     // Indexer has not advertised this piece yet.
   }
@@ -272,7 +278,10 @@ export async function resolveProfilePieceUrl(pieceCid) {
     try {
       const serviceUrl = await resolveProviderServiceUrl(providerId);
       const url = buildPieceRetrievalUrl(serviceUrl, cid);
-      if (await pieceUrlResponds(url)) return url;
+      if (await pieceUrlResponds(url)) {
+        confirmedProfilePieceUrls.set(cid, url);
+        return url;
+      }
     } catch {
       // Try the next provider that may still have this piece.
     }
