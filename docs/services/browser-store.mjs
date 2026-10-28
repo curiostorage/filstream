@@ -21,6 +21,7 @@ import {
   UPLOAD_DB_VERSION as DB_VERSION,
   UPLOAD_SEGMENTS_STORE as SEGMENTS_STORE,
   VARIANT_PLAYLIST_APP_RE,
+  WARM_STORAGE_MAX_PIECE_METADATA_KEYS,
 } from "./filstream-constants.mjs";
 import {
   addCatalogEntryWithSessionKey,
@@ -761,8 +762,11 @@ export async function deleteAllPiecesForAssetId(input) {
  */
 function validatePieceMetadata(values) {
   const entries = Object.entries(values).filter(([, v]) => v.trim() !== "");
-  if (entries.length > 5) {
-    throw new StoreError(400, "piece metadata supports at most 5 key-value pairs");
+  if (entries.length > WARM_STORAGE_MAX_PIECE_METADATA_KEYS) {
+    throw new StoreError(
+      400,
+      `piece metadata supports at most ${WARM_STORAGE_MAX_PIECE_METADATA_KEYS} key-value pairs`,
+    );
   }
   /** @type {Record<string, string>} */
   const out = {};
@@ -836,8 +840,6 @@ function parseEventBytes(detail) {
  * @property {string} variant
  * @property {number} sequence
  * @property {number} size
- * @property {number | null} segmentStart
- * @property {number | null} segmentEnd
  * @property {number} pendingOrd
  * @property {Array<{
  *   path: string,
@@ -879,8 +881,6 @@ function newVariantBuffer(variant) {
     variant,
     sequence: 0,
     size: 0,
-    segmentStart: null,
-    segmentEnd: null,
     pendingOrd: 0,
     entries: [],
   };
@@ -890,18 +890,12 @@ function newVariantBuffer(variant) {
  * @param {string} assetId
  * @param {string} variant
  * @param {number} sequence
- * @param {number | null} segmentStart
- * @param {number | null} segmentEnd
  */
-function variantPieceMetadata(assetId, variant, sequence, segmentStart, segmentEnd) {
-  const segRange =
-    segmentStart != null && segmentEnd != null ? `${segmentStart}-${segmentEnd}` : "";
+function variantPieceMetadata(assetId, variant, sequence) {
   return validatePieceMetadata({
     FS_ASSET: assetId,
     FS_VAR: variant,
     FS_SEQ: String(sequence),
-    FS_SEGS: segRange,
-    FS_FILE: "",
   });
 }
 
@@ -915,8 +909,6 @@ function filePieceMetadata(assetId, path) {
   return validatePieceMetadata({
     FS_ASSET: assetId,
     FS_VAR: variant,
-    FS_SEQ: "",
-    FS_SEGS: "",
     FS_FILE: path,
   });
 }
@@ -2200,13 +2192,7 @@ export class BrowserFilstreamUploadSession {
       throw new StoreError(500, "Variant buffer flush requested with no pending entries");
     }
 
-    const metadata = variantPieceMetadata(
-      this.assetId,
-      buffer.variant,
-      buffer.sequence,
-      buffer.segmentStart,
-      buffer.segmentEnd,
-    );
+    const metadata = variantPieceMetadata(this.assetId, buffer.variant, buffer.sequence);
     /** @type {VariantPieceUploadJob} */
     const job = {
       variant: buffer.variant,
@@ -2226,8 +2212,6 @@ export class BrowserFilstreamUploadSession {
     buffer.pendingOrd = 0;
     buffer.entries = [];
     buffer.size = 0;
-    buffer.segmentStart = null;
-    buffer.segmentEnd = null;
     this._notifyStagingStateChanged();
     this._queueVariantPieceUpload(job);
   }
@@ -2265,14 +2249,6 @@ export class BrowserFilstreamUploadSession {
       length: bytes.byteLength,
       segmentIndex,
     });
-    if (segmentIndex != null) {
-      if (buffer.segmentStart == null || segmentIndex < buffer.segmentStart) {
-        buffer.segmentStart = segmentIndex;
-      }
-      if (buffer.segmentEnd == null || segmentIndex > buffer.segmentEnd) {
-        buffer.segmentEnd = segmentIndex;
-      }
-    }
     const db = await this._dbReady;
     const key = segmentKey(variant, buffer.sequence, ord);
     try {
@@ -2310,8 +2286,6 @@ export class BrowserFilstreamUploadSession {
     buffer.pendingOrd = 0;
     buffer.entries = [];
     buffer.size = 0;
-    buffer.segmentStart = null;
-    buffer.segmentEnd = null;
     for (const piece of this.piecesByCid.values()) {
       if (!piece.committed && piece.variant === variant) {
         piece.abandoned = true;

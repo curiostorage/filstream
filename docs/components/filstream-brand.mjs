@@ -9,8 +9,9 @@ import {
 } from "../services/filstream-config.mjs";
 import {
   readCatalogProfilePicturePieceCid,
-  resolveManifestUrl,
+  resolveProfilePieceUrl,
 } from "../services/filstream-catalog-chain.mjs";
+import { objectUrlForPieceRetrievalUrl } from "../services/ipni-piece-url.mjs";
 import { FILSTREAM_BRAND as SHARED_FILSTREAM_BRAND } from "../services/filstream-constants.mjs";
 import {
   loadWalletFromStorage,
@@ -58,14 +59,7 @@ export function filstreamAppNavLinks() {
  * @returns {Promise<string>}
  */
 async function resolveProfilePictureUrlForPieceCid(pieceCid) {
-  const cid = String(pieceCid || "").trim();
-  if (!cid) return "";
-  try {
-    const cfg = getFilstreamStoreConfig();
-    return await resolveManifestUrl(cfg.storeProviderId, cid);
-  } catch {
-    return "";
-  }
+  return resolveProfilePieceUrl(pieceCid);
 }
 
 function restoreProfileNavLabel(link) {
@@ -162,10 +156,16 @@ export async function hydrateFilstreamHeaderProfile(root, opts = {}) {
   link.setAttribute("aria-label", "My Profile");
 
   if (picUrl) {
+    let displayUrl = picUrl;
+    try {
+      displayUrl = await objectUrlForPieceRetrievalUrl(picUrl);
+    } catch {
+      displayUrl = picUrl;
+    }
     link.replaceChildren();
     const img = document.createElement("img");
     img.className = "site-header-profile-img";
-    img.src = picUrl;
+    img.src = displayUrl;
     img.alt = "";
     img.width = 32;
     img.height = 32;

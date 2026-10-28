@@ -26,9 +26,11 @@ import {
   readCatalogProfilePicturePieceCid,
   readCatalogUsername,
   resolveManifestUrl,
+  resolveProfilePieceUrl,
   setCatalogProfilePicturePieceCidWithWallet,
   setCatalogUsernameWithWallet,
 } from "../services/filstream-catalog-chain.mjs";
+import { relocatePieceRetrievalUrl } from "../services/ipni-piece-url.mjs";
 import {
   createSynapseForSession,
   publishCreatorPosterImage,
@@ -300,19 +302,58 @@ function clearCreatorFromUrl() {
   window.history.replaceState({}, "", u.href);
 }
 
+/**
+ * Read an EIP-1193 method without letting a broken wallet Proxy abort the page.
+ * Some injectors freeze `on` (eventemitter3) and wrap it on get. Chrome then
+ * throws because the trap did not return that exact non-configurable function.
+ *
+ * @param {unknown} provider
+ * @param {string} methodName
+ * @returns {Function | null}
+ */
+function readProviderMethod(provider, methodName) {
+  if (!provider || (typeof provider !== "object" && typeof provider !== "function")) {
+    return null;
+  }
+  try {
+    const fn = /** @type {Record<string, unknown>} */ (provider)[methodName];
+    if (typeof fn === "function") return fn;
+  } catch {
+    // Proxy get invariant failed. Fall through to the target's real method.
+  }
+  try {
+    const own = Object.getOwnPropertyDescriptor(provider, methodName);
+    if (typeof own?.value === "function") return own.value;
+  } catch {
+    /* ignore */
+  }
+  try {
+    let proto = Object.getPrototypeOf(provider);
+    while (proto) {
+      const desc = Object.getOwnPropertyDescriptor(proto, methodName);
+      if (typeof desc?.value === "function") return desc.value;
+      proto = Object.getPrototypeOf(proto);
+    }
+  } catch {
+    /* ignore */
+  }
+  return null;
+}
+
 async function refreshConnectedAccount() {
   if (isCreatorDisconnected()) {
     connectedAddress = null;
     return;
   }
   const eth = window.ethereum;
-  if (!eth || typeof eth.request !== "function") {
+  const request = readProviderMethod(eth, "request");
+  if (!request) {
     connectedAddress = null;
     return;
   }
   try {
     const accounts = /** @type {string[]} */ (
-      await eth.request({ method: "eth_accounts" })
+      await request.call(eth, { method: "eth_accounts" })
     );
     connectedAddress = normalizeAddressOrNull(accounts?.[0] ?? null);
   } catch {
@@ -501,15 +542,22 @@ function renderWalletFirstLanding() {
   renderBrowseCreators();
 }
 
-async function resolveProfilePictureUrlForPieceCid(pieceCid) {
-  const cid = String(pieceCid || "").trim();
-  if (!cid) return "";
+/**
+ * @param {string | null} url
+ * @returns {Promise<string>}
+ */
+async function relocatePieceUrlOrEmpty(url) {
+  const raw = String(url || "").trim();
+  if (!raw) return "";
   try {
-    const cfg = getFilstreamStoreConfig();
-    return await resolveManifestUrl(cfg.storeProviderId, cid);
+    return await relocatePieceRetrievalUrl(raw);
   } catch {
     return "";
   }
+}
+
+async function resolveProfilePictureUrlForPieceCid(pieceCid) {
+  return resolveProfilePieceUrl(pieceCid);
 }
 
 async function loadCreatorData() {
@@ -755,8 +803,8 @@ async function hydrateMoviePosters(activeEntries) {
     const wrap = root.querySelector(".viewer-catalog-card-thumb-wrap");
     try {
       const doc = await manifestDocForEntry(entry);
-      const posterUrl = posterFromManifestDoc(doc);
-      const animUrl = posterAnimFromManifestDoc(doc);
+      const posterUrl = await relocatePieceUrlOrEmpty(posterFromManifestDoc(doc) || "");
+      const animUrl = await relocatePieceUrlOrEmpty(posterAnimFromManifestDoc(doc) || "");
       if (posterUrl) img.src = posterUrl;
       if (posterUrl && animUrl && wrap instanceof HTMLElement) {
         wrap.classList.add("viewer-catalog-card-thumb-wrap--anim");
@@ -1021,14 +1069,15 @@ async function handleDeleteEntry(entryId) {
 
 async function handlePrimaryAction() {
   const provider = window.ethereum;
-  if (!provider || typeof provider.request !== "function") {
+  const request = readProviderMethod(provider, "request");
+  if (!provider || !request) {
     setStatus("Install a browser wallet extension.", "err");
     return;
   }
   if (!connectedAddress) {
     try {
       setCreatorDisconnected(false);
-      await provider.request({ method: "eth_requestAccounts" });
+      await request.call(provider, { method: "eth_requestAccounts" });
       await refreshAll();
     } catch (e) {
       setStatus(e instanceof Error ? e.message : String(e), "err");
@@ -1081,12 +1130,25 @@ function bindEvents() {
     void handleProfilePosterSelected(file);
     posterFileInput.value = "";
   });
+  subscribeAccountsChanged();
+}
+
+function subscribeAccountsChanged() {
   const eth = window.ethereum;
-  if (eth && typeof eth.on === "function") {
-    eth.on("accountsChanged", () => {
-      void refreshAll();
-    });
+  if (!eth) return;
+  const refresh = () => {
+    void refreshAll();
+  };
+  const on = readProviderMethod(eth, "on");
+  if (on) {
+    try {
+      on.call(eth, "accountsChanged", refresh);
+      return;
+    } catch (err) {
+      console.warn("Could not subscribe to wallet account changes", err);
+    }
   }
+  window.addEventListener("focus", refresh);
 }
 
 export function initCreatorPage(host) {
