@@ -1,7 +1,7 @@
 /**
  * Pipeline dependencies via esm.sh (browser bundles — no `node:` built-ins in the graph).
  * Raw Mediabunny files on jsDelivr import `node:fs/promises` and break in the browser.
- * Requires network + CSP allowing `esm.sh`.
+ * Shaka is loaded from jsDelivr when playback starts. Mediabunny still requires `esm.sh`.
  */
 import {
   ALL_FORMATS,
@@ -14,7 +14,6 @@ import {
   canEncodeAudio,
   canEncodeVideo,
 } from "https://esm.sh/mediabunny";
-import shaka from "https://esm.sh/shaka-player";
 import { USDFC_DONATE_TOKEN } from "./filstream-chain-config.mjs";
 import {
   AVC_LEVEL_TABLE as SHARED_AVC_LEVEL_TABLE,
@@ -1100,8 +1099,42 @@ export async function destroyActivePipelinePlayer() {
  * - `TRANSCODE_COMPLETE_EVENT` / `onTranscodeComplete` — when encodes finish and master + variant M3U8 are assembled (before Shaka); see {@link TranscodeCompleteDetail}. Transcode meta is held until {@link emitListingDetailsEvent}.
  * - `LISTING_DETAILS_EVENT` — fired when the UI calls {@link emitListingDetailsEvent} after Listing Details **Next**; listen on the same `filstreamEventTarget` (or pass `onListingDetails` there). Includes full listing JSON text + poster {@link File}.
  */
+const SHAKA_PLAYER_URL =
+  "https://cdn.jsdelivr.net/npm/shaka-player@4.7.11/dist/shaka-player.compiled.js";
+
+/** @type {Promise<any> | null} */
+let shakaLoad = null;
+
+function loadShakaPlayer() {
+  const existing = /** @type {any} */ (globalThis).shaka;
+  if (existing?.Player) return Promise.resolve(existing);
+  if (!shakaLoad) {
+    shakaLoad = new Promise((resolve, reject) => {
+      const script = document.createElement("script");
+      script.src = SHAKA_PLAYER_URL;
+      script.async = true;
+      script.onload = () => {
+        const loaded = /** @type {any} */ (globalThis).shaka;
+        if (!loaded?.Player) {
+          shakaLoad = null;
+          reject(new Error("Shaka Player loaded without a player"));
+          return;
+        }
+        resolve(loaded);
+      };
+      script.onerror = () => {
+        shakaLoad = null;
+        reject(new Error("Could not load the video player"));
+      };
+      document.head.appendChild(script);
+    });
+  }
+  return shakaLoad;
+}
+
 export async function runFilstreamPipeline(file, ui) {
   const { setStatus, setProgress, getVideoElement, onPlaybackReady } = ui;
+  const shaka = await loadShakaPlayer();
   pendingTranscodeMetaForListing = null;
 
   const probeInput = new Input({

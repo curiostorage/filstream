@@ -1594,6 +1594,8 @@ function getVariantResolutionLabel(p) {
 
 /** Coalesce rapid staging updates from the browser upload session (IDB + PDP store span many frames). */
 let awaitStagingUiRefreshPending = false;
+/** Step 4 re-renders often. Reset the hidden preview element once, not on every tick. */
+let awaitingVideoResetDone = false;
 function scheduleAwaitStagingUiRefresh() {
   if (awaitStagingUiRefreshPending) return;
   awaitStagingUiRefreshPending = true;
@@ -2519,13 +2521,17 @@ function renderWizard() {
     } else if (wizardState.step !== 5) {
       vid.removeAttribute("poster");
     }
-    if (
-      wizardState.step === 4 &&
-      computeWizardConvertPhase() === "awaiting"
-    ) {
-      vid.removeAttribute("src");
-      vid.removeAttribute("poster");
-      vid.load();
+    const awaitingUpload =
+      wizardState.step === 4 && computeWizardConvertPhase() === "awaiting";
+    if (awaitingUpload) {
+      if (!awaitingVideoResetDone) {
+        awaitingVideoResetDone = true;
+        vid.removeAttribute("src");
+        vid.removeAttribute("poster");
+        vid.load();
+      }
+    } else {
+      awaitingVideoResetDone = false;
     }
   });
 }
