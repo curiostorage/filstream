@@ -34,6 +34,13 @@ const pieceLoads = new Map();
 const pieceSourceUrl = new Map();
 /** @type {Map<string, string>} */
 const pieceObjectUrls = new Map();
+/**
+ * MIME type for player responses. Piece URLs have no file extension, so Shaka
+ * uses this Content-Type as the SourceBuffer type. `application/octet-stream`
+ * makes `addSourceBuffer` throw.
+ * @type {Map<string, string>}
+ */
+const pieceContentType = new Map();
 
 /**
  * @typedef {"piece" | "ipfs"} RetrievalKind
@@ -433,16 +440,73 @@ function filpieceUri(cid) {
 }
 
 /**
+ * ISO-BMFF box type at the start of an fMP4 init segment or media fragment.
+ *
+ * @param {Uint8Array} bytes
+ * @returns {string}
+ */
+function isoBmffBox(bytes) {
+  if (!bytes || bytes.byteLength < 8) return "";
+  return String.fromCharCode(bytes[4], bytes[5], bytes[6], bytes[7]);
+}
+
+/**
+ * @param {Uint8Array} bytes
+ * @returns {boolean}
+ */
+function looksLikeM3u8(bytes) {
+  const n = Math.min(bytes.byteLength, 24);
+  let prefix = "";
+  for (let i = 0; i < n; i++) prefix += String.fromCharCode(bytes[i]);
+  return prefix.trimStart().startsWith("#EXTM3U");
+}
+
+/**
+ * Content-Type to give Shaka. Prefer a sniffed media type over a generic
+ * provider header, and never report octet-stream for bytes we recognize.
+ *
+ * @param {Uint8Array} bytes
+ * @param {string} headerType
+ * @returns {string}
+ */
+function contentTypeForPiece(bytes, headerType) {
+  const raw = String(headerType || "").split(";")[0].trim().toLowerCase();
+  const box = isoBmffBox(bytes);
+  if (box === "ftyp" || box === "styp" || box === "moof" || box === "moov" || box === "mdat") {
+    if (raw === "audio/mp4" || raw === "video/mp4" || raw === "application/mp4" || raw === "video/iso.segment") {
+      return raw;
+    }
+    return "video/mp4";
+  }
+  if (looksLikeM3u8(bytes)) {
+    if (
+      raw === "application/vnd.apple.mpegurl" ||
+      raw === "application/x-mpegurl" ||
+      raw === "audio/mpegurl"
+    ) {
+      return raw;
+    }
+    return "application/vnd.apple.mpegurl";
+  }
+  if (raw && raw !== "application/octet-stream" && raw !== "binary/octet-stream") return raw;
+  return "";
+}
+
+/**
  * @param {string} url
  * @param {AbortSignal} [signal]
- * @returns {Promise<Uint8Array>}
+ * @returns {Promise<{ bytes: Uint8Array, contentType: string }>}
  */
 async function fetchFullPiece(url, signal) {
   const res = await fetch(url, { redirect: "follow", signal });
   if (res.status !== 200) {
     throw new Error(`Piece HTTP ${res.status}`);
   }
-  return new Uint8Array(await res.arrayBuffer());
+  const bytes = new Uint8Array(await res.arrayBuffer());
+  return {
+    bytes,
+    contentType: contentTypeForPiece(bytes, res.headers.get("content-type") || ""),
+  };
 }
 
 /**
@@ -473,11 +537,12 @@ export async function loadFullPieceBytes(cid, signal) {
     let lastErr = null;
     const take = async (url) => {
       if (signal?.aborted) throw new Error("Piece download aborted");
-      const bytes = await fetchFullPiece(url, signal);
-      pieceBytes.set(pieceCid, bytes);
+      const fetched = await fetchFullPiece(url, signal);
+      pieceBytes.set(pieceCid, fetched.bytes);
+      pieceContentType.set(pieceCid, fetched.contentType);
       pieceSourceUrl.set(pieceCid, url);
       positiveCache.set(pieceCid, { url, expires: Number.POSITIVE_INFINITY });
-      return bytes;
+      return fetched.bytes;
     };
     for (const url of urls) {
       try {
@@ -537,51 +602,127 @@ export async function playbackRequestUrl(original) {
 }
 
 /**
+ * @param {Uint8Array} body
+ * @param {string} contentType
+ * @param {Record<string, string>} [extra]
+ * @returns {Record<string, string>}
+ */
+function playerResponseHeaders(body, contentType, extra) {
+  /** @type {Record<string, string>} */
+  const headers = {
+    "content-length": String(body.byteLength),
+    "accept-ranges": "bytes",
+  };
+  if (contentType) headers["content-type"] = contentType;
+  if (extra) Object.assign(headers, extra);
+  return headers;
+}
+
+/**
  * @param {string} rangeHeader
  * @param {Uint8Array} bytes
+ * @param {string} contentType
  * @returns {{ data: ArrayBuffer, status: number, headers: Record<string, string> }}
  */
-function slicePieceBytes(bytes, rangeHeader) {
+function slicePieceBytes(bytes, rangeHeader, contentType) {
   const total = bytes.byteLength;
   const range = String(rangeHeader || "").trim();
   const match = /^bytes=(\d+)-(\d*)$/i.exec(range);
-  if (!match) {
+  const whole = () => {
     const copy = new Uint8Array(bytes);
     return {
       data: copy.buffer,
       status: 200,
-      headers: {
-        "content-type": "application/octet-stream",
-        "content-length": String(total),
-        "accept-ranges": "bytes",
-      },
+      headers: playerResponseHeaders(copy, contentType),
     };
-  }
+  };
+  if (!match) return whole();
   const start = Number(match[1]);
   const end = match[2] === "" ? total - 1 : Math.min(Number(match[2]), total - 1);
-  if (!Number.isFinite(start) || start < 0 || start >= total || end < start) {
-    const copy = new Uint8Array(bytes);
-    return {
-      data: copy.buffer,
-      status: 200,
-      headers: {
-        "content-type": "application/octet-stream",
-        "content-length": String(total),
-        "accept-ranges": "bytes",
-      },
-    };
-  }
+  if (!Number.isFinite(start) || start < 0 || start >= total || end < start) return whole();
   const copy = bytes.slice(start, end + 1);
   return {
     data: copy.buffer,
     status: 206,
-    headers: {
-      "content-type": "application/octet-stream",
-      "content-length": String(copy.byteLength),
+    headers: playerResponseHeaders(copy, contentType, {
       "content-range": `bytes ${start}-${end}/${total}`,
-      "accept-ranges": "bytes",
-    },
+    }),
   };
+}
+
+/**
+ * @param {Uint8Array} bytes
+ * @returns {string}
+ */
+function latin1(bytes) {
+  let out = "";
+  for (let i = 0; i < bytes.length; i++) out += String.fromCharCode(bytes[i]);
+  return out;
+}
+
+/**
+ * Some masters list AAC even when every init segment is video-only. Chrome then
+ * refuses the init with "misses expected aac track". Drop mp4a from CODECS when
+ * the first rendition's init has no audio handler.
+ *
+ * @param {Uint8Array} bytes
+ * @returns {Promise<Uint8Array>}
+ */
+async function masterPlaylistForPlayer(bytes) {
+  if (!looksLikeM3u8(bytes)) return bytes;
+  const text = new TextDecoder().decode(bytes);
+  if (!text.includes("#EXT-X-STREAM-INF") || !/CODECS="[^"]*mp4a/i.test(text)) return bytes;
+  const variantUrl = text
+    .split("\n")
+    .map((line) => line.trim())
+    .find((line) => line.startsWith("https://") || line.startsWith("http://"));
+  if (!variantUrl) return bytes;
+  let hasAudio = true;
+  try {
+    hasAudio = await variantInitHasAudio(variantUrl);
+  } catch {
+    return bytes;
+  }
+  if (hasAudio) return bytes;
+  const rewritten = text.replace(/CODECS="([^"]*)"/gi, (_match, codecs) => {
+    const next = String(codecs)
+      .split(",")
+      .map((part) => part.trim())
+      .filter((part) => part && !part.toLowerCase().startsWith("mp4a"))
+      .join(",");
+    return `CODECS="${next}"`;
+  });
+  return new TextEncoder().encode(rewritten);
+}
+
+/**
+ * @param {string} variantUrl
+ * @returns {Promise<boolean>}
+ */
+async function variantInitHasAudio(variantUrl) {
+  const playlistRes = await fetch(variantUrl, { redirect: "follow" });
+  if (!playlistRes.ok) throw new Error(`Variant playlist HTTP ${playlistRes.status}`);
+  const playlist = await playlistRes.text();
+  const mapLine = playlist
+    .split("\n")
+    .map((line) => line.trim())
+    .find((line) => line.startsWith("#EXT-X-MAP:"));
+  if (!mapLine) return true;
+  const uri = /URI="([^"]+)"/.exec(mapLine)?.[1] || "";
+  if (!uri) return true;
+  const range = /BYTERANGE="(\d+)@(\d+)"/.exec(mapLine);
+  /** @type {Record<string, string>} */
+  const headers = {};
+  if (range) {
+    const length = Number(range[1]);
+    const offset = Number(range[2]);
+    if (length > 0) headers.Range = `bytes=${offset}-${offset + length - 1}`;
+  }
+  const initRes = await fetch(uri, { redirect: "follow", headers });
+  if (!(initRes.ok || initRes.status === 206)) throw new Error(`Init HTTP ${initRes.status}`);
+  const initBytes = new Uint8Array(await initRes.arrayBuffer());
+  const packed = latin1(initBytes);
+  return packed.includes("soun") || packed.includes("mp4a");
 }
 
 /**
@@ -591,7 +732,19 @@ function slicePieceBytes(bytes, rangeHeader) {
  */
 export async function readPieceForPlayer(cid, rangeHeader, signal) {
   const bytes = await loadFullPieceBytes(cid, signal);
-  return slicePieceBytes(bytes, rangeHeader || "");
+  const pieceCid = String(cid || "").trim();
+  const contentType = pieceContentType.get(pieceCid) || contentTypeForPiece(bytes, "");
+  const sliced = slicePieceBytes(bytes, rangeHeader || "", contentType);
+  if (sliced.status !== 200 || rangeHeader) return sliced;
+  const original = new Uint8Array(sliced.data);
+  const playlist = await masterPlaylistForPlayer(original);
+  if (playlist === original) return sliced;
+  const copy = new Uint8Array(playlist);
+  return {
+    data: copy.buffer,
+    status: 200,
+    headers: playerResponseHeaders(copy, sliced.headers["content-type"] || contentType),
+  };
 }
 
 /**
@@ -609,7 +762,10 @@ export async function objectUrlForPieceRetrievalUrl(url) {
   if (existing) return existing;
   if (!pieceSourceUrl.has(cid)) pieceSourceUrl.set(cid, raw);
   const bytes = await loadFullPieceBytes(cid);
-  const created = URL.createObjectURL(new Blob([bytes]));
+  const contentType = pieceContentType.get(cid) || "";
+  const created = URL.createObjectURL(
+    contentType ? new Blob([bytes], { type: contentType }) : new Blob([bytes]),
+  );
   pieceObjectUrls.set(cid, created);
   return created;
 }
